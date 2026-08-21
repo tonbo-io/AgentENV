@@ -24,3 +24,9 @@ grep -Fq '/mnt/user/run' <<<"$pre_pivot_dirs"
 # shellcheck disable=SC2016
 grep -Fq '$BB mkdir -p /var/run /tmp /var/log/agentenv/envd /run/sv/envd/log' \
   "${repo_root}/tools-image/pivot-init"
+
+# A server built from this fork must download the drive that contains the
+# script above, not the identically versioned upstream artifact.
+grep -Fq 'version = "0.1.0-tonbo.1"' "${repo_root}/config/deps_manifest.toml"
+grep -Fq 'url = "ghcr.io/tonbo-io/agentenv-tools:{version}"' \
+  "${repo_root}/config/deps_manifest.toml"
