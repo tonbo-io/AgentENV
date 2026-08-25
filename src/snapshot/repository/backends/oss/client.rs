@@ -10,7 +10,8 @@ use object_store_operator::{
     CredentialSource, ObjectStoreOperatorConfig, ObjectStoreOperatorError, OperatorWithCredential,
 };
 use opendal::{Error as OpenDalError, ErrorKind as OpenDalErrorKind, Operator};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use overlaybd::backend::oss::upload_file_streaming;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::info;
 use url::Url;
@@ -245,7 +246,16 @@ impl OssClient {
             self.run_with_operator(|operator| {
                 let oss_key = oss_key.clone();
                 let path = path.clone();
-                async move { upload_file_to_operator(&operator, &oss_key, &path, size).await }
+                async move {
+                    upload_file_streaming(
+                        &operator,
+                        &oss_key,
+                        &path,
+                        upload_chunk_size(size),
+                        UPLOAD_CONCURRENCY,
+                    )
+                    .await
+                }
             })
             .await
             .with_context(|| format!("oss put file '{key}'"))?;
@@ -434,36 +444,6 @@ async fn write_bytes_to_operator(
     data: Bytes,
 ) -> opendal::Result<()> {
     operator.write(key, data).await.map(|_| ())
-}
-
-async fn upload_file_to_operator(
-    operator: &Operator,
-    key: &str,
-    path: &Path,
-    size: u64,
-) -> opendal::Result<()> {
-    let chunk_size = upload_chunk_size(size);
-    let mut writer = operator
-        .writer_with(key)
-        .chunk(chunk_size)
-        .concurrent(UPLOAD_CONCURRENCY)
-        .await?;
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|err| io_error_to_opendal(err, "open upload source file"))?;
-    let mut buf = vec![0_u8; chunk_size];
-    loop {
-        let read = file
-            .read(&mut buf)
-            .await
-            .map_err(|err| io_error_to_opendal(err, "read upload source file"))?;
-        if read == 0 {
-            break;
-        }
-        writer.write(buf[..read].to_vec()).await?;
-    }
-    writer.close().await?;
-    Ok(())
 }
 
 fn upload_chunk_size(size: u64) -> usize {
