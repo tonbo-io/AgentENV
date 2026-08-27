@@ -656,6 +656,10 @@ components:
         name:
           type: string
           description: Optional name for the snapshot template. If a snapshot template with this name already exists, a new build will be assigned to the existing template instead of creating a new one.
+        pauseAfterCapture:
+          type: boolean
+          default: false
+          description: Keep the source sandbox paused before publishing and returning the committed snapshot. If publication fails, AgentENV attempts to resume the source so the request can be retried.
 
     SandboxForkRequest:
       type: object
