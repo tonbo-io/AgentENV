@@ -1172,6 +1172,31 @@ impl Sandboxes<()> for ApiImpl {
             }
         };
 
+        let pause_after_capture = body.pause_after_capture.unwrap_or(false);
+        if pause_after_capture {
+            match timer
+                .time(
+                    "pause_after_capture",
+                    self.orchestrator.pause_sandbox(sandbox_id),
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(OrchestratorError::SandboxNotFound(id)) => {
+                    return Ok(SandboxesSandboxIdSnapshotsPostResponse::Status404_NotFound(
+                        sandbox_not_found(id),
+                    ));
+                }
+                Err(err) => {
+                    return Ok(
+                        SandboxesSandboxIdSnapshotsPostResponse::Status500_ServerError(
+                            Self::internal_error(&err),
+                        ),
+                    );
+                }
+            }
+        }
+
         let published = match timer
             .time(
                 "publish",
@@ -1197,6 +1222,15 @@ impl Sandboxes<()> for ApiImpl {
         {
             Ok(snapshot) => snapshot,
             Err(err) => {
+                if pause_after_capture {
+                    if let Err(resume_err) = self
+                        .orchestrator
+                        .resume_sandbox(sandbox_id, NewTimeout::UseExisting)
+                        .await
+                    {
+                        warn!(error = ?resume_err, %sandbox_id, "failed to resume source sandbox after snapshot publication failure");
+                    }
+                }
                 let error =
                     Self::bad_request_for_repository_build_error(&err).unwrap_or_else(|| {
                         warn!(error = ?err, %sandbox_id, "failed to publish captured snapshot");
@@ -1418,6 +1452,18 @@ impl Sandboxes<()> for ApiImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_request_decodes_pause_after_capture() {
+        let request: models::SandboxSnapshotRequest = serde_json::from_value(serde_json::json!({
+            "name": "runtime-transfer",
+            "pauseAfterCapture": true
+        }))
+        .expect("snapshot request should decode");
+
+        assert_eq!(request.name.as_deref(), Some("runtime-transfer"));
+        assert_eq!(request.pause_after_capture, Some(true));
+    }
 
     #[test]
     fn parse_metadata_filter_with_none_returns_none() {

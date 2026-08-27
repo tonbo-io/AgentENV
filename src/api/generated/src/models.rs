@@ -6280,12 +6280,20 @@ pub struct SandboxSnapshotRequest {
     #[validate(custom(function = "check_xss_string"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// Keep the source sandbox paused before publishing and returning the committed snapshot. If publication fails, AgentENV attempts to resume the source so the request can be retried.
+    #[serde(rename = "pauseAfterCapture")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_after_capture: Option<bool>,
 }
 
 impl SandboxSnapshotRequest {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> SandboxSnapshotRequest {
-        SandboxSnapshotRequest { name: None }
+        SandboxSnapshotRequest {
+            name: None,
+            pause_after_capture: Some(false),
+        }
     }
 }
 
@@ -6298,6 +6306,15 @@ impl std::fmt::Display for SandboxSnapshotRequest {
             self.name
                 .as_ref()
                 .map(|name| ["name".to_string(), name.to_string()].join(",")),
+            self.pause_after_capture
+                .as_ref()
+                .map(|pause_after_capture| {
+                    [
+                        "pauseAfterCapture".to_string(),
+                        pause_after_capture.to_string(),
+                    ]
+                    .join(",")
+                }),
         ];
 
         write!(
@@ -6320,6 +6337,7 @@ impl std::str::FromStr for SandboxSnapshotRequest {
         #[allow(dead_code)]
         struct IntermediateRep {
             pub name: Vec<String>,
+            pub pause_after_capture: Vec<bool>,
         }
 
         let mut intermediate_rep = IntermediateRep::default();
@@ -6345,6 +6363,10 @@ impl std::str::FromStr for SandboxSnapshotRequest {
                     "name" => intermediate_rep.name.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
+                    #[allow(clippy::redundant_clone)]
+                    "pauseAfterCapture" => intermediate_rep.pause_after_capture.push(
+                        <bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
                     _ => {
                         return std::result::Result::Err(
                             "Unexpected key while parsing SandboxSnapshotRequest".to_string(),
@@ -6360,6 +6382,7 @@ impl std::str::FromStr for SandboxSnapshotRequest {
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxSnapshotRequest {
             name: intermediate_rep.name.into_iter().next(),
+            pause_after_capture: intermediate_rep.pause_after_capture.into_iter().next(),
         })
     }
 }
