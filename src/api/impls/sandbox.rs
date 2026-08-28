@@ -115,6 +115,7 @@ impl From<SandboxMetadata> for models::ListedSandbox {
             sandbox_id: m.id.into(),
             client_id: "".to_string(), // Deprecated field, only reserved for E2B Python SDK.
             started_at: started_at(m.created_at),
+            runtime_started_at: started_at(m.runtime_started_at),
             end_at: end_at(m.expires_at),
             cpu_count: m.resources.cpu_count,
             memory_mb: m.resources.memory_mib,
@@ -134,6 +135,7 @@ impl From<SandboxMetadata> for models::Sandbox {
             alias: m.snapshot_alias,
             client_id: "".to_string(), // Deprecated field, only reserved for E2B Python SDK.
             envd_version: m.runtime_versions.envd_version.clone(),
+            runtime_started_at: started_at(m.runtime_started_at),
             envd_access_token: None,
             traffic_access_token: None,
             domain: None,
@@ -198,6 +200,7 @@ impl From<SandboxMetadata> for models::SandboxDetail {
             sandbox_id: m.id.into(),
             client_id: "".to_string(), // Deprecated field, only reserved for E2B Python SDK.
             started_at: started_at(m.created_at),
+            runtime_started_at: started_at(m.runtime_started_at),
             end_at: end_at(m.expires_at),
             envd_version: m.runtime_versions.envd_version.clone(),
             envd_access_token: None,
@@ -1452,6 +1455,25 @@ impl Sandboxes<()> for ApiImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn sandbox_response_exposes_the_current_runtime_activation_boundary() {
+        let runtime_started_at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let model = models::Sandbox::from(SandboxMetadata {
+            runtime_started_at,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            model.runtime_started_at,
+            chrono::DateTime::<chrono::Utc>::from(runtime_started_at)
+        );
+        assert_eq!(
+            serde_json::to_value(model).unwrap()["runtimeStartedAt"],
+            "2023-11-14T22:13:20Z"
+        );
+    }
 
     #[test]
     fn snapshot_request_decodes_pause_after_capture() {

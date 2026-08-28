@@ -1822,6 +1822,10 @@ pub struct ListedSandbox {
     #[serde(rename = "startedAt")]
     pub started_at: chrono::DateTime<chrono::Utc>,
 
+    /// Immutable start boundary of the current running runtime activation. Changes after a successful pause and resume.
+    #[serde(rename = "runtimeStartedAt")]
+    pub runtime_started_at: chrono::DateTime<chrono::Utc>,
+
     /// Time when the sandbox will expire
     #[serde(rename = "endAt")]
     pub end_at: chrono::DateTime<chrono::Utc>,
@@ -1863,6 +1867,7 @@ impl ListedSandbox {
         sandbox_id: String,
         client_id: String,
         started_at: chrono::DateTime<chrono::Utc>,
+        runtime_started_at: chrono::DateTime<chrono::Utc>,
         end_at: chrono::DateTime<chrono::Utc>,
         cpu_count: u32,
         memory_mb: u32,
@@ -1876,6 +1881,7 @@ impl ListedSandbox {
             sandbox_id,
             client_id,
             started_at,
+            runtime_started_at,
             end_at,
             cpu_count,
             memory_mb,
@@ -1903,6 +1909,8 @@ impl std::fmt::Display for ListedSandbox {
             Some("clientID".to_string()),
             Some(self.client_id.to_string()),
             // Skipping startedAt in query parameter serialization
+
+            // Skipping runtimeStartedAt in query parameter serialization
 
             // Skipping endAt in query parameter serialization
             Some("cpuCount".to_string()),
@@ -1942,6 +1950,7 @@ impl std::str::FromStr for ListedSandbox {
             pub sandbox_id: Vec<String>,
             pub client_id: Vec<String>,
             pub started_at: Vec<chrono::DateTime<chrono::Utc>>,
+            pub runtime_started_at: Vec<chrono::DateTime<chrono::Utc>>,
             pub end_at: Vec<chrono::DateTime<chrono::Utc>>,
             pub cpu_count: Vec<u32>,
             pub memory_mb: Vec<u32>,
@@ -1988,6 +1997,11 @@ impl std::str::FromStr for ListedSandbox {
                     ),
                     #[allow(clippy::redundant_clone)]
                     "startedAt" => intermediate_rep.started_at.push(
+                        <chrono::DateTime<chrono::Utc> as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "runtimeStartedAt" => intermediate_rep.runtime_started_at.push(
                         <chrono::DateTime<chrono::Utc> as std::str::FromStr>::from_str(val)
                             .map_err(|x| x.to_string())?,
                     ),
@@ -2058,6 +2072,11 @@ impl std::str::FromStr for ListedSandbox {
                 .into_iter()
                 .next()
                 .ok_or_else(|| "startedAt missing in ListedSandbox".to_string())?,
+            runtime_started_at: intermediate_rep
+                .runtime_started_at
+                .into_iter()
+                .next()
+                .ok_or_else(|| "runtimeStartedAt missing in ListedSandbox".to_string())?,
             end_at: intermediate_rep
                 .end_at
                 .into_iter()
@@ -4402,6 +4421,10 @@ pub struct Sandbox {
     #[validate(custom(function = "check_xss_string"))]
     pub envd_version: String,
 
+    /// Immutable start boundary of the current running runtime activation. Changes after a successful pause and resume.
+    #[serde(rename = "runtimeStartedAt")]
+    pub runtime_started_at: chrono::DateTime<chrono::Utc>,
+
     /// Access token used for envd communication
     #[serde(rename = "envdAccessToken")]
     #[validate(custom(function = "check_xss_string"))]
@@ -4430,6 +4453,7 @@ impl Sandbox {
         sandbox_id: String,
         client_id: String,
         envd_version: String,
+        runtime_started_at: chrono::DateTime<chrono::Utc>,
     ) -> Sandbox {
         Sandbox {
             template_id,
@@ -4437,6 +4461,7 @@ impl Sandbox {
             alias: None,
             client_id,
             envd_version,
+            runtime_started_at,
             envd_access_token: None,
             traffic_access_token: None,
             domain: None,
@@ -4461,6 +4486,7 @@ impl std::fmt::Display for Sandbox {
             Some(self.client_id.to_string()),
             Some("envdVersion".to_string()),
             Some(self.envd_version.to_string()),
+            // Skipping runtimeStartedAt in query parameter serialization
             self.envd_access_token.as_ref().map(|envd_access_token| {
                 ["envdAccessToken".to_string(), envd_access_token.to_string()].join(",")
             }),
@@ -4510,6 +4536,7 @@ impl std::str::FromStr for Sandbox {
             pub alias: Vec<String>,
             pub client_id: Vec<String>,
             pub envd_version: Vec<String>,
+            pub runtime_started_at: Vec<chrono::DateTime<chrono::Utc>>,
             pub envd_access_token: Vec<String>,
             pub traffic_access_token: Vec<String>,
             pub domain: Vec<String>,
@@ -4553,6 +4580,11 @@ impl std::str::FromStr for Sandbox {
                     #[allow(clippy::redundant_clone)]
                     "envdVersion" => intermediate_rep.envd_version.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "runtimeStartedAt" => intermediate_rep.runtime_started_at.push(
+                        <chrono::DateTime<chrono::Utc> as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
                     ),
                     #[allow(clippy::redundant_clone)]
                     "envdAccessToken" => intermediate_rep.envd_access_token.push(
@@ -4605,6 +4637,11 @@ impl std::str::FromStr for Sandbox {
                 .into_iter()
                 .next()
                 .ok_or_else(|| "envdVersion missing in Sandbox".to_string())?,
+            runtime_started_at: intermediate_rep
+                .runtime_started_at
+                .into_iter()
+                .next()
+                .ok_or_else(|| "runtimeStartedAt missing in Sandbox".to_string())?,
             envd_access_token: intermediate_rep.envd_access_token.into_iter().next(),
             traffic_access_token: std::result::Result::Err(
                 "Nullable types not supported in Sandbox".to_string(),
@@ -4856,6 +4893,10 @@ pub struct SandboxDetail {
     #[serde(rename = "startedAt")]
     pub started_at: chrono::DateTime<chrono::Utc>,
 
+    /// Immutable start boundary of the current running runtime activation. Changes after a successful pause and resume.
+    #[serde(rename = "runtimeStartedAt")]
+    pub runtime_started_at: chrono::DateTime<chrono::Utc>,
+
     /// Time when the sandbox will expire
     #[serde(rename = "endAt")]
     pub end_at: chrono::DateTime<chrono::Utc>,
@@ -4927,6 +4968,7 @@ impl SandboxDetail {
         sandbox_id: String,
         client_id: String,
         started_at: chrono::DateTime<chrono::Utc>,
+        runtime_started_at: chrono::DateTime<chrono::Utc>,
         end_at: chrono::DateTime<chrono::Utc>,
         envd_version: String,
         cpu_count: u32,
@@ -4940,6 +4982,7 @@ impl SandboxDetail {
             sandbox_id,
             client_id,
             started_at,
+            runtime_started_at,
             end_at,
             envd_version,
             envd_access_token: None,
@@ -4972,6 +5015,8 @@ impl std::fmt::Display for SandboxDetail {
             Some("clientID".to_string()),
             Some(self.client_id.to_string()),
             // Skipping startedAt in query parameter serialization
+
+            // Skipping runtimeStartedAt in query parameter serialization
 
             // Skipping endAt in query parameter serialization
             Some("envdVersion".to_string()),
@@ -5038,6 +5083,7 @@ impl std::str::FromStr for SandboxDetail {
             pub sandbox_id: Vec<String>,
             pub client_id: Vec<String>,
             pub started_at: Vec<chrono::DateTime<chrono::Utc>>,
+            pub runtime_started_at: Vec<chrono::DateTime<chrono::Utc>>,
             pub end_at: Vec<chrono::DateTime<chrono::Utc>>,
             pub envd_version: Vec<String>,
             pub envd_access_token: Vec<String>,
@@ -5089,6 +5135,11 @@ impl std::str::FromStr for SandboxDetail {
                     ),
                     #[allow(clippy::redundant_clone)]
                     "startedAt" => intermediate_rep.started_at.push(
+                        <chrono::DateTime<chrono::Utc> as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "runtimeStartedAt" => intermediate_rep.runtime_started_at.push(
                         <chrono::DateTime<chrono::Utc> as std::str::FromStr>::from_str(val)
                             .map_err(|x| x.to_string())?,
                     ),
@@ -5181,6 +5232,11 @@ impl std::str::FromStr for SandboxDetail {
                 .into_iter()
                 .next()
                 .ok_or_else(|| "startedAt missing in SandboxDetail".to_string())?,
+            runtime_started_at: intermediate_rep
+                .runtime_started_at
+                .into_iter()
+                .next()
+                .ok_or_else(|| "runtimeStartedAt missing in SandboxDetail".to_string())?,
             end_at: intermediate_rep
                 .end_at
                 .into_iter()

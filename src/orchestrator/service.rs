@@ -645,6 +645,7 @@ where
             metadata.id = sandbox_id;
             metadata.state = SandboxState::Running;
             metadata.created_at = now;
+            metadata.runtime_started_at = now;
             metadata.paused_state = None;
             metadata.update_timeout(new_timeout);
 
@@ -2002,6 +2003,11 @@ where
                 .await;
             return Err(err);
         }
+        // Record the boundary before asking the backend to start. The guest
+        // cannot execute before this instant, so downstream metering can use
+        // it without leaving an unbilled window. It is published only after
+        // the runtime is Ready and the Running transition succeeds.
+        let runtime_started_at = SystemTime::now();
         if let Err(source) = sandbox.start_nowait().await {
             warn!(error = %format_args!("{source:#}"), "failed to start sandbox");
             if let Err(stop_err) = sandbox.stop().await {
@@ -2097,6 +2103,7 @@ where
                 move |metadata| {
                     metadata.resources = runtime_resources;
                     metadata.state = SandboxState::Running;
+                    metadata.runtime_started_at = runtime_started_at;
                     metadata.update_timeout(launch_timeout);
                 },
             )
