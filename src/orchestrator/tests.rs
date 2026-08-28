@@ -1439,7 +1439,7 @@ async fn join_concurrent_resume_maps_unexpected_state() {
 }
 
 #[tokio::test]
-async fn pause_resume_transitions_and_is_idempotent() -> Result<()> {
+async fn pause_resume_runtime_activation_transitions_and_is_idempotent() -> Result<()> {
     setup();
     let orchestrator = make_orchestrator().await;
     let case_id = Uuid::now_v7().to_string();
@@ -1447,6 +1447,7 @@ async fn pause_resume_transitions_and_is_idempotent() -> Result<()> {
         .create_sandbox(create_request(Some(60), &[("case_id", case_id.as_str())]))
         .await?;
     let sandbox_id = created.id;
+    let created_runtime_started_at = created.runtime_started_at;
     assert_proxy_ready(&orchestrator, &sandbox_id).await?;
     assert_metrics_values(
         &orchestrator,
@@ -1497,11 +1498,14 @@ async fn pause_resume_transitions_and_is_idempotent() -> Result<()> {
         }
     ));
 
+    sleep(Duration::from_millis(1)).await;
     let resumed_metadata = orchestrator
         .resume_sandbox(sandbox_id, NewTimeout::Set(Duration::from_secs(90)))
         .await?;
     assert_eq!(resumed_metadata.state, SandboxState::Running);
     assert_eq!(resumed_metadata.timeout, Some(Duration::from_secs(90)));
+    assert!(resumed_metadata.runtime_started_at > created_runtime_started_at);
+    let resumed_runtime_started_at = resumed_metadata.runtime_started_at;
 
     let resumed = orchestrator
         .get_sandbox(&sandbox_id)
@@ -1526,6 +1530,10 @@ async fn pause_resume_transitions_and_is_idempotent() -> Result<()> {
         .await?;
     assert_eq!(resumed_metadata.state, SandboxState::Running);
     assert_eq!(resumed_metadata.timeout, Some(Duration::from_secs(120)));
+    assert_eq!(
+        resumed_metadata.runtime_started_at, resumed_runtime_started_at,
+        "idempotent resume must retain the current activation boundary"
+    );
 
     orchestrator.delete_sandbox(sandbox_id).await?;
     assert!(orchestrator.get_sandbox(&sandbox_id).await?.is_none());

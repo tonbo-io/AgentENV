@@ -34,6 +34,11 @@ pub struct SandboxMetadata {
     pub snapshot_alias: Option<String>,
     pub state: SandboxState,
     pub created_at: SystemTime,
+    /// Conservative start boundary for the current running VM activation.
+    /// This changes only when a fresh runtime or a paused runtime is started,
+    /// and remains stable across idempotent reads and resume retries.
+    #[serde(default = "SystemTime::now")]
+    pub runtime_started_at: SystemTime,
     pub timeout: Option<Duration>,
     pub timeout_action: SandboxTimeoutAction,
     pub expires_at: Option<SystemTime>,
@@ -72,6 +77,7 @@ impl Default for SandboxMetadata {
             snapshot_alias: None,
             state: SandboxState::Creating,
             created_at: SystemTime::now(),
+            runtime_started_at: SystemTime::now(),
             timeout: None,
             timeout_action: SandboxTimeoutAction::Pause,
             expires_at: None,

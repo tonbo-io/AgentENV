@@ -376,6 +376,7 @@ components:
         - sandboxID
         - clientID
         - envdVersion
+        - runtimeStartedAt
       properties:
         templateID:
           type: string
@@ -392,6 +393,10 @@ components:
           description: Identifier of the client
         envdVersion:
           $ref: "#/components/schemas/EnvdVersion"
+        runtimeStartedAt:
+          type: string
+          format: date-time
+          description: Immutable start boundary of the current running runtime activation. Changes after a successful pause and resume.
         envdAccessToken:
           type: string
           description: Access token used for envd communication
@@ -410,6 +415,7 @@ components:
         - sandboxID
         - clientID
         - startedAt
+        - runtimeStartedAt
         - cpuCount
         - memoryMB
         - diskSizeMB
@@ -434,6 +440,10 @@ components:
           type: string
           format: date-time
           description: Time when the sandbox was started
+        runtimeStartedAt:
+          type: string
+          format: date-time
+          description: Immutable start boundary of the current running runtime activation. Changes after a successful pause and resume.
         endAt:
           type: string
           format: date-time
@@ -472,6 +482,7 @@ components:
         - sandboxID
         - clientID
         - startedAt
+        - runtimeStartedAt
         - cpuCount
         - memoryMB
         - diskSizeMB
@@ -496,6 +507,10 @@ components:
           type: string
           format: date-time
           description: Time when the sandbox was started
+        runtimeStartedAt:
+          type: string
+          format: date-time
+          description: Immutable start boundary of the current running runtime activation. Changes after a successful pause and resume.
         endAt:
           type: string
           format: date-time
