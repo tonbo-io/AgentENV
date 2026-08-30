@@ -15,13 +15,19 @@ async fn assert_guest_boot_fails_closed(
     let serial_log = sandbox.firecracker_stdout_path();
     let result = sandbox.start().await;
     assert!(result.is_err(), "guest unexpectedly started: {result:?}");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let output = std::fs::read_to_string(&serial_log)?;
+    let mut output = String::new();
+    for _ in 0..50 {
+        output = std::fs::read_to_string(&serial_log)?;
+        if output.contains(expected_serial_log) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = sandbox.stop().await;
     assert!(
         output.contains(expected_serial_log),
         "serial log omitted {expected_serial_log:?}: {output}"
     );
-    let _ = sandbox.stop().await;
     Ok(())
 }
 
