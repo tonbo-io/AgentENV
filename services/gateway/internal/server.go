@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,8 @@ import (
 	schedulerv1 "agentenv/services/api/proto"
 
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -58,6 +61,7 @@ type Server struct {
 	scheduler          schedulerv1.SchedulerClient
 	queryOnlyScheduler schedulerv1.SchedulerClient
 	httpClient         *http.Client
+	proxyTransport     http.RoundTripper
 	apiKey             []byte
 	requestTimeout     time.Duration
 	maxRespSize        int64
@@ -87,6 +91,7 @@ func NewServer(logger *zap.Logger, schedulerClient schedulerv1.SchedulerClient, 
 		scheduler:           schedulerClient,
 		queryOnlyScheduler:  queryOnlyScheduler,
 		httpClient:          &http.Client{},
+		proxyTransport:      newProtocolTransport(),
 		requestTimeout:      options.RequestTimeout,
 		maxRespSize:         options.MaxResponseSize,
 		apiKey:              []byte(options.APIKey),
@@ -141,7 +146,31 @@ func (s *Server) Handler() http.Handler {
 		}
 		s.handleProxy(w, r)
 	})
-	return s.instrumentGatewayHTTP(s.authenticate(core))
+	return h2c.NewHandler(s.instrumentGatewayHTTP(s.authenticate(core)), &http2.Server{})
+}
+
+type protocolTransport struct {
+	http1 *http.Transport
+	http2 *http2.Transport
+}
+
+func newProtocolTransport() http.RoundTripper {
+	http1 := http.DefaultTransport.(*http.Transport).Clone()
+	http1.DisableCompression = true
+	http2 := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		},
+	}
+	return &protocolTransport{http1: http1, http2: http2}
+}
+
+func (transport *protocolTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.ProtoMajor == 2 {
+		return transport.http2.RoundTrip(request)
+	}
+	return transport.http1.RoundTrip(request)
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, value any) {
@@ -271,10 +300,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	upstreamCtx, cancelUpstream := requestContextForProxy(r, routingCtx, longLived)
 	defer cancelUpstream()
+	proxyRequest := r.Clone(upstreamCtx)
+	// Request.Clone deep-copies Trailer before the HTTP/2 server populates its
+	// final values at body EOF. Keep the live trailer map attached to the body
+	// so the reverse proxy can publish those values to the upstream request.
+	proxyRequest.Trailer = r.Trailer
 
 	s.proxyRequest(
 		w,
-		r.Clone(upstreamCtx),
+		proxyRequest,
 		r.Context(),
 		upstreamURL,
 		node,
@@ -310,6 +344,31 @@ type proxyRequestOptions struct {
 	flushImmediately bool
 }
 
+func preserveRequestTrailers(request *httputil.ProxyRequest) {
+	if request.Out.Body == nil || (request.In.ProtoMajor != 2 && len(request.In.Trailer) == 0) {
+		return
+	}
+	request.Out.Trailer = make(http.Header, len(request.In.Trailer))
+	for name := range request.In.Trailer {
+		request.Out.Trailer[name] = nil
+	}
+	sourceBody := request.Out.Body
+	sourceTrailers := request.In.Trailer
+	targetTrailers := request.Out.Trailer
+	pipeReader, pipeWriter := io.Pipe()
+	request.Out.Body = pipeReader
+	go func() {
+		_, copyErr := io.Copy(pipeWriter, sourceBody)
+		if copyErr == nil {
+			for name, values := range sourceTrailers {
+				targetTrailers[name] = append([]string(nil), values...)
+			}
+		}
+		_ = sourceBody.Close()
+		_ = pipeWriter.CloseWithError(copyErr)
+	}()
+}
+
 func (s *Server) proxyRequest(
 	w http.ResponseWriter,
 	proxyReq *http.Request,
@@ -325,7 +384,9 @@ func (s *Server) proxyRequest(
 	}
 
 	proxy := &httputil.ReverseProxy{
+		Transport: s.proxyTransport,
 		Rewrite: func(req *httputil.ProxyRequest) {
+			preserveRequestTrailers(req)
 			req.Out.URL.Scheme = upstreamURL.Scheme
 			req.Out.URL.Host = upstreamURL.Host
 			req.Out.URL.Path = upstreamURL.Path
