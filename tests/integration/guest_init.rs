@@ -141,7 +141,11 @@ async fn missing_declared_drive_prevents_envd_start() -> Result<()> {
     common::setup().await;
     tokio::time::timeout(TEST_TIMEOUT, async {
         let mut sandbox_config = common::default_sandbox_config()?;
-        sandbox_config.boot_args = Some("agentenv_drives=vdc:/workspace".to_owned());
+        let boot_args = sandbox_config
+            .boot_args
+            .take()
+            .expect("default sandbox boot arguments");
+        sandbox_config.boot_args = Some(format!("{boot_args} agentenv_drives=vdc:/workspace"));
         assert_guest_boot_fails_closed(sandbox_config, "bootstrap failed: mount /dev/vdc").await
     })
     .await
