@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-0b68ea43.js";
+            window.path_to_searchindex_js = "../searchindex-2304a493.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-5437f69c.js"></script>
@@ -303,6 +303,7 @@ export E2B_API_KEY=${AENV_API_KEY}
 <tr><td><code>SCHEDULER_METRICS_LISTEN_ADDR</code></td><td><code>:9101</code></td><td>Prometheus metrics listen address</td></tr>
 <tr><td><code>SCHEDULER_STRATEGY</code></td><td><code>round_robin</code></td><td>Node selection strategy for new sandboxes: <code>round_robin</code> or <code>random</code></td></tr>
 <tr><td><code>SCHEDULER_REDIS_ADDR</code></td><td>unset</td><td>Redis address for persistent sandbox-to-node bindings (for example, <code>redis:6379</code>). Unset = in-memory bindings, lost on scheduler restart.</td></tr>
+<tr><td><code>SCHEDULER_LEADER_ELECTION_IDENTITY</code></td><td>unset</td><td>Unique identity for a full Scheduler replica participating in Kubernetes Lease leader election; normally the Pod name from the Downward API.</td></tr>
 <tr><td><code>SCHEDULER_BINDING_TTL</code></td><td><code>30s</code></td><td>How long a sandbox-to-node binding is kept without a confirming heartbeat. Accepts Go duration strings (for example, <code>1m</code>).</td></tr>
 <tr><td><code>SCHEDULER_ARTIFACT_STORE_CAPACITY</code></td><td><code>1000000</code></td><td>Maximum number of P2P artifact entries held in the scheduler’s in-memory index</td></tr>
 <tr><td><code>SCHEDULER_ARTIFACT_LOOKUP_NODE_LIMIT</code></td><td><code>0</code></td><td>Maximum number of nodes checked per P2P artifact lookup. <code>0</code> means no limit.</td></tr>
