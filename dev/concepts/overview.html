@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-2304a493.js";
+            window.path_to_searchindex_js = "../searchindex-26342230.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-5437f69c.js"></script>
@@ -187,7 +187,7 @@
 <pre class="mermaid">flowchart TD
     subgraph node[AgentENV Node]
         api["API&lt;br/&gt;(Axum)"] --&gt; orchestrator["Orchestrator&lt;br/&gt;(lifecycle)"]
-        orchestrator --&gt; vm["Firecracker VM&lt;br/&gt;/dev/vda (rootfs)&lt;br/&gt;/dev/vdb (extra)"]
+        orchestrator --&gt; vm["Firecracker VM&lt;br/&gt;/dev/vda (platform tools)&lt;br/&gt;/dev/vdb (user root)"]
         vm --&gt; block["Block Device Layer&lt;br/&gt;(overlaybd + ublk)"]
     end
     style node fill:transparent,stroke:gray
@@ -199,7 +199,8 @@
 <li>The <strong>API layer</strong> validates the request, checks authentication, and forwards it to the <strong>orchestrator</strong>.</li>
 <li>The <strong>orchestrator</strong> manages the sandbox lifecycle: it creates a Firecracker VM, sets up networking, and attaches block devices.</li>
 <li>The VM boots with a <strong>layered block device</strong> (overlaybd) that stacks read-only base image layers with a writable upper layer. Multiple sandboxes share the same base layers.</li>
-<li>Inside the VM, an <strong>envd</strong> daemon handles command execution, file operations, and health reporting.</li>
+<li>Inside the VM, <strong>agentenv-init</strong> runs as PID 1, pivots into the user filesystem, prepares the guest runtime, and directly owns <strong>envd</strong>.</li>
+<li><strong>envd</strong> handles command execution, file operations, process streaming, and health reporting.</li>
 <li>Clients interact with running sandboxes via the <strong>reverse proxy</strong> (<code>/proxy</code>, routing headers, or configured sandbox proxy domains), which forwards HTTP and WebSocket traffic to services inside the VM.</li>
 </ol>
 <h2 id="key-components"><a class="header" href="#key-components">Key Components</a></h2>
@@ -213,6 +214,7 @@
 <tr><td><strong>Orchestrator</strong></td><td>State machine managing sandbox lifecycle transitions (create, pause, resume, delete)</td></tr>
 <tr><td><strong>Firecracker VM</strong></td><td>Lightweight microVM providing kernel-level isolation per sandbox</td></tr>
 <tr><td><strong>Block Device Layer</strong></td><td>overlaybd (layered images) + ublk (userspace block devices) for efficient storage</td></tr>
+<tr><td><strong>agentenv-init</strong></td><td>Static guest PID 1 that owns bootstrap, child reaping, and the envd lifecycle</td></tr>
 <tr><td><strong>envd</strong></td><td>In-guest daemon for executing commands, streaming output, and managing processes</td></tr>
 <tr><td><strong>Reverse Proxy</strong></td><td>Routes HTTP/WebSocket traffic from clients to services running inside sandboxes</td></tr>
 <tr><td><strong>Snapshot Manager</strong></td><td>Manages committed snapshots for efficient sandbox creation and reuse</td></tr>

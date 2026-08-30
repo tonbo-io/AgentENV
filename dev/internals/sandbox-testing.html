@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-2304a493.js";
+            window.path_to_searchindex_js = "../searchindex-26342230.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-5437f69c.js"></script>
@@ -484,8 +484,7 @@ enabled = false
 <li>
 <p><code>[firecracker]</code></p>
 <ul>
-<li><code>boot_args</code>: Kernel command line. The runtime appends <code>init=/init</code> if not
-already present (tools drive provides the init script).</li>
+<li><code>boot_args</code>: Kernel command line. The runtime appends <code>init=/init</code> when needed; the tools drive exposes the static <code>agentenv-init</code> binary at that path.</li>
 <li><code>binary_path</code>: Absolute or relative path to <code>firecracker</code>.</li>
 <li><code>socket_timeout_secs</code>: Max time to wait for the Firecracker API socket.</li>
 <li><code>socket_poll_ms</code>: Poll interval for checking socket existence.</li>
@@ -918,8 +917,7 @@ cargo test -p agentenv --lib
 </ol>
 <h2 id="5-running-custom-scripts"><a class="header" href="#5-running-custom-scripts">5) Running Custom Scripts</a></h2>
 <h3 id="run-commands-via-envd"><a class="header" href="#run-commands-via-envd">Run commands via envd</a></h3>
-<p>Once the sandbox is started (with a rootfs that includes the envd daemon), you
-can execute commands inside the VM using the process API:</p>
+<p>Once the sandbox is started, the tools drive’s envd daemon executes commands inside the user root through the process API:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>// Simple command
@@ -939,8 +937,7 @@ handle.send_stdin(b"hello\n").await?;
 handle.kill().await?;
 let output = handle.wait().await?;
 <span class="boring">}</span></code></pre>
-<p>The process API uses envd’s gRPC <code>ProcessClient</code> under the hood. It requires
-the envd daemon to be running inside the guest VM.</p>
+<p>The process API uses envd’s gRPC <code>ProcessClient</code> under the hood and targets the envd process owned by guest PID 1.</p>
 <h3 id="run-different-scripts-for-multiple-snapshot-resumes"><a class="header" href="#run-different-scripts-for-multiple-snapshot-resumes">Run different scripts for multiple snapshot resumes</a></h3>
 <p><code>/init</code> is not re-executed after resume, so per-instance behavior must come
 from per-instance disk contents.</p>

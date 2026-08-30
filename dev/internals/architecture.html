@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-2304a493.js";
+            window.path_to_searchindex_js = "../searchindex-26342230.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-5437f69c.js"></script>
@@ -280,7 +280,7 @@ PVM currently requires x86_64 and the <code>kvm_pvm</code> host module.</p>
 <tr><td>API layer</td><td><code>src/api/</code></td><td>Axum HTTP server, OpenAPI endpoints, reverse proxy to sandbox services, node/admin APIs</td></tr>
 <tr><td>Orchestrator</td><td><code>src/orchestrator/</code></td><td>Sandbox lifecycle state machine (Creating, Running, Pausing, Paused, Resuming, Killing), auto-eviction, incremental runtime metrics, paused-sandbox persistence across restarts</td></tr>
 <tr><td>Observability</td><td><code>src/observability/</code></td><td>Node identity, machine info, request-time host metrics collection, node snapshot projection for admin APIs, optional scheduler heartbeat reporting</td></tr>
-<tr><td>Sandbox</td><td><code>src/sandbox/</code></td><td>Firecracker VM management, network namespaces, rootfs, envd communication, ublk devices (rootfs + memory), warm network/block/Firecracker pools</td></tr>
+<tr><td>Sandbox</td><td><code>src/sandbox/</code></td><td>Firecracker VM management, network namespaces, guest bootstrap, envd communication, ublk devices (rootfs + memory), warm network/block/Firecracker pools</td></tr>
 <tr><td>Snapshot + Template Builder</td><td><code>src/snapshot/</code>, <code>src/template/</code></td><td><code>src/snapshot/</code> owns committed snapshot storage/runtime resolution; <code>src/template/</code> provides the user-facing builder that publishes snapshots</td></tr>
 <tr><td>P2P artifact transport</td><td><code>src/p2p/</code></td><td>Optional project-wide artifact lookup, publish, and fetch layer with disabled and iroh-backed transports</td></tr>
 <tr><td>Config</td><td><code>src/cfg.rs</code></td><td>TOML config for firecracker paths, machine specs, timeouts, shared pool tuning, observability metadata, P2P, and scheduler-report settings</td></tr>
@@ -290,6 +290,8 @@ PVM currently requires x86_64 and the <code>kvm_pvm</code> host module.</p>
 <h3 id="sandbox-networking"><a class="header" href="#sandbox-networking">Sandbox Networking</a></h3>
 <p>The network subsystem is managed by a process-wide <code>NetworkManager</code> and per-slot <code>Slot</code> objects. See <a href="./networking.html">Sandbox Network Architecture</a> for the namespace topology, address plan, packet paths, firewall ordering, egress proxy, policy replacement, warm-pool behavior, and verification steps.</p>
 <p>Snapshot resume can also use <code>[pool.firecracker]</code> to pre-spawn <code>(network slot, Firecracker process)</code> pairs. A warm entry transfers its network slot, process, and Firecracker CWD to the resumed sandbox, which avoids the spawn and API-socket wait in the resume critical path. <code>[pool.block]</code> controls the ublk daemon’s overlaybd warm-device pool; it shares the same top-level watermarks but performs async refill from request paths because reusable block devices are image/size-specific.</p>
+<h3 id="guest-process-model"><a class="header" href="#guest-process-model">Guest Process Model</a></h3>
+<p>The tools drive supplies a static <code>agentenv-init</code> binary as <code>/init</code>. It mounts <code>/dev/vdb</code> as the user root, pivots into that filesystem, mounts attached drives, configures the minimal virtual filesystems and network files, and remains PID 1. It directly starts and reaps <code>envd</code>; envd starts every user process requested by the API. An envd exit powers off the guest and invalidates that runtime identity. Firecracker snapshots preserve PID 1, envd, application processes, memory, and writable block state together, so pause and resume continue the same guest process tree.</p>
 <h3 id="observability-data-flow"><a class="header" href="#observability-data-flow">Observability Data Flow</a></h3>
 <p>The node observability path combines request-time host collection with request-time projection:</p>
 <ul>

@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-2304a493.js";
+            window.path_to_searchindex_js = "../searchindex-26342230.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-5437f69c.js"></script>
@@ -218,6 +218,8 @@
 <tr><td><code>AENV_HOME_PATH</code></td><td><code>/var/lib/aenv</code></td><td>Override the base directory from which AgentENV derives local state, caches, logs, generated configs, and downloaded dependencies. Component-specific path settings remain available as advanced overrides.</td></tr>
 <tr><td><code>AENV_RUNTIME_PATH</code></td><td><code>/run/aenv</code></td><td>Override the transient runtime directory used for network namespace mount points and the default ublk daemon socket.</td></tr>
 <tr><td><code>AENV_DEPS_PATH</code></td><td><code>$AENV_HOME/deps</code></td><td>Override root directory for auto-downloaded runtime assets (Firecracker, kernel, tools drive).</td></tr>
+<tr><td><code>AENV_TOOLS_DRIVE_PATH</code></td><td>unset</td><td>Import a local tools-drive ext4 file during setup; pair it with <code>AENV_TOOLS_VERSION</code>.</td></tr>
+<tr><td><code>AENV_TOOLS_VERSION</code></td><td>bundled dependency manifest</td><td>Select the immutable tools-drive version, including a version imported from <code>AENV_TOOLS_DRIVE_PATH</code>.</td></tr>
 <tr><td><code>AENV_VIRTUALIZATION_MODE</code></td><td><code>kvm</code></td><td>Select the node virtualization mode. Leave unset for normal installations; set to <code>pvm</code> only when following the <a href="../deployment/pvm.html">PVM Deployment</a> guide.</td></tr>
 <tr><td><code>AENV_SNAPSHOT_LOCAL_CACHE_PATH</code></td><td><code>$AENV_HOME/snapshot-local-cache</code></td><td>Override the snapshot manager’s node-local artifact/cache root</td></tr>
 <tr><td><code>AENV_SNAPSHOT_STORE</code></td><td><code>$AENV_HOME/snapshot-store</code></td><td>Override the posix_fs snapshot repository root directory</td></tr>

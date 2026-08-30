@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-2304a493.js";
+            window.path_to_searchindex_js = "searchindex-26342230.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-5437f69c.js"></script>
@@ -2104,6 +2104,8 @@ and are then re-fetched on demand.</p>
 <tr><td><code>AENV_HOME_PATH</code></td><td><code>/var/lib/aenv</code></td><td>Override the base directory from which AgentENV derives local state, caches, logs, generated configs, and downloaded dependencies. Component-specific path settings remain available as advanced overrides.</td></tr>
 <tr><td><code>AENV_RUNTIME_PATH</code></td><td><code>/run/aenv</code></td><td>Override the transient runtime directory used for network namespace mount points and the default ublk daemon socket.</td></tr>
 <tr><td><code>AENV_DEPS_PATH</code></td><td><code>$AENV_HOME/deps</code></td><td>Override root directory for auto-downloaded runtime assets (Firecracker, kernel, tools drive).</td></tr>
+<tr><td><code>AENV_TOOLS_DRIVE_PATH</code></td><td>unset</td><td>Import a local tools-drive ext4 file during setup; pair it with <code>AENV_TOOLS_VERSION</code>.</td></tr>
+<tr><td><code>AENV_TOOLS_VERSION</code></td><td>bundled dependency manifest</td><td>Select the immutable tools-drive version, including a version imported from <code>AENV_TOOLS_DRIVE_PATH</code>.</td></tr>
 <tr><td><code>AENV_VIRTUALIZATION_MODE</code></td><td><code>kvm</code></td><td>Select the node virtualization mode. Leave unset for normal installations; set to <code>pvm</code> only when following the <a href="#pvm-deployment">PVM Deployment</a> guide.</td></tr>
 <tr><td><code>AENV_SNAPSHOT_LOCAL_CACHE_PATH</code></td><td><code>$AENV_HOME/snapshot-local-cache</code></td><td>Override the snapshot manager’s node-local artifact/cache root</td></tr>
 <tr><td><code>AENV_SNAPSHOT_STORE</code></td><td><code>$AENV_HOME/snapshot-store</code></td><td>Override the posix_fs snapshot repository root directory</td></tr>
@@ -2302,7 +2304,7 @@ stringData:
 <pre class="mermaid">flowchart TD
     subgraph node[AgentENV Node]
         api["API&lt;br/&gt;(Axum)"] --&gt; orchestrator["Orchestrator&lt;br/&gt;(lifecycle)"]
-        orchestrator --&gt; vm["Firecracker VM&lt;br/&gt;/dev/vda (rootfs)&lt;br/&gt;/dev/vdb (extra)"]
+        orchestrator --&gt; vm["Firecracker VM&lt;br/&gt;/dev/vda (platform tools)&lt;br/&gt;/dev/vdb (user root)"]
         vm --&gt; block["Block Device Layer&lt;br/&gt;(overlaybd + ublk)"]
     end
     style node fill:transparent,stroke:gray
@@ -2314,7 +2316,8 @@ stringData:
 <li>The <strong>API layer</strong> validates the request, checks authentication, and forwards it to the <strong>orchestrator</strong>.</li>
 <li>The <strong>orchestrator</strong> manages the sandbox lifecycle: it creates a Firecracker VM, sets up networking, and attaches block devices.</li>
 <li>The VM boots with a <strong>layered block device</strong> (overlaybd) that stacks read-only base image layers with a writable upper layer. Multiple sandboxes share the same base layers.</li>
-<li>Inside the VM, an <strong>envd</strong> daemon handles command execution, file operations, and health reporting.</li>
+<li>Inside the VM, <strong>agentenv-init</strong> runs as PID 1, pivots into the user filesystem, prepares the guest runtime, and directly owns <strong>envd</strong>.</li>
+<li><strong>envd</strong> handles command execution, file operations, process streaming, and health reporting.</li>
 <li>Clients interact with running sandboxes via the <strong>reverse proxy</strong> (<code>/proxy</code>, routing headers, or configured sandbox proxy domains), which forwards HTTP and WebSocket traffic to services inside the VM.</li>
 </ol>
 <h2 id="key-components"><a class="header" href="#key-components">Key Components</a></h2>
@@ -2328,6 +2331,7 @@ stringData:
 <tr><td><strong>Orchestrator</strong></td><td>State machine managing sandbox lifecycle transitions (create, pause, resume, delete)</td></tr>
 <tr><td><strong>Firecracker VM</strong></td><td>Lightweight microVM providing kernel-level isolation per sandbox</td></tr>
 <tr><td><strong>Block Device Layer</strong></td><td>overlaybd (layered images) + ublk (userspace block devices) for efficient storage</td></tr>
+<tr><td><strong>agentenv-init</strong></td><td>Static guest PID 1 that owns bootstrap, child reaping, and the envd lifecycle</td></tr>
 <tr><td><strong>envd</strong></td><td>In-guest daemon for executing commands, streaming output, and managing processes</td></tr>
 <tr><td><strong>Reverse Proxy</strong></td><td>Routes HTTP/WebSocket traffic from clients to services running inside sandboxes</td></tr>
 <tr><td><strong>Snapshot Manager</strong></td><td>Manages committed snapshots for efficient sandbox creation and reuse</td></tr>
@@ -3251,7 +3255,7 @@ PVM currently requires x86_64 and the <code>kvm_pvm</code> host module.</p>
 <tr><td>API layer</td><td><code>src/api/</code></td><td>Axum HTTP server, OpenAPI endpoints, reverse proxy to sandbox services, node/admin APIs</td></tr>
 <tr><td>Orchestrator</td><td><code>src/orchestrator/</code></td><td>Sandbox lifecycle state machine (Creating, Running, Pausing, Paused, Resuming, Killing), auto-eviction, incremental runtime metrics, paused-sandbox persistence across restarts</td></tr>
 <tr><td>Observability</td><td><code>src/observability/</code></td><td>Node identity, machine info, request-time host metrics collection, node snapshot projection for admin APIs, optional scheduler heartbeat reporting</td></tr>
-<tr><td>Sandbox</td><td><code>src/sandbox/</code></td><td>Firecracker VM management, network namespaces, rootfs, envd communication, ublk devices (rootfs + memory), warm network/block/Firecracker pools</td></tr>
+<tr><td>Sandbox</td><td><code>src/sandbox/</code></td><td>Firecracker VM management, network namespaces, guest bootstrap, envd communication, ublk devices (rootfs + memory), warm network/block/Firecracker pools</td></tr>
 <tr><td>Snapshot + Template Builder</td><td><code>src/snapshot/</code>, <code>src/template/</code></td><td><code>src/snapshot/</code> owns committed snapshot storage/runtime resolution; <code>src/template/</code> provides the user-facing builder that publishes snapshots</td></tr>
 <tr><td>P2P artifact transport</td><td><code>src/p2p/</code></td><td>Optional project-wide artifact lookup, publish, and fetch layer with disabled and iroh-backed transports</td></tr>
 <tr><td>Config</td><td><code>src/cfg.rs</code></td><td>TOML config for firecracker paths, machine specs, timeouts, shared pool tuning, observability metadata, P2P, and scheduler-report settings</td></tr>
@@ -3261,6 +3265,8 @@ PVM currently requires x86_64 and the <code>kvm_pvm</code> host module.</p>
 <h3 id="sandbox-networking"><a class="header" href="#sandbox-networking">Sandbox Networking</a></h3>
 <p>The network subsystem is managed by a process-wide <code>NetworkManager</code> and per-slot <code>Slot</code> objects. See <a href="#sandbox-network-architecture">Sandbox Network Architecture</a> for the namespace topology, address plan, packet paths, firewall ordering, egress proxy, policy replacement, warm-pool behavior, and verification steps.</p>
 <p>Snapshot resume can also use <code>[pool.firecracker]</code> to pre-spawn <code>(network slot, Firecracker process)</code> pairs. A warm entry transfers its network slot, process, and Firecracker CWD to the resumed sandbox, which avoids the spawn and API-socket wait in the resume critical path. <code>[pool.block]</code> controls the ublk daemon’s overlaybd warm-device pool; it shares the same top-level watermarks but performs async refill from request paths because reusable block devices are image/size-specific.</p>
+<h3 id="guest-process-model"><a class="header" href="#guest-process-model">Guest Process Model</a></h3>
+<p>The tools drive supplies a static <code>agentenv-init</code> binary as <code>/init</code>. It mounts <code>/dev/vdb</code> as the user root, pivots into that filesystem, mounts attached drives, configures the minimal virtual filesystems and network files, and remains PID 1. It directly starts and reaps <code>envd</code>; envd starts every user process requested by the API. An envd exit powers off the guest and invalidates that runtime identity. Firecracker snapshots preserve PID 1, envd, application processes, memory, and writable block state together, so pause and resume continue the same guest process tree.</p>
 <h3 id="observability-data-flow"><a class="header" href="#observability-data-flow">Observability Data Flow</a></h3>
 <p>The node observability path combines request-time host collection with request-time projection:</p>
 <ul>
@@ -3873,8 +3879,7 @@ enabled = false
 <li>
 <p><code>[firecracker]</code></p>
 <ul>
-<li><code>boot_args</code>: Kernel command line. The runtime appends <code>init=/init</code> if not
-already present (tools drive provides the init script).</li>
+<li><code>boot_args</code>: Kernel command line. The runtime appends <code>init=/init</code> when needed; the tools drive exposes the static <code>agentenv-init</code> binary at that path.</li>
 <li><code>binary_path</code>: Absolute or relative path to <code>firecracker</code>.</li>
 <li><code>socket_timeout_secs</code>: Max time to wait for the Firecracker API socket.</li>
 <li><code>socket_poll_ms</code>: Poll interval for checking socket existence.</li>
@@ -4307,8 +4312,7 @@ cargo test -p agentenv --lib
 </ol>
 <h2 id="5-running-custom-scripts"><a class="header" href="#5-running-custom-scripts">5) Running Custom Scripts</a></h2>
 <h3 id="run-commands-via-envd"><a class="header" href="#run-commands-via-envd">Run commands via envd</a></h3>
-<p>Once the sandbox is started (with a rootfs that includes the envd daemon), you
-can execute commands inside the VM using the process API:</p>
+<p>Once the sandbox is started, the tools drive’s envd daemon executes commands inside the user root through the process API:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>// Simple command
@@ -4328,8 +4332,7 @@ handle.send_stdin(b"hello\n").await?;
 handle.kill().await?;
 let output = handle.wait().await?;
 <span class="boring">}</span></code></pre>
-<p>The process API uses envd’s gRPC <code>ProcessClient</code> under the hood. It requires
-the envd daemon to be running inside the guest VM.</p>
+<p>The process API uses envd’s gRPC <code>ProcessClient</code> under the hood and targets the envd process owned by guest PID 1.</p>
 <h3 id="run-different-scripts-for-multiple-snapshot-resumes"><a class="header" href="#run-different-scripts-for-multiple-snapshot-resumes">Run different scripts for multiple snapshot resumes</a></h3>
 <p><code>/init</code> is not re-executed after resume, so per-instance behavior must come
 from per-instance disk contents.</p>
@@ -4629,7 +4632,7 @@ network namespaces are missing</li>
 <tr><td>Firecracker binary</td><td><code>&lt;deps_path&gt;/firecracker/{version}/firecracker</code></td><td>Firecracker executable</td><td>VM process runtime</td><td>Created during setup when missing. Old versions are retained until manually removed.</td></tr>
 <tr><td>CPU template helper</td><td><code>&lt;deps_path&gt;/firecracker/{version}/cpu-template-helper</code></td><td>Optional Firecracker helper executable</td><td>Detects host CPU config for cluster-wide CPU intersection</td><td>Extracted from Firecracker package when present.</td></tr>
 <tr><td>Kernel image</td><td><code>&lt;deps_path&gt;/kernel/{version}/vmlinux.bin</code></td><td>Guest kernel</td><td>VM boot source</td><td>Downloaded during setup. Old versions are retained until manually removed.</td></tr>
-<tr><td>Tools drive</td><td><code>&lt;deps_path&gt;/tools/{version}/tools.ext4</code></td><td>Read-only ext4 image with envd/tools</td><td>Firecracker root drive shared by sandboxes and pinned by snapshots through its immutable release version</td><td>Extracted from OCI or imported from <code>tools.drive_path</code> during setup. Old versions are retained until manually removed.</td></tr>
+<tr><td>Tools drive</td><td><code>&lt;deps_path&gt;/tools/{version}/tools.ext4</code></td><td>Read-only ext4 image with static <code>agentenv-init</code> and <code>envd</code> binaries</td><td>Firecracker platform drive shared by sandboxes and pinned by snapshots through its immutable release version</td><td>Extracted from OCI or imported from <code>tools.drive_path</code> during setup. Old versions are retained until manually removed.</td></tr>
 <tr><td>Overlaybd tools</td><td><code>&lt;deps_path&gt;/overlaybd/bin/*</code></td><td>Statically linked <code>overlaybd-create</code>, <code>overlaybd-apply</code>, <code>overlaybd-commit</code>, and <code>overlaybd-resize</code></td><td>OCI-to-overlaybd conversion and packaging</td><td>Installed during setup when release metadata does not match.</td></tr>
 <tr><td>Overlaybd release metadata</td><td><code>&lt;deps_path&gt;/overlaybd/tools-release.json</code></td><td>Installed overlaybd release identifier</td><td>Detects whether tools need reinstalling</td><td>Rewritten on setup when release changes.</td></tr>
 <tr><td>Overlaybd package downloads</td><td><code>&lt;deps_path&gt;/overlaybd/downloads/*</code></td><td>Temporary downloaded package archives</td><td>Setup staging for overlaybd release packages</td><td>Removed after a successful install.</td></tr>
