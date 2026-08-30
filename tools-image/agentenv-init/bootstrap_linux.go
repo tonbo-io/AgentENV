@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +18,7 @@ const (
 	oldRoot  = ".agentenv-old-root"
 )
 
-func bootstrap(logger *log.Logger) error {
+func bootstrap(cmdline string) error {
 	if err := mountInitialFilesystems(); err != nil {
 		return err
 	}
@@ -29,17 +28,20 @@ func bootstrap(logger *log.Logger) error {
 	if err := pivotToUserRoot(); err != nil {
 		return err
 	}
-	if err := mountRuntimeFilesystems(logger); err != nil {
+	if err := mountRuntimeFilesystems(cmdline); err != nil {
 		return err
 	}
-	if err := mountExtraDrives(); err != nil {
+	if err := mountExtraDrives(cmdline); err != nil {
 		return err
 	}
-	if err := configureGuestFiles(logger); err != nil {
+	if err := configureGuestFiles(cmdline); err != nil {
+		return err
+	}
+	if err := bootstrapFailpoint(cmdline, "loopback"); err != nil {
 		return err
 	}
 	if err := bringLoopbackUp(); err != nil {
-		logger.Printf("bring loopback up: %v", err)
+		return fmt.Errorf("bring loopback up: %w", err)
 	}
 	return nil
 }
@@ -134,7 +136,7 @@ func pivotToUserRoot() error {
 	return nil
 }
 
-func mountRuntimeFilesystems(logger *log.Logger) error {
+func mountRuntimeFilesystems(cmdline string) error {
 	if err := mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
 		return fmt.Errorf("mount /run: %w", err)
 	}
@@ -154,11 +156,17 @@ func mountRuntimeFilesystems(logger *log.Logger) error {
 			return fmt.Errorf("set %s permissions: %w", path, err)
 		}
 	}
+	if err := bootstrapFailpoint(cmdline, "devpts"); err != nil {
+		return err
+	}
 	if err := mount("devpts", "/dev/pts", "devpts", unix.MS_NOSUID|unix.MS_NOEXEC, "gid=5,mode=620,ptmxmode=0666"); err != nil {
-		logger.Printf("mount devpts: %v", err)
+		return fmt.Errorf("mount devpts: %w", err)
+	}
+	if err := bootstrapFailpoint(cmdline, "shared-memory"); err != nil {
+		return err
 	}
 	if err := mount("tmpfs", "/dev/shm", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil {
-		logger.Printf("mount shared memory: %v", err)
+		return fmt.Errorf("mount shared memory: %w", err)
 	}
 	return nil
 }
@@ -179,7 +187,7 @@ func mountExt4(source, target string) error {
 	return err
 }
 
-func configureGuestFiles(logger *log.Logger) error {
+func configureGuestFiles(cmdline string) error {
 	for link, target := range map[string]string{
 		"/dev/fd":     "/proc/self/fd",
 		"/dev/stdin":  "/proc/self/fd/0",
@@ -206,8 +214,11 @@ func configureGuestFiles(logger *log.Logger) error {
 			return err
 		}
 	}
+	if err := bootstrapFailpoint(cmdline, "dns"); err != nil {
+		return err
+	}
 	if err := writeResolvConf("/proc/net/pnp", "/etc/resolv.conf"); err != nil {
-		logger.Printf("configure DNS: %v", err)
+		return fmt.Errorf("configure DNS: %w", err)
 	}
 	return nil
 }
@@ -277,12 +288,8 @@ func writeResolvConf(source, target string) error {
 	return nil
 }
 
-func mountExtraDrives() error {
-	cmdline, err := os.ReadFile("/proc/cmdline")
-	if err != nil {
-		return fmt.Errorf("read kernel command line: %w", err)
-	}
-	mounts, err := parseDriveMounts(string(cmdline))
+func mountExtraDrives(cmdline string) error {
+	mounts, err := parseDriveMounts(cmdline)
 	if err != nil {
 		return err
 	}

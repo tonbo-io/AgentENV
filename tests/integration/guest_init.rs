@@ -28,7 +28,35 @@ async fn assert_guest_boot_fails_closed(
         output.contains(expected_serial_log),
         "serial log omitted {expected_serial_log:?}: {output}"
     );
+    assert!(
+        !output.contains("started envd"),
+        "envd started after a failed bootstrap: {output}"
+    );
     Ok(())
+}
+
+#[tokio::test]
+async fn critical_guest_bootstrap_failures_prevent_envd_start() -> Result<()> {
+    common::setup().await;
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        for step in ["devpts", "shared-memory", "dns", "loopback"] {
+            let mut sandbox_config = common::default_sandbox_config()?;
+            let boot_args = sandbox_config
+                .boot_args
+                .take()
+                .expect("default sandbox boot arguments");
+            sandbox_config.boot_args =
+                Some(format!("{boot_args} agentenv_bootstrap_failpoint={step}"));
+            assert_guest_boot_fails_closed(
+                sandbox_config,
+                &format!("bootstrap failed: injected {step} failure"),
+            )
+            .await?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("test timed out after {:?}", TEST_TIMEOUT))?
 }
 
 #[tokio::test]

@@ -31,7 +31,12 @@ func main() {
 	if os.Getpid() != 1 {
 		logger.Fatalf("init mode must run as PID 1, got PID %d", os.Getpid())
 	}
-	if err := bootstrap(logger); err != nil {
+	cmdline, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		logger.Printf("bootstrap failed: read kernel command line: %v", err)
+		powerOff(logger)
+	}
+	if err := bootstrap(string(cmdline)); err != nil {
 		logger.Printf("bootstrap failed: %v", err)
 		powerOff(logger)
 	}
