@@ -136,11 +136,11 @@ func TestLoadSchedulerRejectsLeaderElectionWithoutKubernetesDiscovery(t *testing
 	}
 }
 
-func TestLoadSchedulerRejectsInvalidLeaderElectionTiming(t *testing.T) {
+func TestLoadSchedulerDefersLeaderElectionTimingValidationToClientGo(t *testing.T) {
 	t.Setenv("SCHEDULER_LEADER_ELECTION_IDENTITY", "scheduler-0")
-	path := writeLeaderElectionConfig(t, "redis:6379", "kubernetes", "10s", "10s", "2s")
-	if _, err := LoadScheduler(path, false); err == nil {
-		t.Fatal("expected invalid leader election timing to fail")
+	path := writeLeaderElectionConfig(t, "redis:6379", "kubernetes", "10s", "9s", "8s")
+	if _, err := LoadScheduler(path, false); err != nil {
+		t.Fatalf("config parsing should defer authoritative timing validation to client-go: %v", err)
 	}
 }
 
