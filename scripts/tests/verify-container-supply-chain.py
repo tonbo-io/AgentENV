@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import re
+from datetime import date
 from pathlib import Path
 
 
@@ -60,8 +61,29 @@ def verify_envd_source_lock() -> None:
         raise SystemExit(f"{path.relative_to(ROOT)}: ENVD_REF must be a full immutable commit")
 
 
+def verify_runtime_apt_security_epoch() -> None:
+    path = ROOT / "deploy/docker/Dockerfile.agentenv"
+    source = path.read_text(encoding="utf-8")
+    epoch = re.search(
+        r"^ARG UBUNTU_APT_SECURITY_EPOCH=(\d{4}-\d{2}-\d{2})$", source, re.MULTILINE
+    )
+    if not epoch:
+        raise SystemExit(f"{path.relative_to(ROOT)}: runtime apt security epoch must be an ISO date")
+    try:
+        date.fromisoformat(epoch.group(1))
+    except ValueError as error:
+        raise SystemExit(
+            f"{path.relative_to(ROOT)}: invalid runtime apt security epoch {epoch.group(1)!r}"
+        ) from error
+    if source.count("${UBUNTU_APT_SECURITY_EPOCH}") != 1:
+        raise SystemExit(
+            f"{path.relative_to(ROOT)}: apt transaction must consume the security epoch exactly once"
+        )
+
+
 for dockerfile in DOCKERFILES:
     verify_dockerfile(dockerfile)
 verify_grpc_health_probe_checksums()
 verify_envd_source_lock()
+verify_runtime_apt_security_epoch()
 print("PASS container base images and downloaded probes are digest verified")

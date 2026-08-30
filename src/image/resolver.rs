@@ -1,5 +1,7 @@
 use std::path::PathBuf;
+use std::process::Output;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -15,6 +17,7 @@ use crate::image::oci_image::ImageFormat;
 use crate::observability::prometheus::MetricGuard;
 
 const IMAGE_RESOLVE_STAGE_DURATION: &str = "agentenv_image_resolve_stage_duration_seconds";
+const REGCTL_EXEC_RETRY_LIMIT: usize = 3;
 
 /// artifactType published by accelerated-container-image (`obdconv`) for
 /// overlaybd-native images.
@@ -381,13 +384,7 @@ async fn discover_overlaybd_referrer(
     // OVERLAYBD_REFERRER_ARTIFACT_TYPES: `regctl artifact list` takes a single
     // `--filter-artifact-type`, which cannot express "any of these types" in
     // one call.
-    let output = oci_image::regctl_command(regctl_binary)
-        .arg("artifact")
-        .arg("list")
-        .arg("--format")
-        .arg("body")
-        .arg(subject_ref)
-        .output()
+    let output = run_regctl_artifact_list(regctl_binary, subject_ref)
         .await
         .context("spawn regctl artifact list")?;
 
@@ -401,6 +398,33 @@ async fn discover_overlaybd_referrer(
     let body = String::from_utf8(output.stdout).context("regctl output is not UTF-8")?;
     parse_overlaybd_referrer(&body)
         .with_context(|| format!("parse regctl referrers response for {subject_ref}"))
+}
+
+async fn run_regctl_artifact_list(
+    regctl_binary: &std::path::Path,
+    subject_ref: &str,
+) -> std::io::Result<Output> {
+    for attempt in 0..=REGCTL_EXEC_RETRY_LIMIT {
+        let result = oci_image::regctl_command(regctl_binary)
+            .arg("artifact")
+            .arg("list")
+            .arg("--format")
+            .arg("body")
+            .arg(subject_ref)
+            .output()
+            .await;
+        match result {
+            Err(error) if should_retry_regctl_spawn(&error, attempt) => {
+                tokio::time::sleep(Duration::from_millis(10 * (attempt as u64 + 1))).await;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("bounded regctl spawn retry must return from the loop")
+}
+
+fn should_retry_regctl_spawn(error: &std::io::Error, attempt: usize) -> bool {
+    error.raw_os_error() == Some(libc::ETXTBSY) && attempt < REGCTL_EXEC_RETRY_LIMIT
 }
 
 fn parse_overlaybd_referrer(body: &str) -> Result<Option<(String, &'static str)>> {
@@ -499,6 +523,24 @@ mod tests {
     use super::*;
     use crate::cfg::{ImageConfig, ImageResolverConfig};
     use tempfile::TempDir;
+
+    #[test]
+    fn regctl_spawn_retry_is_bounded_and_specific_to_text_file_busy() {
+        let text_file_busy = std::io::Error::from_raw_os_error(libc::ETXTBSY);
+        assert!(should_retry_regctl_spawn(&text_file_busy, 0));
+        assert!(should_retry_regctl_spawn(
+            &text_file_busy,
+            REGCTL_EXEC_RETRY_LIMIT - 1
+        ));
+        assert!(!should_retry_regctl_spawn(
+            &text_file_busy,
+            REGCTL_EXEC_RETRY_LIMIT
+        ));
+        assert!(!should_retry_regctl_spawn(
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            0
+        ));
+    }
 
     fn test_resolver_with_search(temp: &TempDir, search_registries: Vec<&str>) -> ImageResolver {
         let mut config = AppConfig {
