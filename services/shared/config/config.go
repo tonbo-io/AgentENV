@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const defaultSchedulerArtifactStoreCapacity = 1_000_000
@@ -33,13 +35,15 @@ type SchedulerDiscoveryConfig struct {
 }
 
 type SchedulerLeaderElectionConfig struct {
-	Enabled        bool          `json:"enabled"`
-	LeaseName      string        `json:"lease_name"`
-	LeaseNamespace string        `json:"lease_namespace"`
-	Identity       string        `json:"identity"`
-	LeaseDuration  time.Duration `json:"lease_duration"`
-	RenewDeadline  time.Duration `json:"renew_deadline"`
-	RetryPeriod    time.Duration `json:"retry_period"`
+	Enabled           bool          `json:"enabled"`
+	LeaseName         string        `json:"lease_name"`
+	LeaseNamespace    string        `json:"lease_namespace"`
+	Identity          string        `json:"identity"`
+	ServiceLabelKey   string        `json:"service_label_key"`
+	ServiceLabelValue string        `json:"service_label_value"`
+	LeaseDuration     time.Duration `json:"lease_duration"`
+	RenewDeadline     time.Duration `json:"renew_deadline"`
+	RetryPeriod       time.Duration `json:"retry_period"`
 }
 
 // NodeResourceLimit defines per-node resource thresholds for scheduling
@@ -95,13 +99,15 @@ func (s *SchedulerConfig) UnmarshalJSON(data []byte) error {
 		Nodes                   *[]Node                   `json:"nodes"`
 		Discovery               *SchedulerDiscoveryConfig `json:"discovery"`
 		LeaderElection          *struct {
-			Enabled        *bool           `json:"enabled"`
-			LeaseName      *string         `json:"lease_name"`
-			LeaseNamespace *string         `json:"lease_namespace"`
-			Identity       *string         `json:"identity"`
-			LeaseDuration  json.RawMessage `json:"lease_duration"`
-			RenewDeadline  json.RawMessage `json:"renew_deadline"`
-			RetryPeriod    json.RawMessage `json:"retry_period"`
+			Enabled           *bool           `json:"enabled"`
+			LeaseName         *string         `json:"lease_name"`
+			LeaseNamespace    *string         `json:"lease_namespace"`
+			Identity          *string         `json:"identity"`
+			ServiceLabelKey   *string         `json:"service_label_key"`
+			ServiceLabelValue *string         `json:"service_label_value"`
+			LeaseDuration     json.RawMessage `json:"lease_duration"`
+			RenewDeadline     json.RawMessage `json:"renew_deadline"`
+			RetryPeriod       json.RawMessage `json:"retry_period"`
 		} `json:"leader_election"`
 		NodeResourceLimit *NodeResourceLimit `json:"node_resource_limit"`
 	}
@@ -139,6 +145,12 @@ func (s *SchedulerConfig) UnmarshalJSON(data []byte) error {
 		}
 		if leader.Identity != nil {
 			s.LeaderElection.Identity = *leader.Identity
+		}
+		if leader.ServiceLabelKey != nil {
+			s.LeaderElection.ServiceLabelKey = *leader.ServiceLabelKey
+		}
+		if leader.ServiceLabelValue != nil {
+			s.LeaderElection.ServiceLabelValue = *leader.ServiceLabelValue
 		}
 		parseDuration := func(raw json.RawMessage, field string, target *time.Duration) error {
 			if len(bytes.TrimSpace(raw)) == 0 {
@@ -517,6 +529,19 @@ func (c Config) validate(schedulerQueryOnly bool) error {
 			}
 			if strings.TrimSpace(leader.Identity) == "" {
 				return errors.New("scheduler leader election requires a unique identity")
+			}
+			labelKey := strings.TrimSpace(leader.ServiceLabelKey)
+			labelValue := strings.TrimSpace(leader.ServiceLabelValue)
+			if (labelKey == "") != (labelValue == "") {
+				return errors.New("scheduler leader election service_label_key and service_label_value must be configured together")
+			}
+			if labelKey != "" {
+				if problems := validation.IsQualifiedName(labelKey); len(problems) > 0 {
+					return fmt.Errorf("scheduler leader election service_label_key is invalid: %s", strings.Join(problems, "; "))
+				}
+				if problems := validation.IsValidLabelValue(labelValue); len(problems) > 0 {
+					return fmt.Errorf("scheduler leader election service_label_value is invalid: %s", strings.Join(problems, "; "))
+				}
 			}
 		}
 		if c.Scheduler.ArtifactStoreCapacity <= 0 {

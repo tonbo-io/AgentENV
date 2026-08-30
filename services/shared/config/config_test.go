@@ -90,6 +90,8 @@ func TestLoadSchedulerAcceptsLeaderElectionWithRedisAndKubernetesDiscovery(t *te
 				"enabled": true,
 				"lease_name": "agentenv-scheduler",
 				"lease_namespace": "agentenv-system",
+				"service_label_key": "agentenv.io/scheduler-leader",
+				"service_label_value": "active",
 				"lease_duration": "20s",
 				"renew_deadline": "12s",
 				"retry_period": "3s"
@@ -115,8 +117,30 @@ func TestLoadSchedulerAcceptsLeaderElectionWithRedisAndKubernetesDiscovery(t *te
 	if cfg.Scheduler.LeaderElection.Identity != "scheduler-0" {
 		t.Fatalf("unexpected leader identity: %q", cfg.Scheduler.LeaderElection.Identity)
 	}
+	if cfg.Scheduler.LeaderElection.ServiceLabelKey != "agentenv.io/scheduler-leader" || cfg.Scheduler.LeaderElection.ServiceLabelValue != "active" {
+		t.Fatalf("unexpected leader service label: %#v", cfg.Scheduler.LeaderElection)
+	}
 	if cfg.Scheduler.LeaderElection.LeaseDuration != 20*time.Second || cfg.Scheduler.LeaderElection.RenewDeadline != 12*time.Second || cfg.Scheduler.LeaderElection.RetryPeriod != 3*time.Second {
 		t.Fatalf("unexpected leader election timings: %#v", cfg.Scheduler.LeaderElection)
+	}
+}
+
+func TestLoadSchedulerRejectsIncompleteOrInvalidLeaderServiceLabel(t *testing.T) {
+	cfg := defaultConfig("scheduler")
+	cfg.Scheduler.RedisAddr = "redis:6379"
+	cfg.Scheduler.Discovery.Mode = "kubernetes"
+	cfg.Scheduler.LeaderElection.Enabled = true
+	cfg.Scheduler.LeaderElection.LeaseName = "agentenv-scheduler"
+	cfg.Scheduler.LeaderElection.LeaseNamespace = "agentenv-system"
+	cfg.Scheduler.LeaderElection.Identity = "scheduler-0"
+	cfg.Scheduler.LeaderElection.ServiceLabelKey = "agentenv.io/scheduler-leader"
+	if err := cfg.validate(false); err == nil {
+		t.Fatal("expected incomplete leader service label to fail")
+	}
+	cfg.Scheduler.LeaderElection.ServiceLabelValue = "active"
+	cfg.Scheduler.LeaderElection.ServiceLabelKey = "not a label key"
+	if err := cfg.validate(false); err == nil {
+		t.Fatal("expected invalid leader service label key to fail")
 	}
 }
 
