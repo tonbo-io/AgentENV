@@ -1030,9 +1030,21 @@ fn sanitize_request_headers(headers: &mut HeaderMap) {
     headers.remove(TRAFFIC_ACCESS_TOKEN_HEADER);
     headers.remove(header::HOST);
     let accepts_trailers = header_contains_token(headers, header::TE, "trailers");
+    let declared_trailers = headers
+        .get_all(header::TRAILER)
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     remove_hop_by_hop_headers(headers);
     if accepts_trailers {
         headers.insert(header::TE, HeaderValue::from_static("trailers"));
+    }
+    // HTTP/2 carries trailer values in a final HEADERS frame, but Go's HTTP/2
+    // server only exposes values whose names were declared by the initial
+    // Trailer field. Preserve the validated declaration alongside the body
+    // frames instead of silently hiding application trailers from the guest.
+    for value in declared_trailers {
+        headers.append(header::TRAILER, value);
     }
 }
 
@@ -1145,9 +1157,18 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
 
 fn map_upstream_response(response: Response<Incoming>) -> Response<Body> {
     let (mut parts, body) = response.into_parts();
+    let declared_trailers = parts
+        .headers
+        .get_all(header::TRAILER)
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     // Mirror the request-side filtering on the way back so connection-scoped
     // headers from the upstream do not leak through this proxy hop.
     remove_hop_by_hop_headers(&mut parts.headers);
+    for value in declared_trailers {
+        parts.headers.append(header::TRAILER, value);
+    }
     Response::from_parts(parts, Body::new(body.map_err(axum::Error::new)))
 }
 
@@ -1422,6 +1443,68 @@ mod tests {
             response.into_body().collect().await.unwrap().to_bytes(),
             "h2-response"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_clients_preserve_native_grpc_trailer_contract() {
+        let address = spawn_upstream(axum::Router::new().fallback(|request: Request| async move {
+            let declared = request
+                .headers()
+                .get(header::TRAILER)
+                .and_then(|value| value.to_str().ok())
+                == Some("x-request-trailer");
+            let collected = request.into_body().collect().await.unwrap();
+            let request_trailer = collected
+                .trailers()
+                .and_then(|trailers| trailers.get("x-request-trailer"))
+                .and_then(|value| value.to_str().ok());
+            if !declared || request_trailer != Some("request-finished") {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+
+            let response_body = http_body_util::StreamBody::new(stream::iter([
+                Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(
+                    b"response-data",
+                ))),
+                Ok(hyper::body::Frame::trailers(HeaderMap::from_iter([(
+                    HeaderName::from_static("x-response-trailer"),
+                    HeaderValue::from_static("response-finished"),
+                )]))),
+            ]));
+            let mut response = Response::new(Body::new(response_body));
+            response.headers_mut().insert(
+                header::TRAILER,
+                HeaderValue::from_static("x-response-trailer"),
+            );
+            response
+        }))
+        .await;
+        let request_body = http_body_util::StreamBody::new(stream::iter([
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(
+                b"request-data",
+            ))),
+            Ok(hyper::body::Frame::trailers(HeaderMap::from_iter([(
+                HeaderName::from_static("x-request-trailer"),
+                HeaderValue::from_static("request-finished"),
+            )]))),
+        ]));
+        let mut request = Request::builder()
+            .version(hyper::Version::HTTP_2)
+            .uri(format!("http://{address}/grpc.Echo/Call"))
+            .header(header::CONTENT_TYPE, "application/grpc")
+            .header(header::TE, "trailers")
+            .header(header::TRAILER, "x-request-trailer")
+            .body(Body::new(request_body))
+            .unwrap();
+        sanitize_request_headers(request.headers_mut());
+
+        let response = build_proxy_clients().request(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::TRAILER], "x-response-trailer");
+        let collected = response.into_body().collect().await.unwrap();
+        let response_trailer = collected.trailers().unwrap()["x-response-trailer"].clone();
+        assert_eq!(collected.to_bytes(), "response-data");
+        assert_eq!(response_trailer, "response-finished");
     }
 
     #[tokio::test]
@@ -1916,6 +1999,10 @@ mod tests {
         headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
         headers.insert(header::TE, HeaderValue::from_static("gzip, trailers"));
         headers.insert(
+            header::TRAILER,
+            HeaderValue::from_static("x-application-trailer"),
+        );
+        headers.insert(
             HeaderName::from_static("x-extra"),
             HeaderValue::from_static("keep"),
         );
@@ -1931,6 +2018,10 @@ mod tests {
         assert!(headers.get(HOST).is_none());
         assert!(headers.get(header::CONNECTION).is_none());
         assert_eq!(headers.get(header::TE).unwrap(), "trailers");
+        assert_eq!(
+            headers.get(header::TRAILER).unwrap(),
+            "x-application-trailer"
+        );
         assert_eq!(headers.get("x-extra").unwrap(), "keep");
     }
 
