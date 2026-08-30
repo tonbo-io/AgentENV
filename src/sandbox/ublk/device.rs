@@ -224,7 +224,7 @@ impl UblkDeviceManager {
                     }
                     None => (None, false),
                 };
-                Ok(UblkDeviceManager::new(client, pool_enabled))
+                Ok::<UblkDeviceManager, anyhow::Error>(UblkDeviceManager::new(client, pool_enabled))
             })
             .await?;
         Ok(())
