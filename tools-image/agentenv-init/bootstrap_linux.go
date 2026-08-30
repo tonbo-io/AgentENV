@@ -32,7 +32,7 @@ func bootstrap(logger *log.Logger) error {
 	if err := mountRuntimeFilesystems(logger); err != nil {
 		return err
 	}
-	if err := mountExtraDrives(logger); err != nil {
+	if err := mountExtraDrives(); err != nil {
 		return err
 	}
 	if err := configureGuestFiles(logger); err != nil {
@@ -277,7 +277,7 @@ func writeResolvConf(source, target string) error {
 	return nil
 }
 
-func mountExtraDrives(logger *log.Logger) error {
+func mountExtraDrives() error {
 	cmdline, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
 		return fmt.Errorf("read kernel command line: %w", err)
@@ -288,7 +288,7 @@ func mountExtraDrives(logger *log.Logger) error {
 	}
 	for _, drive := range mounts {
 		if err := mountExtraDrive(drive); err != nil {
-			logger.Printf("mount /dev/%s at %s: %v", drive.device, drive.mountPath, err)
+			return fmt.Errorf("mount /dev/%s at %s: %w", drive.device, drive.mountPath, err)
 		}
 	}
 	return nil

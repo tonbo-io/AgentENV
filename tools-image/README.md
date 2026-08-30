@@ -7,7 +7,7 @@ The drive contains two static platform binaries:
 - `agentenv-init` runs as guest PID 1, mounts the user root and attached drives, pivots into the user filesystem, configures the minimal runtime mounts and network files, reaps orphaned children, and starts `envd`.
 - `envd` exposes the guest control API and launches user processes.
 
-`agentenv-init` is the sole guest init. A running sandbox contains `agentenv-init`, `envd`, and the user processes requested through `envd`. PID 1 writes envd stdout and stderr directly to the ephemeral `/run/agentenv/envd.log`, which keeps verbose process-event logging off the Firecracker serial path without adding a logging daemon. If `envd` exits, PID 1 powers off the guest and the host observes that runtime identity as unavailable.
+`agentenv-init` is the sole guest init. A running sandbox contains `agentenv-init`, `envd`, and the user processes requested through `envd`. PID 1 writes envd stdout and stderr to two rotating 512 KiB segments at `/run/agentenv/envd.log` and `/run/agentenv/envd.log.1`, which keeps verbose process-event logging bounded in the guest tmpfs and off the Firecracker serial path without adding a logging daemon. If any declared attached drive or subpath cannot be mounted, PID 1 fails bootstrap and powers off before starting `envd`; applications therefore cannot silently write durable data into the temporary rootfs. If `envd` exits, PID 1 also powers off the guest and the host observes that runtime identity as unavailable.
 
 ## Build
 
@@ -74,6 +74,6 @@ After publication and runtime validation, update `[tools].version` in `config/de
 
 ## Runtime Validation
 
-Point `[tools].drive_path` at a locally built ext4 only on a Linux development host with the required KVM setup. Product validation uses the reviewed isolated workflow and verifies cold boot, command execution, PTYs, DNS, attached drives and subpaths, pause/resume, snapshot restore, the guest process tree, and fail-closed behavior when `envd` exits.
+Point `[tools].drive_path` at a locally built ext4 only on a Linux development host with the required KVM setup. Product validation uses the reviewed isolated workflow and verifies cold boot, command execution, PTYs, DNS, attached drives and subpaths, pause/resume, snapshot restore, the guest process tree, fail-closed behavior when `envd` exits, and fail-closed boot for missing attached-drive devices or subpaths.
 
 Host-side root filesystem resizing remains owned by the OverlayBD toolchain and is outside this guest drive.

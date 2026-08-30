@@ -1,10 +1,29 @@
 use crate::common;
 
-use agentenv::sandbox::{FirecrackerSandbox, SandboxBackend, SandboxExecutor};
+use agentenv::sandbox::{ExtraDrive, FirecrackerSandbox, SandboxBackend, SandboxExecutor};
 use anyhow::Result;
 use tokio::time::Duration;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(90);
+
+async fn assert_guest_boot_fails_closed(
+    mut sandbox_config: agentenv::sandbox::FirecrackerSandboxConfig,
+    expected_serial_log: &str,
+) -> Result<()> {
+    sandbox_config.common.runtime_policy.envd_timeout = Duration::from_secs(5);
+    let mut sandbox = FirecrackerSandbox::new(sandbox_config)?;
+    let serial_log = sandbox.firecracker_stdout_path();
+    let result = sandbox.start().await;
+    assert!(result.is_err(), "guest unexpectedly started: {result:?}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let output = std::fs::read_to_string(&serial_log)?;
+    assert!(
+        output.contains(expected_serial_log),
+        "serial log omitted {expected_serial_log:?}: {output}"
+    );
+    let _ = sandbox.stop().await;
+    Ok(())
+}
 
 #[tokio::test]
 async fn guest_uses_platform_init_process_tree() -> Result<()> {
@@ -106,6 +125,47 @@ async fn envd_exit_invalidates_guest_runtime() -> Result<()> {
 
         sandbox.stop().await?;
         Ok(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("test timed out after {:?}", TEST_TIMEOUT))?
+}
+
+#[tokio::test]
+async fn missing_declared_drive_prevents_envd_start() -> Result<()> {
+    common::setup().await;
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let mut sandbox_config = common::default_sandbox_config()?;
+        sandbox_config.boot_args = Some("agentenv_drives=vdc:/workspace".to_owned());
+        assert_guest_boot_fails_closed(sandbox_config, "bootstrap failed: mount /dev/vdc").await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("test timed out after {:?}", TEST_TIMEOUT))?
+}
+
+#[tokio::test]
+async fn missing_attached_drive_sub_path_prevents_envd_start() -> Result<()> {
+    common::setup().await;
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let mut sandbox_config = common::default_sandbox_config()?;
+        let image_config_path = sandbox_config
+            .common
+            .rootfs_image_config
+            .as_ref()
+            .expect("default sandbox rootfs")
+            .image_config_path
+            .clone();
+        sandbox_config.common.extra_drives = vec![ExtraDrive::try_new_overlaybd_with_mount_path(
+            "workspace",
+            image_config_path,
+            false,
+            "/workspace",
+            Some("missing/sub-path"),
+        )?];
+        assert_guest_boot_fails_closed(
+            sandbox_config,
+            "missing/sub-path: no such file or directory",
+        )
+        .await
     })
     .await
     .map_err(|_| anyhow::anyhow!("test timed out after {:?}", TEST_TIMEOUT))?
