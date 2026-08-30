@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-26342230.js";
+            window.path_to_searchindex_js = "../searchindex-a1e5230b.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-5437f69c.js"></script>
@@ -263,11 +263,7 @@ local path overrides, not the default dependency catalog.</p>
 </tbody>
 </table>
 </div>
-<p>Snapshots and paused sandboxes keep using the tools drive version they were
-created with. Launch does not download missing releases: operators must install
-the recorded version under <code>&lt;deps_path&gt;/tools/&lt;version&gt;/tools.ext4</code> before
-restore. Setup retains previously installed versions until they are removed
-manually.</p>
+<p>New snapshots publish the exact tools drive bytes into the snapshot repository and record their content digest. Restore materializes that digest into the node-local artifact cache, so a replacement node does not need the historical version preinstalled. Snapshots created before the digest field was introduced temporarily fall back to <code>&lt;deps_path&gt;/tools/&lt;version&gt;/tools.ext4</code>; this compatibility path can be removed after those snapshots age out of the configured retention window. Paused sandboxes that have not been published as durable snapshots continue to use their recorded local version.</p>
 <h2 id="template-rootfs-images"><a class="header" href="#template-rootfs-images">Template Rootfs Images</a></h2>
 <p>User-visible rootfs images are selected at the template API layer.
 <code>POST /v2/templates/{templateID}/builds/{buildID}</code> accepts an optional
