@@ -243,6 +243,12 @@ impl SnapshotRepository for OssSnapshotRepository {
             let memory_layers = self
                 .derive_and_upload_memory_layers(&manifest.memory.image_config_path)
                 .await?;
+            let tools_drive = self
+                .import_managed_layer_by_hash(
+                    &manifest.tools_drive.path,
+                    OssUploadArtifact::ToolsDrive,
+                )
+                .await?;
 
             // 2. Upload per-snapshot fixed artifacts.
             let vm_state_local_path = manifest.vm_state.path.as_path();
@@ -292,6 +298,7 @@ impl SnapshotRepository for OssSnapshotRepository {
                 rootfs_layers,
                 attached_drives,
                 memory_layers,
+                tools_drive: Some(tools_drive),
                 disk_publications: disk_publications.clone(),
             };
 

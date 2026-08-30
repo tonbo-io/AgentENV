@@ -10,7 +10,7 @@ use crate::snapshot::artifact_cache::{CacheArtifactLease, CacheHandle, LocalArti
 use crate::snapshot::repository::interfaces::SnapshotRuntimeResolver;
 use crate::snapshot::runtime_support::{
     hydrate_runtime_manifest, load_firecracker_manifest_from_path, materialize_image_config_error,
-    runtime_image_cache_key, RuntimeImageMaterializer,
+    runtime_image_cache_key, validate_managed_artifact, RuntimeImageMaterializer,
 };
 use crate::snapshot::types::RuntimeArtifactLease;
 use crate::snapshot::{
@@ -93,11 +93,13 @@ impl SnapshotRuntimeResolver for PosixFsRuntimeResolver {
         let attached_drives = self
             .resolve_attached_drives(&snapshot_id, committed, &mut handles)
             .await?;
+        let tools_drive_path = self.resolve_tools_drive(committed).await?;
         let runtime_manifest = hydrate_runtime_manifest(
             committed_manifest,
             vm_state_path,
             mem_image_config_path,
             rootfs_image_config_path,
+            tools_drive_path,
             &attached_drives,
         )?;
         // Runtime artifacts are protected by the sandbox start-window lease (over
@@ -111,6 +113,23 @@ impl SnapshotRuntimeResolver for PosixFsRuntimeResolver {
 }
 
 impl PosixFsRuntimeResolver {
+    async fn resolve_tools_drive(
+        &self,
+        snapshot: &CommittedSnapshot,
+    ) -> RepositoryResult<Option<PathBuf>> {
+        let Some(tools_drive) = &snapshot.tools_drive else {
+            // Compatibility for snapshots created before tools-drive artifacts
+            // were repository-backed. Remove after those snapshots age out of retention.
+            return Ok(None);
+        };
+        let path = PosixFsSnapshotArtifactLayout::managed_layer_path(
+            &self.repository_root,
+            &tools_drive.digest,
+        );
+        validate_managed_artifact(&path, tools_drive, "tools drive").await?;
+        Ok(Some(path))
+    }
+
     fn snapshot_layout(&self, snapshot_id: &SnapshotId) -> PosixFsSnapshotArtifactLayout {
         PosixFsSnapshotArtifactLayout::new(&self.repository_root, snapshot_id)
     }

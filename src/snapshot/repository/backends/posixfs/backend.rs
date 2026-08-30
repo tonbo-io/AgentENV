@@ -138,6 +138,7 @@ impl PosixFsSnapshotRepository {
             rootfs_layers: built.rootfs_layers,
             attached_drives: built.attached_drives,
             memory_layers: built.memory_layers,
+            tools_drive: Some(built.tools_drive),
             disk_publications: Vec::new(),
         }
     }
@@ -318,6 +319,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -341,6 +343,7 @@ mod tests {
 
     use super::super::artifacts::PosixFsArtifactStore;
     use super::super::catalog::PosixFsCatalogStore;
+    use super::super::layout::PosixFsSnapshotArtifactLayout;
 
     #[derive(Debug)]
     struct TestOverlaybdLayerStore;
@@ -426,6 +429,7 @@ mod tests {
             memory_virtual_size,
             snapshot_dir.join(SNAPSHOT_ARTIFACT_LAYOUT.rootfs_image_config),
             rootfs_virtual_size,
+            snapshot_dir.join("tools.ext4"),
             &[],
         )
         .expect("seed manifest should be valid");
@@ -444,11 +448,20 @@ mod tests {
         let resolver = backend.runtime_resolver();
         let snapshot_id = SnapshotId::generate();
         let local_artifacts = seed_built_snapshot(tempdir.path());
+        let source_tools_drive = local_artifacts.tools_drive.path.clone();
         let metadata = sample_metadata(snapshot_id, Some("mvp"));
         let stored = repository
             .publish(metadata, local_artifacts)
             .await
             .expect("publish should work");
+        let committed_tools_drive = stored
+            .committed
+            .as_ref()
+            .and_then(|committed| committed.tools_drive.as_ref())
+            .expect("publish must record tools drive digest")
+            .clone();
+        std::fs::remove_file(&source_tools_drive)
+            .expect("source tools drive should be removable after publication");
 
         let fetched = repository
             .get("mvp")
@@ -464,6 +477,12 @@ mod tests {
         assert!(runnable.manifest().rootfs.image_config_path.exists());
         assert!(runnable.manifest().vm_state.path.exists());
         assert!(runnable.manifest().memory.image_config_path.exists());
+        assert!(runnable.manifest().tools_drive.path.exists());
+        let resolved_tools =
+            crate::digest::FileDigest::describe_blocking(&runnable.manifest().tools_drive.path)
+                .expect("describe resolved tools drive");
+        assert_eq!(resolved_tools.sha256, committed_tools_drive.digest);
+        assert_eq!(resolved_tools.size, committed_tools_drive.size);
 
         let image_config: OverlaybdImageConfig = serde_json::from_slice(
             &std::fs::read(runnable.manifest().rootfs.image_config_path.as_path())
@@ -472,6 +491,45 @@ mod tests {
         .expect("parse overlaybd image config");
         assert_eq!(image_config.repo_blob_url, "");
         assert_eq!(image_config.lowers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_corrupted_repository_tools_drive() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let backend = test_backend(tempdir.path());
+        let repository = backend.repository();
+        let resolver = backend.runtime_resolver();
+        let snapshot_id = SnapshotId::generate();
+        let stored = repository
+            .publish(
+                sample_metadata(snapshot_id, None),
+                seed_built_snapshot(tempdir.path()),
+            )
+            .await
+            .expect("publish should work");
+        let tools_drive = stored
+            .committed
+            .as_ref()
+            .and_then(|committed| committed.tools_drive.as_ref())
+            .expect("publish must record tools drive digest");
+        let repository_path =
+            PosixFsSnapshotArtifactLayout::managed_layer_path(tempdir.path(), &tools_drive.digest);
+        let mut permissions = std::fs::metadata(&repository_path)
+            .expect("read repository fixture permissions")
+            .permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&repository_path, permissions)
+            .expect("make repository fixture writable for corruption test");
+        std::fs::write(repository_path, b"corrupt-tools-drive")
+            .expect("corrupt repository fixture");
+
+        let error = resolver
+            .resolve(Arc::new(stored))
+            .await
+            .expect_err("digest mismatch must fail closed");
+        assert!(
+            matches!(error, RepositoryError::InvalidRequest { reason } if reason.contains("does not match committed digest"))
+        );
     }
 
     #[tokio::test]
@@ -649,6 +707,7 @@ mod tests {
             })],
             attached_drives: Vec::new(),
             memory_layers: Vec::new(),
+            tools_drive: None,
             disk_publications: Vec::new(),
             custom_extension_params: None,
         };
@@ -706,6 +765,7 @@ mod tests {
             })],
             attached_drives: Vec::new(),
             memory_layers: Vec::new(),
+            tools_drive: None,
             disk_publications: Vec::new(),
             custom_extension_params: None,
         };

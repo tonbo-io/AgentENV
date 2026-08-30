@@ -70,11 +70,7 @@ Tools drive image used to boot the AgentENV control plane inside each microVM.
 | `drive_path` | string | unset | Local tools ext4 source imported into the versioned dependency directory; requires an explicit `version` |
 | `control_plane_port` | integer | `49983` | Port used by envd inside the guest |
 
-Snapshots and paused sandboxes keep using the tools drive version they were
-created with. Launch does not download missing releases: operators must install
-the recorded version under `<deps_path>/tools/<version>/tools.ext4` before
-restore. Setup retains previously installed versions until they are removed
-manually.
+New snapshots publish the exact tools drive bytes into the snapshot repository and record their content digest. Restore materializes that digest into the node-local artifact cache, so a replacement node does not need the historical version preinstalled. Snapshots created before the digest field was introduced temporarily fall back to `<deps_path>/tools/<version>/tools.ext4`; this compatibility path can be removed after those snapshots age out of the configured retention window. Paused sandboxes that have not been published as durable snapshots continue to use their recorded local version.
 
 ## Template Rootfs Images
 

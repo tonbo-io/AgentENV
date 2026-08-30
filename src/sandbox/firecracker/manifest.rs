@@ -22,7 +22,16 @@ pub struct FirecrackerSnapshotManifest {
     pub vm_state: FirecrackerVmStateArtifacts,
     pub memory: FirecrackerMemoryArtifacts,
     pub rootfs: FirecrackerRootfsArtifacts,
+    #[serde(default)]
+    pub tools_drive: FirecrackerToolsDriveArtifact,
     pub attached_drives: Vec<FirecrackerAttachedDriveArtifacts>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirecrackerToolsDriveArtifact {
+    #[serde(skip)]
+    pub path: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +78,7 @@ impl FirecrackerSnapshotManifest {
         mem_virtual_size: u64,
         rootfs_image_config_path: impl Into<PathBuf>,
         rootfs_virtual_size: u64,
+        tools_drive_path: impl Into<PathBuf>,
         attached_drives: &[ExtraDrive],
     ) -> Result<Self> {
         Self {
@@ -83,6 +93,9 @@ impl FirecrackerSnapshotManifest {
             rootfs: FirecrackerRootfsArtifacts {
                 image_config_path: rootfs_image_config_path.into(),
                 virtual_size: rootfs_virtual_size,
+            },
+            tools_drive: FirecrackerToolsDriveArtifact {
+                path: tools_drive_path.into(),
             },
             attached_drives: Vec::new(),
         }
@@ -151,6 +164,7 @@ impl FirecrackerSnapshotManifest {
             0,
             "rootfs/image.json",
             rootfs_virtual_size,
+            "tools.ext4",
             attached_drives,
         )
         .expect("test snapshot attached drive virtual size must be known");
@@ -208,6 +222,9 @@ mod tests {
                 image_config_path: PathBuf::from("rootfs/image.json"),
                 virtual_size: 4096,
             },
+            tools_drive: FirecrackerToolsDriveArtifact {
+                path: PathBuf::from("tools.ext4"),
+            },
             attached_drives: vec![known],
         };
 
@@ -232,6 +249,7 @@ mod tests {
             4096,
             "rootfs/image.json",
             4096,
+            "tools.ext4",
             &[drive],
         )
         .expect_err("snapshot attached drive virtual size should be required");
@@ -247,6 +265,7 @@ mod tests {
             4096,
             "rootfs/image.json",
             4096,
+            "tools.ext4",
             &[],
         )
         .expect("empty attached drives should be valid");

@@ -295,6 +295,10 @@ pub struct CommittedSnapshot {
     pub attached_drives: Vec<CommittedAttachedDrive>,
     /// Managed overlaybd layers for the memory snapshot image, ordered bottom-up.
     pub memory_layers: Vec<ManagedLayer>,
+    /// Immutable tools drive bytes required to restore this snapshot on any node.
+    /// Legacy snapshots omit this field and temporarily fall back to their recorded version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_drive: Option<ManagedLayer>,
     #[serde(default)]
     pub disk_publications: Vec<PersistedDiskImagePublication>,
     /// Opaque user-provided JSON passed through to the custom extension hooks.
@@ -319,6 +323,7 @@ impl CommittedSnapshot {
             rootfs_layers: Vec::new(),
             attached_drives: Vec::new(),
             memory_layers: Vec::new(),
+            tools_drive: None,
             disk_publications: Vec::new(),
             custom_extension_params: None,
         }
@@ -609,6 +614,25 @@ mod tests {
             .runtime_versions
             .tools_drive_version
             .is_empty());
+    }
+
+    #[test]
+    fn snapshot_record_without_repository_tools_drive_remains_readable() {
+        let record = SnapshotRecord::mock_ready(CommittedSnapshot::mock());
+        let mut value = serde_json::to_value(record).expect("serialize snapshot record");
+        value["committed"]
+            .as_object_mut()
+            .expect("committed snapshot must be an object")
+            .remove("tools_drive");
+
+        let record: SnapshotRecord =
+            serde_json::from_value(value).expect("deserialize legacy snapshot record");
+
+        assert!(record
+            .committed
+            .expect("snapshot must remain committed")
+            .tools_drive
+            .is_none());
     }
 
     #[test]

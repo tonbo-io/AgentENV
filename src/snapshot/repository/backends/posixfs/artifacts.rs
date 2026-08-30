@@ -57,6 +57,7 @@ impl PosixFsArtifactStore {
             manifest,
         )?;
         let memory_layers = self.derive_memory_layers(&manifest.memory.image_config_path)?;
+        let tools_drive = self.import_managed_layer_by_hash(&manifest.tools_drive.path)?;
 
         let attached_drives = manifest
             .attached_drives
@@ -88,6 +89,7 @@ impl PosixFsArtifactStore {
         Ok(CollectedBuiltArtifacts {
             rootfs_layers,
             memory_layers,
+            tools_drive,
             attached_drives,
         })
     }
@@ -698,6 +700,7 @@ fn copy_file_with_sha256(source: &Path, destination: &Path) -> RepositoryResult<
 pub(crate) struct CollectedBuiltArtifacts {
     pub(crate) rootfs_layers: Vec<OverlaybdLayerRef>,
     pub(crate) memory_layers: Vec<ManagedLayer>,
+    pub(crate) tools_drive: ManagedLayer,
     pub(crate) attached_drives: Vec<CommittedAttachedDrive>,
 }
 
