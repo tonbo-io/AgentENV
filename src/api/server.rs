@@ -18,17 +18,6 @@ fn readiness_status(ublk_available: bool) -> StatusCode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn readiness_fails_closed_when_ublk_is_unavailable() {
-        assert_eq!(readiness_status(true), StatusCode::NO_CONTENT);
-        assert_eq!(readiness_status(false), StatusCode::SERVICE_UNAVAILABLE);
-    }
-}
-
 pub fn new<I, A, E, C>(api_impl: I) -> Router
 where
     I: AsRef<A> + AsRef<ApiImpl> + Clone + Send + Sync + 'static,
@@ -61,4 +50,15 @@ where
             auth::require_auth::<I>,
         ))
         .layer(middleware::from_fn(prometheus::http_metrics_middleware))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_fails_closed_when_ublk_is_unavailable() {
+        assert_eq!(readiness_status(true), StatusCode::NO_CONTENT);
+        assert_eq!(readiness_status(false), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
