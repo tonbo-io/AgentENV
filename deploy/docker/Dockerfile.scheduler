@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm AS build
+FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
@@ -7,17 +7,24 @@ RUN go mod download
 COPY services/ .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/scheduler ./scheduler/cmd
 
-FROM alpine:3.21 AS grpc-health-probe
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS grpc-health-probe
 ARG TARGETARCH
+COPY deploy/docker/grpc-health-probe-checksums.txt /grpc-health-probe-checksums.txt
 RUN apk add --no-cache curl \
 	&& case "${TARGETARCH}" in \
 		amd64|arm64) ARCH="${TARGETARCH}" ;; \
 		*) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
 	esac \
-	&& curl -fL "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.46/grpc_health_probe-linux-${ARCH}" -o /grpc_health_probe \
+	&& filename="grpc_health_probe-linux-${ARCH}" \
+	&& curl -fL "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.46/${filename}" -o "/${filename}" \
+	&& checksum_line="$(grep "  ${filename}$" /grpc-health-probe-checksums.txt)" \
+	&& test -n "${checksum_line}" \
+	&& cd / \
+	&& printf '%s\n' "${checksum_line}" | sha256sum -c - \
+	&& mv "/${filename}" /grpc_health_probe \
 	&& chmod +x /grpc_health_probe
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian12@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
 COPY --from=build /out/scheduler /scheduler
 COPY --from=grpc-health-probe /grpc_health_probe /grpc_health_probe
 COPY deploy/docker/config/default.json /config/default.json

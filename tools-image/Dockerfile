@@ -18,21 +18,22 @@
 #
 # Build example:
 #
-#   make -C tools-image TOOLS_VERSION=0.1.0 ENVD_REF=2026.17
+#   make -C tools-image TOOLS_VERSION=0.1.0
 #
 # Important build args:
 #   TOOLS_VERSION        Immutable AgentENV tools drive release version.
-#   ENVD_REF             Tag/branch/commit to build from e2b-dev/infra.
+#   ENVD_REF             Commit to build from e2b-dev/infra.
 #   ENVD_UPSTREAM_REPO   envd source repository. Override for forks.
-#   GO_VERSION           Go toolchain used to compile envd.
-ARG DEBIAN_VERSION=bookworm
-ARG GO_VERSION=1.25.9
+#   GO_IMAGE             Digest-pinned Go toolchain image.
+#   DEBIAN_IMAGE         Digest-pinned Debian build image.
+ARG GO_IMAGE=golang:1.25.9-bookworm@sha256:298734aec230b5f3e8cee450ce6d7eccc39f1797ba548ee90d57e9803030c6c3
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 ARG TOOLS_VERSION=0.1.0
 
 # ---------------------------------------------------------------------------
 # Stage 1: compile the static AgentENV guest init.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-${DEBIAN_VERSION} AS init-builder
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS init-builder
 
 ARG TARGETARCH
 
@@ -61,10 +62,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # The tools drive build pins an upstream ref, compiles a static envd binary,
 # and injects the resolved git commit into the binary for `envd -commit`.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-${DEBIAN_VERSION} AS envd-builder
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS envd-builder
 
-ARG ENVD_REF=2026.17
-ARG ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git
+ARG ENVD_REF
+ARG ENVD_UPSTREAM_REPO
 ARG TARGETARCH
 
 RUN apt-get update \
@@ -74,6 +75,8 @@ RUN apt-get update \
 WORKDIR /src
 
 RUN set -eux; \
+    test -n "$ENVD_REF"; \
+    test -n "$ENVD_UPSTREAM_REPO"; \
     git init infra; \
     cd infra; \
     git remote add origin "$ENVD_UPSTREAM_REPO"; \
@@ -110,7 +113,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # The Debian stage only supplies build-time file utilities. The exported rootfs
 # contains the static init, envd, version metadata, mount points, and symlinks.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS rootfs
+FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS rootfs
 
 ARG TOOLS_VERSION
 
@@ -135,7 +138,7 @@ RUN set -eux; \
 # image gets 50% content headroom and a 16 MiB floor to leave room for ext4
 # metadata, journal, and inode tables.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS ext4-builder
+FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS ext4-builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends e2fsprogs findutils \

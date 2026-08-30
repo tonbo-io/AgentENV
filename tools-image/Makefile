@@ -4,8 +4,7 @@ SHELL := /usr/bin/env bash
 
 REPO_ROOT := ..
 TOOLS_VERSION ?= 0.1.0
-ENVD_REF ?= 2026.17
-ENVD_UPSTREAM_REPO ?= https://github.com/e2b-dev/infra.git
+include envd-source.env
 HOST_MACHINE := $(shell uname -m)
 ifeq ($(HOST_MACHINE),x86_64)
 DEFAULT_ARCH := amd64

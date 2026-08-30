@@ -2,7 +2,7 @@
 
 ARG AENV_VIRTUALIZATION_MODE=kvm
 
-FROM rust:1-bookworm AS chef
+FROM rust:1-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS chef
 
 WORKDIR /build
 ENV CARGO_TARGET_DIR=/build/target
@@ -50,7 +50,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cp /build/target/release/server /out-server \
     && cp /build/target/release/uvm-ublk-daemon /out-uvm-ublk-daemon
 
-FROM ubuntu:24.04 AS runtime-base
+FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 AS runtime-base
 ARG APT_MIRROR_BASE
 ARG TARGETARCH
 # Optional extra runtime packages, specified as a whitespace- or comma-separated build arg.
