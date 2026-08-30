@@ -60,14 +60,40 @@ pub(crate) struct ProxyClients {
 impl ProxyClients {
     async fn request(
         &self,
-        request: Request,
+        mut request: Request,
     ) -> Result<Response<Incoming>, hyper_util::client::legacy::Error> {
-        if request.version() == hyper::Version::HTTP_2 {
+        if native_grpc_request(&request) {
             self.http2.request(request).await
         } else {
+            if request.version() == hyper::Version::HTTP_2 {
+                *request.version_mut() = hyper::Version::HTTP_11;
+            }
             self.http1.request(request).await
         }
     }
+}
+
+fn native_grpc_request(request: &Request) -> bool {
+    const GRPC_MEDIA_TYPE: &str = "application/grpc";
+
+    if request.version() != hyper::Version::HTTP_2 {
+        return false;
+    }
+    let Some(media_type) = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+    else {
+        return false;
+    };
+    let Some(prefix) = media_type.get(..GRPC_MEDIA_TYPE.len()) else {
+        return false;
+    };
+    prefix.eq_ignore_ascii_case(GRPC_MEDIA_TYPE)
+        && (media_type.len() == GRPC_MEDIA_TYPE.len()
+            || media_type.as_bytes()[GRPC_MEDIA_TYPE.len()] == b'+')
 }
 type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -1380,12 +1406,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_clients_use_h2c_for_http2_requests() {
+    async fn proxy_clients_use_h2c_for_native_grpc_requests() {
         let address =
             spawn_upstream(axum::Router::new().fallback(|| async { "h2-response" })).await;
         let request = Request::builder()
             .version(hyper::Version::HTTP_2)
             .uri(format!("http://{address}/grpc.Echo/Call"))
+            .header(header::CONTENT_TYPE, "application/grpc+proto")
             .body(Body::empty())
             .unwrap();
 
@@ -1395,6 +1422,55 @@ mod tests {
             response.into_body().collect().await.unwrap().to_bytes(),
             "h2-response"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_clients_translate_ordinary_http2_to_http1_origins() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request_head(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nh1-response",
+                )
+                .await
+                .unwrap();
+        });
+        let request = Request::builder()
+            .version(hyper::Version::HTTP_2)
+            .uri(format!("http://{address}/index.html"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = build_proxy_clients().request(request).await.unwrap();
+        assert_eq!(response.version(), hyper::Version::HTTP_11);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "h1-response"
+        );
+        upstream.await.unwrap();
+    }
+
+    #[test]
+    fn h2c_selection_is_limited_to_native_grpc_media_types() {
+        for content_type in ["application/grpc", "Application/Grpc+Proto"] {
+            let request = Request::builder()
+                .version(hyper::Version::HTTP_2)
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::empty())
+                .unwrap();
+            assert!(native_grpc_request(&request), "{content_type}");
+        }
+        for content_type in ["text/html", "application/grpc-web", "application/json"] {
+            let request = Request::builder()
+                .version(hyper::Version::HTTP_2)
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::empty())
+                .unwrap();
+            assert!(!native_grpc_request(&request), "{content_type}");
+        }
     }
 
     #[tokio::test]
