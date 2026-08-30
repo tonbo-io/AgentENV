@@ -18,10 +18,15 @@ const (
 	oldRoot  = ".agentenv-old-root"
 )
 
-func bootstrap(cmdline string) error {
+func bootstrap() error {
 	if err := mountInitialFilesystems(); err != nil {
 		return err
 	}
+	cmdlineBytes, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return fmt.Errorf("read kernel command line: %w", err)
+	}
+	cmdline := string(cmdlineBytes)
 	if err := mountUserRoot(); err != nil {
 		return err
 	}
