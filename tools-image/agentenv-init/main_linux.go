@@ -5,11 +5,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -29,7 +31,7 @@ func main() {
 	if os.Getpid() != 1 {
 		logger.Fatalf("init mode must run as PID 1, got PID %d", os.Getpid())
 	}
-	if err := bootstrap(logger); err != nil {
+	if err := bootstrap(); err != nil {
 		logger.Printf("bootstrap failed: %v", err)
 		powerOff(logger)
 	}
@@ -50,27 +52,53 @@ func main() {
 	cmd := exec.Command(envdPath)
 	cmd.Env = os.Environ()
 	cmd.Stdin = os.Stdin
-	envdLog, err := os.OpenFile("/run/agentenv/envd.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	envdLog, err := openRotatingLog("/run/agentenv/envd.log", envdLogSegmentBytes)
 	if err != nil {
 		logger.Printf("open envd log: %v", err)
 		powerOff(logger)
 	}
-	cmd.Stdout = envdLog
-	cmd.Stderr = envdLog
+	envdLogReader, envdLogWriter, err := os.Pipe()
+	if err != nil {
+		_ = envdLog.Close()
+		logger.Printf("create envd log pipe: %v", err)
+		powerOff(logger)
+	}
+	cmd.Stdout = envdLogWriter
+	cmd.Stderr = envdLogWriter
 	if err := cmd.Start(); err != nil {
+		_ = envdLogReader.Close()
+		_ = envdLogWriter.Close()
 		_ = envdLog.Close()
 		logger.Printf("start envd: %v", err)
 		powerOff(logger)
 	}
-	if err := envdLog.Close(); err != nil {
-		logger.Printf("close parent envd log descriptor: %v", err)
+	if err := envdLogWriter.Close(); err != nil {
+		logger.Printf("close parent envd log pipe: %v", err)
 	}
+	logDone := make(chan struct{})
+	go func() {
+		defer close(logDone)
+		if _, err := io.Copy(envdLog, envdLogReader); err != nil {
+			logger.Printf("write bounded envd log: %v", err)
+			_, _ = io.Copy(io.Discard, envdLogReader)
+		}
+		_ = envdLogReader.Close()
+	}()
 	logger.Printf("started envd pid=%d", cmd.Process.Pid)
 
 	if err := reapUntilEnvdExits(cmd.Process.Pid, signals); err != nil {
 		logger.Printf("envd exited: %v", err)
 	} else {
 		logger.Printf("envd exited")
+	}
+	select {
+	case <-logDone:
+	case <-time.After(time.Second):
+		_ = envdLogReader.Close()
+		<-logDone
+	}
+	if err := envdLog.Close(); err != nil {
+		logger.Printf("close envd log: %v", err)
 	}
 	powerOff(logger)
 }
