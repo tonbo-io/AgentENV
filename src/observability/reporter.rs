@@ -16,6 +16,7 @@ use crate::cfg::{ClusterConfig, ObservabilitySchedulerReportConfig};
 use crate::orchestrator::{SandboxLifecycleEvent, SandboxLifecycleEventType};
 use crate::p2p::P2pEndpoint;
 use crate::proto::scheduler::{self, scheduler_client::SchedulerClient};
+use crate::sandbox::UblkDeviceManager;
 
 const MAX_REPORT_BACKOFF: Duration = Duration::from_secs(60);
 const GRPC_CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -264,7 +265,13 @@ impl ObservabilityReporter {
         snapshot.machine_info.cpu_config_json = cpu_config_json.clone();
         let node_id = snapshot.node_id.clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let req = Self::build_heartbeat_request(snapshot, now_ms, p2p_endpoint);
+        let status = if UblkDeviceManager::try_global().is_some_and(UblkDeviceManager::is_available)
+        {
+            scheduler::NodeStatus::Ready
+        } else {
+            scheduler::NodeStatus::Unhealthy
+        };
+        let req = Self::build_heartbeat_request(snapshot, now_ms, p2p_endpoint, status);
 
         let mut request = Request::new(req);
         request.set_timeout(GRPC_CALL_TIMEOUT);
@@ -365,6 +372,7 @@ impl ObservabilityReporter {
         snapshot: super::NodeSnapshot,
         now_ms: i64,
         p2p_endpoint: Option<&P2pEndpoint>,
+        status: scheduler::NodeStatus,
     ) -> scheduler::HeartbeatRequest {
         scheduler::HeartbeatRequest {
             node_id: snapshot.node_id,
@@ -380,7 +388,7 @@ impl ObservabilityReporter {
                 cpu_config_json: snapshot.machine_info.cpu_config_json.unwrap_or_default(),
             }),
             snapshot: Some(scheduler::NodeSnapshot {
-                status: scheduler::NodeStatus::Ready.into(),
+                status: status.into(),
                 allocated_cpu: snapshot.metrics.allocated_cpu,
                 allocated_memory_bytes: snapshot.metrics.allocated_memory_bytes,
                 cpu_percent: snapshot.metrics.cpu_percent,

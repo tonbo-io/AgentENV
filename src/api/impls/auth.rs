@@ -50,7 +50,7 @@ where
 {
     let proxy_request =
         proxy::is_sandbox_proxy_request(&request, api_impl.as_ref().sandbox_proxy_domains());
-    if matches!(request.uri().path(), "/health" | "/metrics") && !proxy_request {
+    if matches!(request.uri().path(), "/health" | "/ready" | "/metrics") && !proxy_request {
         return next.run(request).await;
     }
 

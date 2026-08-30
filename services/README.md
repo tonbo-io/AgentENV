@@ -244,6 +244,9 @@ The DaemonSet injects scheduler-report identity and endpoint wiring for runtime 
 - `AENV_OBSERVABILITY_SCHEDULER_REPORT_ENABLED=true` enables heartbeat reporting.
 - `AENV_OBSERVABILITY_SCHEDULER_ENDPOINT` is set to `http://agentenv-scheduler:9090`.
 - `AENV_SANDBOX_PROXY_DOMAINS` comes from the shared sandbox proxy ConfigMap.
+- The immutable Firecracker, kernel, tools-drive, and OverlayBD dependencies remain under `/opt/agentenv/deps`; `/workspace/env` contains only mutable state and may be backed by the node hostPath without hiding image contents.
+- `/health` is process liveness. `/ready` requires the owned ublk daemon to be alive; the same status is reported to Scheduler heartbeats so a damaged node is removed from placement.
+- Pod termination sends SIGTERM directly to AgentENV. The server fences new lifecycle work and persists running Sandboxes before exiting; no `preStop` hook may wait for that work before SIGTERM is delivered.
 
 Shared Kubernetes helpers:
 

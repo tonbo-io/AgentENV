@@ -200,13 +200,13 @@ impl UblkDeviceManager {
     /// client (device operations will fail with a clear error).
     ///
     /// Safe to call multiple times — only the first call takes effect.
-    pub async fn init_global(config: Option<UblkDaemonConfig>) {
+    pub async fn init_global(config: Option<UblkDaemonConfig>) -> Result<()> {
         GLOBAL_MANAGER
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 let (client, pool_enabled) = match config {
                     Some(cfg) => {
                         let pool_enabled = cfg.pool_config.is_some();
-                        let client = match UblkDaemonClient::new(UblkDaemonSpawnConfig {
+                        let client = UblkDaemonClient::new(UblkDaemonSpawnConfig {
                             binary_path: &cfg.daemon_binary,
                             socket_path: cfg.socket_path,
                             global_config: &cfg.global_config,
@@ -219,28 +219,22 @@ impl UblkDeviceManager {
                             runtime_device_timeout: cfg.runtime_device_timeout,
                         })
                         .await
-                        {
-                            Ok(c) => Some(c),
-                            Err(err) => {
-                                tracing::error!(?err, "failed to spawn ublk daemon");
-                                None
-                            }
-                        };
-                        (client, pool_enabled)
+                        .context("start required ublk daemon")?;
+                        (Some(client), pool_enabled)
                     }
                     None => (None, false),
                 };
-                UblkDeviceManager::new(client, pool_enabled)
+                Ok(UblkDeviceManager::new(client, pool_enabled))
             })
-            .await;
+            .await?;
+        Ok(())
     }
 
     /// Convenience: resolve daemon config from [`AppConfig`] and initialize.
     ///
     /// Returns an error if the daemon binary cannot be found.
     pub async fn init_global_from_config(config: &crate::cfg::AppConfig) -> Result<()> {
-        Self::init_global(Some(UblkDaemonConfig::from_app_config(config)?)).await;
-        Ok(())
+        Self::init_global(Some(UblkDaemonConfig::from_app_config(config)?)).await
     }
 
     /// Convenience: resolve daemon config and pass a P2P publish endpoint to the daemon.
@@ -250,22 +244,24 @@ impl UblkDeviceManager {
     ) -> Result<()> {
         let mut daemon_config = UblkDaemonConfig::from_app_config(config)?;
         daemon_config.p2p_publish_url = p2p_publish_url.map(|s| s.to_string());
-        Self::init_global(Some(daemon_config)).await;
-        Ok(())
+        Self::init_global(Some(daemon_config)).await
     }
 
     /// Get the global manager instance.
     ///
     /// Panics if [`init_global`] has not been called.
     pub fn global() -> &'static Self {
-        GLOBAL_MANAGER
-            .get()
-            .expect("UblkDeviceManager::init_global() must be called before global()")
+        Self::try_global().expect("UblkDeviceManager::init_global() must be called before global()")
+    }
+
+    /// Returns the process-global manager after initialization.
+    pub fn try_global() -> Option<&'static Self> {
+        GLOBAL_MANAGER.get()
     }
 
     /// Returns `true` if the ublk daemon client was successfully spawned.
     pub fn is_available(&self) -> bool {
-        self.client.is_some()
+        self.client.as_ref().is_some_and(|client| client.is_alive())
     }
 
     fn require_client(&self) -> Result<&Arc<UblkDaemonClient>> {
