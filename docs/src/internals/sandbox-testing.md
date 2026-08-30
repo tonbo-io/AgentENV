@@ -227,8 +227,7 @@ enabled = false
 ### TOML parameter reference
 
 - `[firecracker]`
-  - `boot_args`: Kernel command line. The runtime appends `init=/init` if not
-    already present (tools drive provides the init script).
+  - `boot_args`: Kernel command line. The runtime appends `init=/init` when needed; the tools drive exposes the static `agentenv-init` binary at that path.
   - `binary_path`: Absolute or relative path to `firecracker`.
   - `socket_timeout_secs`: Max time to wait for the Firecracker API socket.
   - `socket_poll_ms`: Poll interval for checking socket existence.
@@ -564,8 +563,7 @@ client API and the binary that setup downloads:
 
 ### Run commands via envd
 
-Once the sandbox is started (with a rootfs that includes the envd daemon), you
-can execute commands inside the VM using the process API:
+Once the sandbox is started, the tools drive's envd daemon executes commands inside the user root through the process API:
 
 ```rust
 // Simple command
@@ -586,8 +584,7 @@ handle.kill().await?;
 let output = handle.wait().await?;
 ```
 
-The process API uses envd's gRPC `ProcessClient` under the hood. It requires
-the envd daemon to be running inside the guest VM.
+The process API uses envd's gRPC `ProcessClient` under the hood and targets the envd process owned by guest PID 1.
 
 ### Run different scripts for multiple snapshot resumes
 

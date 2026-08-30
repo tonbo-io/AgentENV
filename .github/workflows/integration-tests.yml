@@ -38,6 +38,14 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Build tools drive from this revision
+        run: |
+          tools_version="0.0.0-ci.g${GITHUB_SHA:0:12}"
+          output_dir="${RUNNER_TEMP}/agentenv-tools"
+          make -C tools-image build TOOLS_VERSION="$tools_version" ARCH=amd64 OUTPUT_DIR="$output_dir"
+          echo "AENV_TOOLS_VERSION=$tools_version" >> "$GITHUB_ENV"
+          echo "AENV_TOOLS_DRIVE_PATH=$output_dir/tools-$tools_version-amd64.ext4" >> "$GITHUB_ENV"
       - uses: ./.github/actions/rust-ci-setup
         with:
           ci_deps_target: ci-deps

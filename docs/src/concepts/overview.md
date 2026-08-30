@@ -8,7 +8,7 @@ AgentENV runs AI agents inside isolated Firecracker microVMs. Each sandbox is a 
 flowchart TD
     subgraph node[AgentENV Node]
         api["API<br/>(Axum)"] --> orchestrator["Orchestrator<br/>(lifecycle)"]
-        orchestrator --> vm["Firecracker VM<br/>/dev/vda (rootfs)<br/>/dev/vdb (extra)"]
+        orchestrator --> vm["Firecracker VM<br/>/dev/vda (platform tools)<br/>/dev/vdb (user root)"]
         vm --> block["Block Device Layer<br/>(overlaybd + ublk)"]
     end
     style node fill:transparent,stroke:gray
@@ -20,8 +20,9 @@ flowchart TD
 2. The **API layer** validates the request, checks authentication, and forwards it to the **orchestrator**.
 3. The **orchestrator** manages the sandbox lifecycle: it creates a Firecracker VM, sets up networking, and attaches block devices.
 4. The VM boots with a **layered block device** (overlaybd) that stacks read-only base image layers with a writable upper layer. Multiple sandboxes share the same base layers.
-5. Inside the VM, an **envd** daemon handles command execution, file operations, and health reporting.
-6. Clients interact with running sandboxes via the **reverse proxy** (`/proxy`, routing headers, or configured sandbox proxy domains), which forwards HTTP and WebSocket traffic to services inside the VM.
+5. Inside the VM, **agentenv-init** runs as PID 1, pivots into the user filesystem, prepares the guest runtime, and directly owns **envd**.
+6. **envd** handles command execution, file operations, process streaming, and health reporting.
+7. Clients interact with running sandboxes via the **reverse proxy** (`/proxy`, routing headers, or configured sandbox proxy domains), which forwards HTTP and WebSocket traffic to services inside the VM.
 
 ## Key Components
 
@@ -31,6 +32,7 @@ flowchart TD
 | **Orchestrator** | State machine managing sandbox lifecycle transitions (create, pause, resume, delete) |
 | **Firecracker VM** | Lightweight microVM providing kernel-level isolation per sandbox |
 | **Block Device Layer** | overlaybd (layered images) + ublk (userspace block devices) for efficient storage |
+| **agentenv-init** | Static guest PID 1 that owns bootstrap, child reaping, and the envd lifecycle |
 | **envd** | In-guest daemon for executing commands, streaming output, and managing processes |
 | **Reverse Proxy** | Routes HTTP/WebSocket traffic from clients to services running inside sandboxes |
 | **Snapshot Manager** | Manages committed snapshots for efficient sandbox creation and reuse |

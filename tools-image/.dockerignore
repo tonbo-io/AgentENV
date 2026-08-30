@@ -1,5 +1,5 @@
 *
 !Dockerfile
-!init
-!pivot-init
 !Makefile
+!agentenv-init/
+!agentenv-init/**

@@ -120,7 +120,6 @@ test-unit:
 	$(CAPABILITY_TEST_ENV) $(CAPABILITY_RUNNER) $(CARGO) test -p uvm-ublk -p uvm-ublk-daemon --lib
 	bash scripts/tests/verify-capability-runner.sh
 	bash scripts/tests/verify-install-service.sh
-	bash scripts/tests/verify-tools-init.sh
 
 test-integration: test-agent-integration test-envd test-ublk
 

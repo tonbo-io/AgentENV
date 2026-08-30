@@ -1,29 +1,20 @@
-# AgentENV envd Tools Drive
+# AgentENV Tools Drive
 
-This directory contains the source for the envd tools drive attached to every
-Firecracker guest as `/dev/vda`.
+This directory builds the small ext4 tools drive attached to every Firecracker guest as `/dev/vda`. Normal server startup consumes the immutable image configured in `config/deps_manifest.toml`.
 
-This source is here so contributors can inspect and reproduce the tools drive
-that AgentENV consumes as a prebuilt runtime asset. Normal `make start-server`
-does not rebuild this image; server startup continues to download the configured
-tools drive from `config/deps_manifest.toml` unless `tools.drive_path` points at
-a local ext4 file.
+The drive contains two static platform binaries:
 
-The build is intentionally self-contained:
+- `agentenv-init` runs as guest PID 1, mounts the user root and attached drives, pivots into the user filesystem, configures the minimal runtime mounts and network files, reaps orphaned children, and starts `envd`.
+- `envd` exposes the guest control API and launches user processes.
 
-1. Clone and compile `envd` from `e2b-dev/infra` at `ENVD_REF`.
-2. Assemble the guest tools rootfs with BusyBox, `/init`, `/agentenv/pivot-init`,
-   and `/agentenv/envd`.
-3. Create `/tools.ext4`.
+`agentenv-init` is the sole guest init. A running sandbox contains `agentenv-init`, `envd`, and the user processes requested through `envd`. PID 1 writes envd stdout and stderr directly to the ephemeral `/run/agentenv/envd.log`, which keeps verbose process-event logging off the Firecracker serial path without adding a logging daemon. If `envd` exits, PID 1 powers off the guest and the host observes that runtime identity as unavailable.
+
+## Build
 
 Requirements:
 
-- Docker with the Buildx plugin available (`docker buildx version`).
-- The default `GO_VERSION` is aligned with the default upstream `ENVD_REF`.
-  Override it from `docker buildx build` only if the selected envd source
-  supports a different Go toolchain.
-
-## Local Build
+- Docker with Buildx.
+- Go only for direct `agentenv-init` checks; Docker supplies the pinned build toolchain for the drive.
 
 From this directory:
 
@@ -37,115 +28,54 @@ From the repository root:
 make -C tools-image
 ```
 
-The output is written to:
+The output is `tools-image/out/tools-<TOOLS_VERSION>-<ARCH>.ext4`.
 
-```text
-tools-image/out/tools-<TOOLS_VERSION>-<ARCH>.ext4
+Run the static init checks without building a container:
+
+```bash
+make check
 ```
 
 ## Versioning
 
-`TOOLS_VERSION` is the SemVer release of the complete drive, including envd,
-BusyBox, and the init scripts. Published versions are immutable: any byte-level
-change requires a new version. `ENVD_REF` remains the upstream `e2b-dev/infra`
-ref used to compile envd and is not necessarily the same string as the version
-reported by the binary.
+`TOOLS_VERSION` identifies the complete drive, including `agentenv-init` and `envd`. Published versions are immutable, so every content change requires a new version. `ENVD_REF` identifies the upstream `e2b-dev/infra` source used to compile `envd` and may differ from the version reported by the binary.
 
-Official releases use normal versions such as `0.1.0`. Custom distributions use
-a prerelease identifier that is unique within the AgentENV deployment, such as
-`0.1.0-custom.1`. Do not publish different drive contents under the same
-version.
+Official releases use versions such as `0.1.0`. Custom distributions use unique prerelease versions such as `0.1.0-tonbo.2`.
 
-AgentENV's runtime config records the expected in-guest envd version:
-
-```toml
-[envd]
-version = "..."
-```
-
-After building a tools drive, use the build log to find the value printed by:
-
-```bash
-/out/envd -version
-```
-
-That is the value that should match `[envd].version`. For cross-architecture
-builds, the Dockerfile skips executing the target binary in the builder; mount
-the generated ext4 on a matching Linux host and run `/agentenv/envd -version`
-there instead. The build also prints, for native builds:
-
-```bash
-/out/envd -commit
-```
-
-which identifies the upstream commit baked into the binary.
+AgentENV records the expected in-guest envd version under `[envd].version`. For a native Docker build, the build log prints both `/out/envd -version` and `/out/envd -commit`. For a cross build, inspect those values on a matching Linux host.
 
 ## Configuration
 
-The build accepts these Make variables:
-
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `TOOLS_VERSION` | `0.1.0` | Immutable SemVer release of the complete tools drive |
-| `ENVD_REF` | `2026.17` | Tag, branch, or fetchable commit to build from the envd upstream repository |
+|---|---|---|
+| `TOOLS_VERSION` | `0.1.0` | Immutable SemVer for the complete tools drive |
+| `ENVD_REF` | `2026.17` | Fetchable envd source ref |
 | `ENVD_UPSTREAM_REPO` | `https://github.com/e2b-dev/infra.git` | Repository containing `packages/envd` |
-| `ARCH` | host architecture, normalized to `amd64` or `arm64` | Target architecture |
-| `PUBLISH_PLATFORMS` | `linux/amd64,linux/arm64` | Platforms included in the published OCI image |
-| `OUTPUT_DIR` | `out` | Directory for exported tools drive images |
-| `OUTPUT_NAME` | `tools-${TOOLS_VERSION}-${ARCH}.ext4` | Versioned tools drive filename |
+| `ARCH` | Host architecture normalized to `amd64` or `arm64` | Build architecture |
+| `PUBLISH_PLATFORMS` | `linux/amd64,linux/arm64` | Platforms in a published OCI manifest |
+| `OUTPUT_DIR` | `out` | Export directory |
+| `OUTPUT_NAME` | `tools-${TOOLS_VERSION}-${ARCH}.ext4` | Export filename |
 | `IMAGE` | `agentenv-tools:${TOOLS_VERSION}` | Local or remote image tag |
-| `DOCKER` | `docker` | Docker CLI command |
+| `DOCKER` | `docker` | Docker CLI |
 
-Examples:
+Example:
 
 ```bash
-make TOOLS_VERSION=0.1.0 ENVD_REF=2026.17 ARCH=amd64
-
-make \
-  ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git \
-  TOOLS_VERSION=0.1.0 \
-  ENVD_REF=2026.17 \
-  ARCH=amd64
+make TOOLS_VERSION=0.1.0-tonbo.2 ENVD_REF=2026.17 ARCH=amd64
 ```
 
 ## Publish
 
-The `publish` target builds a multi-platform artifact and pushes it to `IMAGE`.
-It accepts SemVer releases and prereleases without build metadata, requires the
-image tag to match that version, and refuses to overwrite a tag found by its
-preflight check. That check is not atomic: the registry must enforce immutable
-tags to prevent concurrent or external publishers from replacing a release.
+The reviewed `Publish Tools Image` workflow builds native `amd64` and `arm64` artifacts and creates the multi-platform manifest. The local target uses the same immutable-tag contract:
 
 ```bash
-make publish \
-  TOOLS_VERSION=0.1.0 \
-  ENVD_REF=2026.17 \
-  IMAGE=ghcr.io/kvcache-ai/agentenv-tools:0.1.0
-
-make publish \
-  TOOLS_VERSION=0.1.0-custom.1 \
-  ENVD_REF=2026.17 \
-  IMAGE=registry.example.com/custom/agentenv-tools:0.1.0-custom.1
+make publish TOOLS_VERSION=0.1.0-tonbo.2 ENVD_REF=2026.17 IMAGE=ghcr.io/tonbo-io/agentenv-tools:0.1.0-tonbo.2
 ```
 
-After validation, update `[tools].version` in `config/deps_manifest.toml` to
-the newly published version. Git revisions and OCI digests remain release
-provenance; snapshots persist only `TOOLS_VERSION`.
+After publication and runtime validation, update `[tools].version` in `config/deps_manifest.toml`. Snapshots persist `TOOLS_VERSION`; Git revisions and OCI digests provide release provenance.
 
-## Local Verification
+## Runtime Validation
 
-To test a locally built tools drive, point AgentENV at the generated ext4:
+Point `[tools].drive_path` at a locally built ext4 only on a Linux development host with the required KVM setup. Product validation uses the reviewed isolated workflow and verifies cold boot, command execution, PTYs, DNS, attached drives and subpaths, pause/resume, snapshot restore, the guest process tree, and fail-closed behavior when `envd` exits.
 
-```toml
-[tools]
-version = "0.1.0"
-drive_path = "tools-image/out/tools-0.1.0-amd64.ext4"
-```
-
-The path is resolved relative to the server process working directory, not
-relative to this README. Setup imports the file into the immutable versioned
-directory under `deps_path`; changing its contents requires a new version.
-
-Root filesystem resizing is performed by the host-side `overlaybd-resize`
-binary installed from the OverlayBD package under `deps_path`; it is not part
-of this guest tools drive.
+Host-side root filesystem resizing remains owned by the OverlayBD toolchain and is outside this guest drive.
