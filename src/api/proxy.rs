@@ -60,11 +60,14 @@ pub(crate) struct ProxyClients {
 impl ProxyClients {
     async fn request(
         &self,
-        request: Request,
+        mut request: Request,
     ) -> Result<Response<Incoming>, hyper_util::client::legacy::Error> {
         if native_grpc_request(&request) {
             self.http2.request(request).await
         } else {
+            if request.version() == hyper::Version::HTTP_2 {
+                *request.version_mut() = hyper::Version::HTTP_11;
+            }
             self.http1.request(request).await
         }
     }
