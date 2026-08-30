@@ -73,27 +73,6 @@ spec:
               # the host runs out of memory. Change this value accordingly.
               memory: 8Gi
           lifecycle:
-            preStop:
-              exec:
-                command:
-                  - /bin/sh
-                  - "-c"
-                  - |
-                    echo "preStop: waiting for sandboxes to drain..."
-                    while true; do
-                      count=$(curl -sf -H "X-API-Key: ${AENV_API_KEY}" http://localhost:8000/sandboxes | jq 'length') || count=""
-                      if [ -z "$count" ]; then
-                        echo "preStop: failed to query sandbox count, retrying..."
-                        sleep 3
-                        continue
-                      fi
-                      echo "preStop: $count sandbox(es) remaining"
-                      if [ "$count" = "0" ]; then
-                        echo "preStop: all sandboxes drained, exiting"
-                        break
-                      fi
-                      sleep 3
-                    done
             postStart:
               exec:
                 command:
@@ -112,14 +91,14 @@ spec:
             privileged: true
           startupProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 48
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             periodSeconds: 5
             timeoutSeconds: 3

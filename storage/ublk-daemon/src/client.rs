@@ -138,6 +138,11 @@ struct UblkDaemonClientInner {
 }
 
 impl UblkDaemonClient {
+    /// Returns whether the owned daemon process is still alive.
+    pub fn is_alive(&self) -> bool {
+        !self.inner.daemon_dead.load(Ordering::Acquire)
+    }
+
     /// Spawn the `uvm-ublk-daemon` process and wait for it to become ready.
     ///
     /// This is the primary constructor. It:
@@ -665,6 +670,7 @@ mod tests {
             .create_overlaybd(Path::new("/img.json"), Path::new("/global.json"))
             .await;
         assert!(err.is_err());
+        assert!(!client.is_alive());
         let msg = format!("{:#}", err.unwrap_err());
         assert!(
             msg.contains("not running"),
