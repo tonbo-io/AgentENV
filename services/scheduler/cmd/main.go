@@ -106,6 +106,7 @@ func main() {
 
 	var leaderClient kubernetes.Interface
 	var leaderElector *leaderelection.LeaderElector
+	var leadershipPublisher leadershipPublisher
 	leadershipLostCh := make(chan struct{}, 1)
 	if leaderElectionEnabled {
 		restConfig, err := rest.InClusterConfig()
@@ -116,11 +117,31 @@ func main() {
 		if err != nil {
 			logger.Fatal("create Kubernetes client for scheduler leader election failed", zap.Error(err))
 		}
+		leadershipPublisher = newPodLabelLeadershipPublisher(leaderClient, cfg.Scheduler.LeaderElection)
+		if leadershipPublisher != nil {
+			// A container restart retains Pod metadata. Remove a stale leader
+			// label before joining the election so the Service cannot route to a
+			// process that has not acquired the current Lease.
+			if err := leadershipPublisher.setLeading(context.Background(), false); err != nil {
+				logger.Fatal("clear stale scheduler leadership routing failed", zap.Error(err))
+			}
+		}
 		leaderElector, err = newLeaderElector(
 			logger,
 			newLeaderElectionLock(leaderClient, cfg.Scheduler.LeaderElection),
 			cfg.Scheduler.LeaderElection,
 			func(leaderCtx context.Context) {
+				if leadershipPublisher != nil {
+					if err := leadershipPublisher.setLeading(leaderCtx, true); err != nil {
+						logger.Error("publish scheduler leader routing failed", zap.Error(err))
+						select {
+						case leadershipLostCh <- struct{}{}:
+						default:
+						}
+						<-leaderCtx.Done()
+						return
+					}
+				}
 				gate.setLeader(true)
 				healthStatus.setSchedulerServing(true)
 				runLeaderWork(leaderCtx)
@@ -128,6 +149,11 @@ func main() {
 			func() {
 				gate.setLeader(false)
 				healthStatus.setSchedulerServing(false)
+				if leadershipPublisher != nil {
+					if err := leadershipPublisher.setLeading(context.Background(), false); err != nil {
+						logger.Warn("remove scheduler leader routing failed", zap.Error(err))
+					}
+				}
 				if runCtx.Err() == nil {
 					select {
 					case leadershipLostCh <- struct{}{}:
@@ -195,8 +221,13 @@ func main() {
 	// is intentionally left to expire so no replacement can overlap this
 	// process during graceful shutdown.
 	fenceScheduler(gate, healthStatus)
-	cancelRun()
 	healthStatus.setProcessServing(false)
+	if leadershipPublisher != nil {
+		if err := leadershipPublisher.setLeading(context.Background(), false); err != nil {
+			logger.Warn("remove scheduler leader routing during shutdown failed", zap.Error(err))
+		}
+	}
+	cancelRun()
 
 	gracefulStopDone := make(chan struct{})
 	go func() {

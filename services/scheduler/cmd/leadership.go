@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	schedulerv1 "agentenv/services/api/proto"
 	"agentenv/services/shared/config"
@@ -14,11 +17,66 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 )
+
+const leadershipPublishTimeout = 5 * time.Second
+
+type leadershipPublisher interface {
+	setLeading(context.Context, bool) error
+}
+
+type podPatcher interface {
+	Patch(context.Context, string, types.PatchType, []byte, metav1.PatchOptions, ...string) (*corev1.Pod, error)
+}
+
+type podLabelLeadershipPublisher struct {
+	pods       podPatcher
+	podName    string
+	labelKey   string
+	labelValue string
+}
+
+func newPodLabelLeadershipPublisher(client kubernetes.Interface, cfg config.SchedulerLeaderElectionConfig) leadershipPublisher {
+	if strings.TrimSpace(cfg.ServiceLabelKey) == "" {
+		return nil
+	}
+	return &podLabelLeadershipPublisher{
+		pods:       client.CoreV1().Pods(cfg.LeaseNamespace),
+		podName:    cfg.Identity,
+		labelKey:   cfg.ServiceLabelKey,
+		labelValue: cfg.ServiceLabelValue,
+	}
+}
+
+func (p *podLabelLeadershipPublisher) setLeading(parent context.Context, leading bool) error {
+	if p == nil || p.pods == nil {
+		return fmt.Errorf("Kubernetes Pod client is required to publish scheduler leadership")
+	}
+	value := any(nil)
+	if leading {
+		value = p.labelValue
+	}
+	payload, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"labels": map[string]any{p.labelKey: value},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal scheduler leadership Pod label: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(parent, leadershipPublishTimeout)
+	defer cancel()
+	if _, err := p.pods.Patch(ctx, p.podName, types.MergePatchType, payload, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("publish scheduler leadership Pod label: %w", err)
+	}
+	return nil
+}
 
 type leadershipGate struct {
 	leader atomic.Bool

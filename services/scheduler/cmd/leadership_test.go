@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -13,6 +14,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 )
 
@@ -108,6 +112,72 @@ func TestLeaderElectionUsesClientGoTimingValidation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected client-go to reject renewDeadline <= retryPeriod*JitterFactor")
 	}
+}
+
+func TestPodLabelLeadershipPublisherFencesServiceMembership(t *testing.T) {
+	cfg := validLeaderElectionConfig()
+	cfg.ServiceLabelKey = "agentenv.io/scheduler-leader"
+	cfg.ServiceLabelValue = "active"
+	patcher := &recordingPodPatcher{pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: cfg.Identity,
+	}}}
+	publisher := &podLabelLeadershipPublisher{
+		pods:       patcher,
+		podName:    cfg.Identity,
+		labelKey:   cfg.ServiceLabelKey,
+		labelValue: cfg.ServiceLabelValue,
+	}
+	if err := publisher.setLeading(context.Background(), true); err != nil {
+		t.Fatalf("publish leading label: %v", err)
+	}
+	if got := patcher.pod.Labels[cfg.ServiceLabelKey]; got != cfg.ServiceLabelValue {
+		t.Fatalf("leader label = %q, want %q", got, cfg.ServiceLabelValue)
+	}
+
+	if err := publisher.setLeading(context.Background(), false); err != nil {
+		t.Fatalf("remove leading label: %v", err)
+	}
+	if _, present := patcher.pod.Labels[cfg.ServiceLabelKey]; present {
+		t.Fatalf("follower retained leader label: %#v", patcher.pod.Labels)
+	}
+}
+
+func TestPodLabelLeadershipPublisherIsOptional(t *testing.T) {
+	if publisher := newPodLabelLeadershipPublisher(nil, validLeaderElectionConfig()); publisher != nil {
+		t.Fatal("unconfigured service label should not create a publisher")
+	}
+}
+
+type recordingPodPatcher struct {
+	pod corev1.Pod
+}
+
+func (p *recordingPodPatcher) Patch(_ context.Context, name string, patchType types.PatchType, data []byte, _ metav1.PatchOptions, _ ...string) (*corev1.Pod, error) {
+	if name != p.pod.Name {
+		return nil, status.Errorf(codes.NotFound, "unexpected Pod %s", name)
+	}
+	if patchType != types.MergePatchType {
+		return nil, status.Errorf(codes.InvalidArgument, "unexpected patch type %s", patchType)
+	}
+	var patch struct {
+		Metadata struct {
+			Labels map[string]*string `json:"labels"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(data, &patch); err != nil {
+		return nil, err
+	}
+	if p.pod.Labels == nil {
+		p.pod.Labels = map[string]string{}
+	}
+	for key, value := range patch.Metadata.Labels {
+		if value == nil {
+			delete(p.pod.Labels, key)
+			continue
+		}
+		p.pod.Labels[key] = *value
+	}
+	return p.pod.DeepCopy(), nil
 }
 
 func testLeaderElectionLock(identity string) resourcelock.Interface {
