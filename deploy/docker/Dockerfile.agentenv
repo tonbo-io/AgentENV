@@ -53,12 +53,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 AS runtime-base
 ARG APT_MIRROR_BASE
 ARG TARGETARCH
+# Docker caches the complete apt transaction even after Ubuntu publishes a
+# security update. Advance this reviewed epoch when the release scanner finds a
+# patched Ubuntu package newer than the cached runtime-base layer.
+ARG UBUNTU_APT_SECURITY_EPOCH=2026-08-27
 # Optional extra runtime packages, specified as a whitespace- or comma-separated build arg.
 ARG EXTRA_RUNTIME_PACKAGES=""
 COPY deploy/docker/apply_apt_mirror.sh /usr/local/bin/apply_apt_mirror.sh
 
 # Runtime packages needed by both the deps pre-bake and the final image.
-RUN export DEBIAN_FRONTEND=noninteractive \
+RUN test -n "${UBUNTU_APT_SECURITY_EPOCH}" \
+    && export DEBIAN_FRONTEND=noninteractive \
     && sh /usr/local/bin/apply_apt_mirror.sh "${APT_MIRROR_BASE}" \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
