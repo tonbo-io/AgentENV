@@ -21,10 +21,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/leaderelection"
 )
 
 func main() {
@@ -43,8 +43,11 @@ func main() {
 	}
 	defer logger.Sync()
 
-	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(shutdownSignal)
 
 	store, closeStore := createBindingStore(logger, cfg)
 	defer closeStore()
@@ -55,16 +58,7 @@ func main() {
 		scheduler.MetricsUnaryInterceptor(),
 		gate.unaryServerInterceptor(),
 	))
-	hs := health.NewServer()
-	setServingStatus := func(serving bool) {
-		status := grpc_health_v1.HealthCheckResponse_NOT_SERVING
-		if serving {
-			status = grpc_health_v1.HealthCheckResponse_SERVING
-		}
-		hs.SetServingStatus("", status)
-		hs.SetServingStatus(schedulerv1.Scheduler_ServiceDesc.ServiceName, status)
-	}
-	setServingStatus(!leaderElectionEnabled)
+	healthStatus := newSchedulerHealthStatus(!leaderElectionEnabled)
 
 	var runLeaderWork func(context.Context)
 	if *queryOnly {
@@ -108,9 +102,11 @@ func main() {
 		}
 	}
 
-	grpc_health_v1.RegisterHealthServer(g, hs)
+	grpc_health_v1.RegisterHealthServer(g, healthStatus.server)
 
 	var leaderClient kubernetes.Interface
+	var leaderElector *leaderelection.LeaderElector
+	leadershipLostCh := make(chan struct{}, 1)
 	if leaderElectionEnabled {
 		restConfig, err := rest.InClusterConfig()
 		if err != nil {
@@ -119,6 +115,29 @@ func main() {
 		leaderClient, err = kubernetes.NewForConfig(restConfig)
 		if err != nil {
 			logger.Fatal("create Kubernetes client for scheduler leader election failed", zap.Error(err))
+		}
+		leaderElector, err = newLeaderElector(
+			logger,
+			newLeaderElectionLock(leaderClient, cfg.Scheduler.LeaderElection),
+			cfg.Scheduler.LeaderElection,
+			func(leaderCtx context.Context) {
+				gate.setLeader(true)
+				healthStatus.setSchedulerServing(true)
+				runLeaderWork(leaderCtx)
+			},
+			func() {
+				gate.setLeader(false)
+				healthStatus.setSchedulerServing(false)
+				if runCtx.Err() == nil {
+					select {
+					case leadershipLostCh <- struct{}{}:
+					default:
+					}
+				}
+			},
+		)
+		if err != nil {
+			logger.Fatal("validate scheduler leader election failed", zap.Error(err))
 		}
 	}
 
@@ -154,31 +173,10 @@ func main() {
 		serveErrCh <- nil
 	}()
 
-	leadershipLostCh := make(chan struct{}, 1)
 	if leaderElectionEnabled {
-		go runLeaderElection(
-			sigCtx,
-			logger,
-			leaderClient,
-			cfg.Scheduler.LeaderElection,
-			func(leaderCtx context.Context) {
-				gate.setLeader(true)
-				setServingStatus(true)
-				runLeaderWork(leaderCtx)
-			},
-			func() {
-				gate.setLeader(false)
-				setServingStatus(false)
-				if sigCtx.Err() == nil {
-					select {
-					case leadershipLostCh <- struct{}{}:
-					default:
-					}
-				}
-			},
-		)
+		go leaderElector.Run(runCtx)
 	} else if !*queryOnly {
-		go runLeaderWork(sigCtx)
+		go runLeaderWork(runCtx)
 	}
 
 	select {
@@ -189,12 +187,16 @@ func main() {
 		return
 	case <-leadershipLostCh:
 		logger.Error("scheduler leadership lost; shutting down to discard stale observed state")
-		stop()
-	case <-sigCtx.Done():
+	case <-shutdownSignal:
 	}
 
 	logger.Info("scheduler shutdown signal received")
-	setServingStatus(false)
+	// Fence new Scheduler RPCs before stopping leader work or gRPC. The Lease
+	// is intentionally left to expire so no replacement can overlap this
+	// process during graceful shutdown.
+	fenceScheduler(gate, healthStatus)
+	cancelRun()
+	healthStatus.setProcessServing(false)
 
 	gracefulStopDone := make(chan struct{})
 	go func() {

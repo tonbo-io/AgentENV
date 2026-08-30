@@ -518,9 +518,6 @@ func (c Config) validate(schedulerQueryOnly bool) error {
 			if strings.TrimSpace(leader.Identity) == "" {
 				return errors.New("scheduler leader election requires a unique identity")
 			}
-			if leader.LeaseDuration <= leader.RenewDeadline || leader.RenewDeadline <= leader.RetryPeriod || leader.RetryPeriod <= 0 {
-				return errors.New("scheduler leader election requires lease_duration > renew_deadline > retry_period > 0")
-			}
 		}
 		if c.Scheduler.ArtifactStoreCapacity <= 0 {
 			return errors.New("scheduler.artifact_store_capacity must be greater than zero")
