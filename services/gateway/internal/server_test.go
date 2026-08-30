@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +21,8 @@ import (
 	schedulerv1 "agentenv/services/api/proto"
 
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 )
 
@@ -41,6 +45,21 @@ type stubSchedulerClient struct {
 type trackingReadCloser struct {
 	readInvoked *bool
 	bodyClosed  *bool
+}
+
+type finalTrailerReader struct {
+	reader  io.Reader
+	trailer http.Header
+	name    string
+	value   string
+}
+
+func (reader *finalTrailerReader) Read(buffer []byte) (int, error) {
+	read, err := reader.reader.Read(buffer)
+	if errors.Is(err, io.EOF) {
+		reader.trailer.Set(reader.name, reader.value)
+	}
+	return read, err
 }
 
 func (t trackingReadCloser) Read(_ []byte) (int, error) {
@@ -668,6 +687,116 @@ func TestLookupNodeUsesQueryOnlySchedulerClient(t *testing.T) {
 	case <-mainLookupCalled:
 		t.Fatal("main scheduler handled LookupNode; want query-only scheduler")
 	default:
+	}
+}
+
+func TestGatewayPreservesHTTP2DataAndTrailers(t *testing.T) {
+	type observedRequest struct {
+		protocol string
+		body     string
+		trailer  string
+	}
+	observed := make(chan observedRequest, 1)
+	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for h2c upstream failed: %v", err)
+	}
+	upstreamServer := &http.Server{Handler: h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Errorf("read upstream body failed: %v", readErr)
+			return
+		}
+		observed <- observedRequest{protocol: r.Proto, body: string(body), trailer: r.Trailer.Get("grpc-status")}
+		w.Header().Set("Trailer", "grpc-status")
+		_, _ = w.Write([]byte("response-data"))
+		w.Header().Set("grpc-status", "0")
+	}), &http2.Server{})}
+	go func() { _ = upstreamServer.Serve(upstreamListener) }()
+	t.Cleanup(func() { _ = upstreamServer.Close() })
+
+	server := newTestServer(t, stubSchedulerClient{
+		lookupNodeFunc: func(_ context.Context, request *schedulerv1.LookupNodeRequest, _ ...grpc.CallOption) (*schedulerv1.LookupNodeResponse, error) {
+			if request.GetSandboxId() != "sbx-h2" {
+				return nil, fmt.Errorf("unexpected sandbox id %q", request.GetSandboxId())
+			}
+			return &schedulerv1.LookupNodeResponse{Node: &schedulerv1.Node{
+				NodeId:   "node-h2",
+				Endpoint: "http://" + upstreamListener.Addr().String(),
+			}}, nil
+		},
+	}, time.Second, 1024)
+	gatewayListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for h2c gateway failed: %v", err)
+	}
+	gatewayServer := &http.Server{Handler: server.Handler()}
+	go func() { _ = gatewayServer.Serve(gatewayListener) }()
+	t.Cleanup(func() { _ = gatewayServer.Close() })
+
+	clientTransport := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		},
+	}
+	client := &http.Client{Transport: clientTransport}
+	newRequest := func(origin string) *http.Request {
+		requestTrailers := http.Header{http.CanonicalHeaderKey("grpc-status"): nil}
+		request, requestErr := http.NewRequest(http.MethodPost, origin+"/grpc.Echo/Call", &finalTrailerReader{
+			reader:  strings.NewReader("request-data"),
+			trailer: requestTrailers,
+			name:    "grpc-status",
+			value:   "0",
+		})
+		if requestErr != nil {
+			t.Fatalf("build h2c request failed: %v", requestErr)
+		}
+		request.Header.Set("Content-Type", "application/grpc")
+		request.Trailer = requestTrailers
+		return request
+	}
+
+	directResponse, err := client.Do(newRequest("http://" + upstreamListener.Addr().String()))
+	if err != nil {
+		t.Fatalf("direct h2c request failed: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, directResponse.Body)
+	_ = directResponse.Body.Close()
+	directObserved := <-observed
+	if directObserved.trailer != "0" {
+		t.Fatalf("direct h2c request trailer = %q, want 0", directObserved.trailer)
+	}
+
+	request := newRequest("http://" + gatewayListener.Addr().String())
+	request.Header.Set(headerAPIKey, testAPIKey)
+	request.Header.Set(headerE2BSandboxID, "sbx-h2")
+	request.Header.Set(headerE2BTargetPort, "80")
+
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("h2c gateway request failed: %v", err)
+	}
+	responseBody, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatalf("read h2c gateway response failed: %v", err)
+	}
+	if response.ProtoMajor != 2 {
+		t.Fatalf("gateway response protocol = %s, want HTTP/2", response.Proto)
+	}
+	if string(responseBody) != "response-data" || response.Trailer.Get("grpc-status") != "0" {
+		t.Fatalf("gateway response body/trailer = %q/%q", responseBody, response.Trailer.Get("grpc-status"))
+	}
+	clientTransport.CloseIdleConnections()
+
+	select {
+	case request := <-observed:
+		if request.protocol != "HTTP/2.0" || request.body != "request-data" || request.trailer != "0" {
+			t.Fatalf("upstream protocol/body/trailer = %q/%q/%q", request.protocol, request.body, request.trailer)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for h2c upstream request")
 	}
 }
 

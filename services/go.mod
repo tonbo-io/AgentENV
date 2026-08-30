@@ -7,6 +7,7 @@ require (
 	github.com/prometheus/client_golang v1.20.5
 	github.com/redis/go-redis/v9 v9.7.3
 	go.uber.org/zap v1.27.0
+	golang.org/x/net v0.53.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 	k8s.io/api v0.29.4
@@ -41,7 +42,6 @@ require (
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/term v0.42.0 // indirect

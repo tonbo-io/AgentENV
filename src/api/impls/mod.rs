@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Error as AnyhowError;
 use async_trait::async_trait;
 
-use super::proxy::{build_proxy_client, ProxyClient};
+use super::proxy::{build_proxy_clients, ProxyClients};
 use crate::api_key::ApiKey;
 use crate::image::ImageResolver;
 use crate::observability::ObservabilityService;
@@ -32,7 +32,7 @@ pub struct ApiImpl {
     template_builder: Arc<TemplateBuilder>,
     image_resolver: Arc<ImageResolver>,
     observability: Option<Arc<ObservabilityService>>,
-    proxy_client: ProxyClient,
+    proxy_clients: ProxyClients,
     sandbox_proxy_domains: Vec<String>,
     api_key: ApiKey,
 }
@@ -53,7 +53,7 @@ impl ApiImpl {
             template_builder,
             image_resolver,
             observability,
-            proxy_client: build_proxy_client(),
+            proxy_clients: build_proxy_clients(),
             sandbox_proxy_domains,
             api_key,
         }
@@ -63,8 +63,8 @@ impl ApiImpl {
         Arc::clone(&self.orchestrator)
     }
 
-    pub(crate) fn proxy_client(&self) -> &ProxyClient {
-        &self.proxy_client
+    pub(crate) fn proxy_clients(&self) -> &ProxyClients {
+        &self.proxy_clients
     }
 
     pub(crate) fn sandbox_proxy_domains(&self) -> &[String] {

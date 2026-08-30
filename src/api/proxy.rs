@@ -50,6 +50,25 @@ use crate::api::impls::auth::{API_KEY_HEADER, ENVD_ACCESS_TOKEN_HEADER};
 
 /// Shared outbound HTTP client for the client-facing reverse proxy.
 pub(crate) type ProxyClient = Client<HttpConnector, Body>;
+
+#[derive(Clone)]
+pub(crate) struct ProxyClients {
+    http1: ProxyClient,
+    http2: ProxyClient,
+}
+
+impl ProxyClients {
+    async fn request(
+        &self,
+        request: Request,
+    ) -> Result<Response<Incoming>, hyper_util::client::legacy::Error> {
+        if request.version() == hyper::Version::HTTP_2 {
+            self.http2.request(request).await
+        } else {
+            self.http1.request(request).await
+        }
+    }
+}
 type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 struct ResolvedProxyRequest {
@@ -123,7 +142,7 @@ fn auto_resume_min_sandbox_timeout() -> Duration {
     })
 }
 
-pub(crate) fn build_proxy_client() -> ProxyClient {
+pub(crate) fn build_proxy_clients() -> ProxyClients {
     let mut connector = HttpConnector::new();
     // Proxied requests and responses are small, so Nagle only ever adds a
     // delayed-ACK wait to them.
@@ -131,9 +150,18 @@ pub(crate) fn build_proxy_client() -> ProxyClient {
     connector.set_connect_timeout(Some(PROXY_CONNECT_TIMEOUT));
     // Interaction IPs are reused across sandbox runtime generations. Hyper keys
     // its idle pool by authority, so a pooled connection can retain a stale VM flow.
-    Client::builder(TokioExecutor::new())
+    let http1 = Client::builder(TokioExecutor::new())
         .pool_max_idle_per_host(0)
-        .build(connector)
+        .build(connector);
+
+    let mut connector = HttpConnector::new();
+    connector.set_nodelay(true);
+    connector.set_connect_timeout(Some(PROXY_CONNECT_TIMEOUT));
+    let http2 = Client::builder(TokioExecutor::new())
+        .http2_only(true)
+        .pool_max_idle_per_host(0)
+        .build(connector);
+    ProxyClients { http1, http2 }
 }
 
 pub(crate) fn router<I>(api_impl: I) -> Router
@@ -464,7 +492,7 @@ async fn proxy_http_request(
     let (body, activity_rx) = track_request_body_activity(body);
     let upstream_request = Request::from_parts(parts, body);
     let upstream_response_result = match wait_for_upstream_response_headers_with_activity_timeout(
-        api_impl.proxy_client().request(upstream_request),
+        api_impl.proxy_clients().request(upstream_request),
         activity_rx,
     )
     .await
@@ -975,7 +1003,11 @@ fn sanitize_request_headers(headers: &mut HeaderMap) {
     headers.remove(E2B_TARGET_PORT_HEADER);
     headers.remove(TRAFFIC_ACCESS_TOKEN_HEADER);
     headers.remove(header::HOST);
+    let accepts_trailers = header_contains_token(headers, header::TE, "trailers");
     remove_hop_by_hop_headers(headers);
+    if accepts_trailers {
+        headers.insert(header::TE, HeaderValue::from_static("trailers"));
+    }
 }
 
 fn sanitize_websocket_request_headers(headers: &mut HeaderMap) {
@@ -1348,11 +1380,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_clients_use_h2c_for_http2_requests() {
+        let address =
+            spawn_upstream(axum::Router::new().fallback(|| async { "h2-response" })).await;
+        let request = Request::builder()
+            .version(hyper::Version::HTTP_2)
+            .uri(format!("http://{address}/grpc.Echo/Call"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = build_proxy_clients().request(request).await.unwrap();
+        assert_eq!(response.version(), hyper::Version::HTTP_2);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "h2-response"
+        );
+    }
+
+    #[tokio::test]
     async fn proxy_client_does_not_reuse_connections_across_runtime_generations() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let runtime = tokio::spawn(simulate_runtime_generation_change(listener));
-        let client = build_proxy_client();
+        let client = build_proxy_clients();
 
         let first_response = client.request(empty_proxy_request(address)).await.unwrap();
         assert_eq!(first_response.status(), StatusCode::OK);
@@ -1788,6 +1838,7 @@ mod tests {
         );
         headers.insert(HOST, HeaderValue::from_static("client.example"));
         headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.insert(header::TE, HeaderValue::from_static("gzip, trailers"));
         headers.insert(
             HeaderName::from_static("x-extra"),
             HeaderValue::from_static("keep"),
@@ -1803,6 +1854,7 @@ mod tests {
         assert!(headers.get(TRAFFIC_ACCESS_TOKEN_HEADER).is_none());
         assert!(headers.get(HOST).is_none());
         assert!(headers.get(header::CONNECTION).is_none());
+        assert_eq!(headers.get(header::TE).unwrap(), "trailers");
         assert_eq!(headers.get("x-extra").unwrap(), "keep");
     }
 
