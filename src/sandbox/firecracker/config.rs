@@ -113,6 +113,10 @@ pub struct FirecrackerCommonConfig {
     /// Immutable release version of the complete tools drive.
     #[serde(default)]
     pub tools_drive_version: String,
+    /// Runtime-resolved tools drive artifact for a durable snapshot. This path
+    /// is node-local derived state and must never be persisted.
+    #[serde(skip)]
+    pub tools_drive_path: Option<PathBuf>,
     /// Optional parent directory for this sandbox's Firecracker runtime working directory.
     /// This is a host-side directory containing Firecracker sockets/symlinks/logs and
     /// OverlayBD writable upper layer files; it is unrelated to the guest default workdir.
@@ -177,6 +181,7 @@ impl FirecrackerCommonConfig {
         Self {
             firecracker_binary,
             tools_drive_version,
+            tools_drive_path: None,
             firecracker_work_base_dir: None,
             serial_output_base_dir: None,
             stdout_path: None,
@@ -262,6 +267,9 @@ impl FirecrackerCommonConfig {
     }
 
     pub(super) fn resolved_tools_drive_path(&self, config: &AppConfig) -> Result<PathBuf> {
+        if let Some(path) = &self.tools_drive_path {
+            return Ok(path.clone());
+        }
         if self.tools_drive_version.trim().is_empty() {
             anyhow::bail!(
                 "sandbox state does not record a tools drive version; migrate its persisted metadata before resuming it"
@@ -489,6 +497,8 @@ impl FirecrackerSnapshotConfig {
             );
         }
         base_common.tools_drive_version = tools_drive_version.clone();
+        base_common.tools_drive_path = (!manifest.tools_drive.path.as_os_str().is_empty())
+            .then(|| manifest.tools_drive.path.clone());
         let rootfs_image_config = OverlaybdConfig {
             image_config_path: manifest.rootfs.image_config_path.clone(),
             read_only: app_config.ublk.overlaybd.read_only,

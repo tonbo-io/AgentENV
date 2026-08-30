@@ -131,11 +131,38 @@ pub(crate) async fn load_firecracker_manifest_from_path(
     parse_firecracker_manifest(&bytes, path.display().to_string())
 }
 
+pub(crate) async fn validate_managed_artifact(
+    path: &Path,
+    layer: &ManagedLayer,
+    label: &str,
+) -> RepositoryResult<()> {
+    let descriptor = crate::digest::FileDigest::describe(path)
+        .await
+        .map_err(|error| {
+            RepositoryError::backend(
+                format!("describe {label} artifact '{}'", path.display()),
+                error,
+            )
+        })?;
+    if descriptor.size != layer.size || descriptor.sha256 != layer.digest {
+        return Err(RepositoryError::InvalidRequest {
+            reason: format!(
+                "{label} artifact '{}' does not match committed digest {} and size {}",
+                path.display(),
+                layer.digest,
+                layer.size
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn hydrate_runtime_manifest(
     mut manifest: FirecrackerSnapshotManifest,
     vm_state_path: PathBuf,
     memory_image_config_path: PathBuf,
     rootfs_image_config_path: PathBuf,
+    tools_drive_path: Option<PathBuf>,
     attached_drives: &[ResolvedAttachedDrive],
 ) -> RepositoryResult<FirecrackerSnapshotManifest> {
     let extra_drives = attached_drives
@@ -150,6 +177,9 @@ pub(crate) fn hydrate_runtime_manifest(
     manifest.vm_state.path = vm_state_path;
     manifest.memory.image_config_path = memory_image_config_path;
     manifest.rootfs.image_config_path = rootfs_image_config_path;
+    if let Some(path) = tools_drive_path {
+        manifest.tools_drive.path = path;
+    }
     Ok(manifest)
 }
 

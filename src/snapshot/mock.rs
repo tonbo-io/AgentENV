@@ -105,9 +105,11 @@ pub fn write_mock_built_artifacts(
 
     let rootfs_lower = root.join("base.overlaybd.commit");
     let memory_lower = root.join("mem.overlaybd.commit");
+    let tools_drive = root.join("tools.ext4");
 
     std::fs::write(&rootfs_lower, b"base-layer")?;
     std::fs::write(&memory_lower, b"mem-layer")?;
+    std::fs::write(&tools_drive, b"tools-drive")?;
     let rootfs_descriptor = crate::digest::FileDigest::describe_blocking(&rootfs_lower)?;
     let memory_descriptor = crate::digest::FileDigest::describe_blocking(&memory_lower)?;
     std::fs::write(root.join(SNAPSHOT_ARTIFACT_LAYOUT.vm_state), b"vm state")?;
@@ -141,6 +143,7 @@ pub fn write_mock_built_artifacts(
         0,
         root.join(SNAPSHOT_ARTIFACT_LAYOUT.rootfs_image_config),
         32768,
+        tools_drive,
         &Vec::new(),
     )?;
 

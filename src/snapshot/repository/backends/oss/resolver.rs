@@ -16,7 +16,7 @@ use crate::snapshot::p2p;
 use crate::snapshot::repository::interfaces::SnapshotRuntimeResolver;
 use crate::snapshot::runtime_support::{
     hydrate_runtime_manifest, materialize_image_config_error, parse_firecracker_manifest,
-    runtime_image_cache_key, RuntimeImageMaterializer,
+    runtime_image_cache_key, validate_managed_artifact, RuntimeImageMaterializer,
 };
 use crate::snapshot::types::RuntimeArtifactLease;
 use crate::snapshot::{
@@ -190,6 +190,7 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
         let attached_drives = self
             .resolve_attached_drives(&id, &committed.attached_drives, &mut handles)
             .await?;
+        let tools_drive_path = self.resolve_tools_drive(committed, &mut handles).await?;
 
         // Runtime artifacts are protected by the sandbox start-window lease (over
         // local-only commits) + the orchestrator running set; the resolved-handle
@@ -202,6 +203,7 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
             vm_state_path,
             mem_image_config_path,
             rootfs_image_config_path,
+            tools_drive_path,
             &attached_drives,
         )?;
 
@@ -214,6 +216,47 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
 // ── private helpers ───────────────────────────────────────────────────
 
 impl OssRuntimeResolver {
+    async fn resolve_tools_drive(
+        &self,
+        snapshot: &crate::snapshot::CommittedSnapshot,
+        handles: &mut Vec<CacheHandle>,
+    ) -> RepositoryResult<Option<PathBuf>> {
+        let Some(tools_drive) = &snapshot.tools_drive else {
+            // Compatibility for snapshots created before tools-drive artifacts
+            // were repository-backed. Remove after those snapshots age out of retention.
+            return Ok(None);
+        };
+        let key = OssSnapshotArtifactLayout::managed_layer_key(&tools_drive.digest);
+        let cache_key = key.clone();
+        let client = Arc::clone(&self.client);
+        let expected = tools_drive.clone();
+        let handle = self
+            .cache
+            .ensure_cached(&cache_key, move |destination| {
+                let client = Arc::clone(&client);
+                let key = key.clone();
+                let expected = expected.clone();
+                async move {
+                    client.get_to_file(&key, &destination).await?;
+                    validate_managed_artifact(&destination, &expected, "tools drive")
+                        .await
+                        .map_err(anyhow::Error::new)?;
+                    Ok(expected.size)
+                }
+            })
+            .await
+            .map_err(|error| {
+                RepositoryError::backend(
+                    format!("materialize tools drive '{}'", tools_drive.digest),
+                    error,
+                )
+            })?;
+        validate_managed_artifact(handle.path(), tools_drive, "tools drive").await?;
+        let path = handle.path().to_path_buf();
+        handles.push(handle);
+        Ok(Some(path))
+    }
+
     /// Materialize an image config from layers and pin it in the cache.
     async fn materialize_layers_and_pin(
         &self,
