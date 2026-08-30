@@ -30,7 +30,27 @@ OUTPUT_PATH := $(OUTPUT_DIR)/$(OUTPUT_NAME)
 IMAGE ?= agentenv-tools:$(TOOLS_VERSION)
 DOCKER ?= docker
 
-.PHONY: build publish push check-buildx check-tools-version check-publish-image
+.PHONY: build publish push check check-format check-vet check-build check-buildx check-tools-version check-publish-image
+
+check: check-format check-vet check-build
+	cd agentenv-init && go test ./...
+
+check-format:
+	@test -z "$$(gofmt -l agentenv-init)" || { \
+		echo "agentenv-init files need gofmt:" >&2; \
+		gofmt -l agentenv-init >&2; \
+		exit 1; \
+	}
+
+check-vet:
+	cd agentenv-init && GOOS=linux GOARCH="$(ARCH)" CGO_ENABLED=0 go vet ./...
+
+check-build:
+	@output_dir="$$(mktemp -d)"; \
+	trap 'rm -f "$$output_dir/agentenv-init"; rmdir "$$output_dir"' EXIT; \
+	cd agentenv-init; \
+	GOOS=linux GOARCH="$(ARCH)" CGO_ENABLED=0 go build -trimpath -o "$$output_dir/agentenv-init" .; \
+	echo "Built static agentenv-init for linux/$(ARCH)"
 
 check-buildx:
 	@"$(DOCKER)" buildx version >/dev/null 2>&1 || { \

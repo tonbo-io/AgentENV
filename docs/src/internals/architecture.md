@@ -116,7 +116,7 @@ PVM currently requires x86_64 and the `kvm_pvm` host module.
 | API layer | `src/api/` | Axum HTTP server, OpenAPI endpoints, reverse proxy to sandbox services, node/admin APIs |
 | Orchestrator | `src/orchestrator/` | Sandbox lifecycle state machine (Creating, Running, Pausing, Paused, Resuming, Killing), auto-eviction, incremental runtime metrics, paused-sandbox persistence across restarts |
 | Observability | `src/observability/` | Node identity, machine info, request-time host metrics collection, node snapshot projection for admin APIs, optional scheduler heartbeat reporting |
-| Sandbox | `src/sandbox/` | Firecracker VM management, network namespaces, rootfs, envd communication, ublk devices (rootfs + memory), warm network/block/Firecracker pools |
+| Sandbox | `src/sandbox/` | Firecracker VM management, network namespaces, guest bootstrap, envd communication, ublk devices (rootfs + memory), warm network/block/Firecracker pools |
 | Snapshot + Template Builder | `src/snapshot/`, `src/template/` | `src/snapshot/` owns committed snapshot storage/runtime resolution; `src/template/` provides the user-facing builder that publishes snapshots |
 | P2P artifact transport | `src/p2p/` | Optional project-wide artifact lookup, publish, and fetch layer with disabled and iroh-backed transports |
 | Config | `src/cfg.rs` | TOML config for firecracker paths, machine specs, timeouts, shared pool tuning, observability metadata, P2P, and scheduler-report settings |
@@ -126,6 +126,10 @@ PVM currently requires x86_64 and the `kvm_pvm` host module.
 The network subsystem is managed by a process-wide `NetworkManager` and per-slot `Slot` objects. See [Sandbox Network Architecture](./networking.md) for the namespace topology, address plan, packet paths, firewall ordering, egress proxy, policy replacement, warm-pool behavior, and verification steps.
 
 Snapshot resume can also use `[pool.firecracker]` to pre-spawn `(network slot, Firecracker process)` pairs. A warm entry transfers its network slot, process, and Firecracker CWD to the resumed sandbox, which avoids the spawn and API-socket wait in the resume critical path. `[pool.block]` controls the ublk daemon's overlaybd warm-device pool; it shares the same top-level watermarks but performs async refill from request paths because reusable block devices are image/size-specific.
+
+### Guest Process Model
+
+The tools drive supplies a static `agentenv-init` binary as `/init`. It mounts `/dev/vdb` as the user root, pivots into that filesystem, mounts attached drives, configures the minimal virtual filesystems and network files, and remains PID 1. It directly starts and reaps `envd`; envd starts every user process requested by the API. An envd exit powers off the guest and invalidates that runtime identity. Firecracker snapshots preserve PID 1, envd, application processes, memory, and writable block state together, so pause and resume continue the same guest process tree.
 
 ### Observability Data Flow
 

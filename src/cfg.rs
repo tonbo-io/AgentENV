@@ -240,8 +240,10 @@ pub struct OverlaybdDependencyConfig {
 #[derive(Debug, Clone, Config)]
 pub struct ToolsConfig {
     /// Explicit source path for importing a local tools drive ext4 file.
+    #[config(env = "AENV_TOOLS_DRIVE_PATH", parse_env = parse_required_path)]
     pub drive_path: Option<PathBuf>,
     /// Immutable tools drive release version (e.g. "0.1.0").
+    #[config(env = "AENV_TOOLS_VERSION")]
     pub version: Option<String>,
     /// Container registry URL template (e.g. "ghcr.io/org/agentenv-tools:{version}").
     pub url: Option<String>,

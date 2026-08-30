@@ -1,7 +1,7 @@
 mod common;
 
-#[path = "integration/envd_supervisor.rs"]
-mod envd_supervisor;
+#[path = "integration/guest_init.rs"]
+mod guest_init;
 
 #[path = "integration/fc.rs"]
 mod fc;
