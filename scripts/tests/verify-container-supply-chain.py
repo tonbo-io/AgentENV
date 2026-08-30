@@ -79,6 +79,10 @@ def verify_runtime_apt_security_epoch() -> None:
         raise SystemExit(
             f"{path.relative_to(ROOT)}: apt transaction must consume the security epoch exactly once"
         )
+    if source.count("apt-get upgrade -y --no-install-recommends") != 1:
+        raise SystemExit(
+            f"{path.relative_to(ROOT)}: runtime base must upgrade installed packages before adding dependencies"
+        )
 
 
 for dockerfile in DOCKERFILES:
