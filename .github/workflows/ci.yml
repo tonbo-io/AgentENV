@@ -14,6 +14,8 @@ on:
       - "scripts/tests/setup-ublk-access.sh"
       - "scripts/tests/verify-capability-runner.sh"
       - "scripts/tests/verify-install-service.sh"
+      - "scripts/tests/verify-container-supply-chain.py"
+      - "deploy/docker/**"
       - "tools-image/**"
       - ".github/actions/**"
       - ".github/workflows/ci.yml"
@@ -29,6 +31,8 @@ on:
       - "scripts/tests/setup-ublk-access.sh"
       - "scripts/tests/verify-capability-runner.sh"
       - "scripts/tests/verify-install-service.sh"
+      - "scripts/tests/verify-container-supply-chain.py"
+      - "deploy/docker/**"
       - "tools-image/**"
       - ".github/actions/**"
       - ".github/workflows/ci.yml"
@@ -44,6 +48,8 @@ jobs:
           cache-dependency-path: tools-image/agentenv-init/go.sum
       - name: Check guest init
         run: make -C tools-image check
+      - name: Verify container supply chain
+        run: python3 scripts/tests/verify-container-supply-chain.py
       - uses: docker/setup-buildx-action@v4
       - name: Build tools drive
         run: make -C tools-image build TOOLS_VERSION=0.0.0-ci ARCH=amd64 OUTPUT_DIR="${{ runner.temp }}/agentenv-tools"

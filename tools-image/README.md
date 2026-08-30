@@ -38,7 +38,7 @@ make check
 
 ## Versioning
 
-`TOOLS_VERSION` identifies the complete drive, including `agentenv-init` and `envd`. Published versions are immutable, so every content change requires a new version. `ENVD_REF` identifies the upstream `e2b-dev/infra` source used to compile `envd` and may differ from the version reported by the binary.
+`TOOLS_VERSION` identifies the complete drive, including `agentenv-init` and `envd`. Published versions are immutable, so every content change requires a new version. `envd-source.env` is the authoritative immutable upstream repository and commit used to compile `envd`; the commit may differ from the version reported by the binary.
 
 Official releases use versions such as `0.1.0`. Custom distributions use unique prerelease versions such as `0.1.0-tonbo.2`.
 
@@ -49,8 +49,6 @@ AgentENV records the expected in-guest envd version under `[envd].version`. For 
 | Variable | Default | Description |
 |---|---|---|
 | `TOOLS_VERSION` | `0.1.0` | Immutable SemVer for the complete tools drive |
-| `ENVD_REF` | `2026.17` | Fetchable envd source ref |
-| `ENVD_UPSTREAM_REPO` | `https://github.com/e2b-dev/infra.git` | Repository containing `packages/envd` |
 | `ARCH` | Host architecture normalized to `amd64` or `arm64` | Build architecture |
 | `PUBLISH_PLATFORMS` | `linux/amd64,linux/arm64` | Platforms in a published OCI manifest |
 | `OUTPUT_DIR` | `out` | Export directory |
@@ -61,7 +59,7 @@ AgentENV records the expected in-guest envd version under `[envd].version`. For 
 Example:
 
 ```bash
-make TOOLS_VERSION=0.1.0-tonbo.2 ENVD_REF=2026.17 ARCH=amd64
+make TOOLS_VERSION=0.1.0-tonbo.2 ARCH=amd64
 ```
 
 ## Publish
@@ -69,7 +67,7 @@ make TOOLS_VERSION=0.1.0-tonbo.2 ENVD_REF=2026.17 ARCH=amd64
 The reviewed `Publish Tools Image` workflow builds native `amd64` and `arm64` artifacts and creates the multi-platform manifest. The local target uses the same immutable-tag contract:
 
 ```bash
-make publish TOOLS_VERSION=0.1.0-tonbo.2 ENVD_REF=2026.17 IMAGE=ghcr.io/tonbo-io/agentenv-tools:0.1.0-tonbo.2
+make publish TOOLS_VERSION=0.1.0-tonbo.2 IMAGE=ghcr.io/tonbo-io/agentenv-tools:0.1.0-tonbo.2
 ```
 
 After publication and runtime validation, update `[tools].version` in `config/deps_manifest.toml`. Snapshots persist `TOOLS_VERSION`; Git revisions and OCI digests provide release provenance.
