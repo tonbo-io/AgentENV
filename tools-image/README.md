@@ -2,10 +2,11 @@
 
 This directory builds the small ext4 tools drive attached to every Firecracker guest as `/dev/vda`. Normal server startup consumes the immutable image configured in `config/deps_manifest.toml`.
 
-The drive contains two static platform binaries:
+The drive contains two static platform binaries and one pinned static toolset:
 
 - `agentenv-init` runs as guest PID 1, mounts the user root and attached drives, pivots into the user filesystem, configures the minimal runtime mounts and network files, reaps orphaned children, and starts `envd`.
 - `envd` exposes the guest control API and launches user processes.
+- `/agentenv/bin/busybox` supplies the immutable baseline shell and file/network applets used for sandbox bootstrap, diagnostics, and portable automation without runtime package downloads.
 
 `agentenv-init` is the sole guest init. A running sandbox contains `agentenv-init`, `envd`, and the user processes requested through `envd`. PID 1 writes envd stdout and stderr to two rotating 512 KiB segments at `/run/agentenv/envd.log` and `/run/agentenv/envd.log.1`, which keeps verbose process-event logging bounded in the guest tmpfs and off the Firecracker serial path without adding a logging daemon. PID 1 fails bootstrap and powers off before starting `envd` when a declared drive or subpath cannot be mounted, loopback cannot be enabled, DNS cannot be installed, or the required devpts and shared-memory filesystems cannot be mounted. Applications therefore cannot silently write durable data into the temporary rootfs or report ready with missing guest facilities. If `envd` exits, PID 1 also powers off the guest and the host observes that runtime identity as unavailable.
 
@@ -40,7 +41,7 @@ make check
 
 ## Versioning
 
-`TOOLS_VERSION` identifies the complete drive, including `agentenv-init` and `envd`. Published versions are immutable, so every content change requires a new version. `envd-source.env` is the authoritative immutable upstream repository and commit used to compile `envd`; the commit may differ from the version reported by the binary.
+`TOOLS_VERSION` identifies the complete drive, including `agentenv-init`, `envd`, and BusyBox. Published versions are immutable, so every content change requires a new version. `envd-source.env` is the authoritative immutable upstream repository and commit used to compile `envd`; the commit may differ from the version reported by the binary.
 
 Official releases use versions such as `0.1.0`. Custom distributions use unique prerelease versions such as `0.1.0-tonbo.2`.
 

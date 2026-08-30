@@ -26,8 +26,10 @@
 #   ENVD_UPSTREAM_REPO   envd source repository. Override for forks.
 #   GO_IMAGE             Digest-pinned Go toolchain image.
 #   DEBIAN_IMAGE         Digest-pinned Debian build image.
+#   BUSYBOX_IMAGE        Digest-pinned static BusyBox toolset.
 ARG GO_IMAGE=golang:1.25.9-bookworm@sha256:298734aec230b5f3e8cee450ce6d7eccc39f1797ba548ee90d57e9803030c6c3
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+ARG BUSYBOX_IMAGE=busybox:1.37.0-musl@sha256:fc6dddc4c44b1bfe37f41cae8e67d1693828e8f42a91862816d7953e2c9d3f23
 ARG TOOLS_VERSION=0.1.0
 
 # ---------------------------------------------------------------------------
@@ -108,10 +110,24 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     fi
 
 # ---------------------------------------------------------------------------
-# Stage 3: assemble the guest-visible tools rootfs.
+# Stage 3: validate and select the static guest toolset.
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM ${BUSYBOX_IMAGE} AS busybox-validator
+
+RUN set -eux; \
+    for applet in base64 cat chmod grep httpd kill mkdir mkfifo nc printf rm sha1sum sh sleep test wc xxd; do \
+      /bin/busybox --list | /bin/busybox grep -qx "$applet"; \
+    done; \
+    touch /busybox-validated
+
+FROM --platform=$TARGETPLATFORM ${BUSYBOX_IMAGE} AS busybox
+
+# ---------------------------------------------------------------------------
+# Stage 4: assemble the guest-visible tools rootfs.
 #
 # The Debian stage only supplies build-time file utilities. The exported rootfs
-# contains the static init, envd, version metadata, mount points, and symlinks.
+# contains the static init, envd, BusyBox, version metadata, mount points, and
+# symlinks.
 # ---------------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS rootfs
 
@@ -119,8 +135,12 @@ ARG TOOLS_VERSION
 
 COPY --chmod=0755 --from=init-builder /out/agentenv-init /tools-rootfs/agentenv/agentenv-init
 COPY --chmod=0755 --from=envd-builder /out/envd /tools-rootfs/agentenv/envd
+COPY --chmod=0755 --from=busybox /bin/busybox /tools-rootfs/agentenv/bin/busybox
+COPY --from=busybox-validator /busybox-validated /tmp/busybox-validated
 
 RUN set -eux; \
+    test -f /tmp/busybox-validated; \
+    rm /tmp/busybox-validated; \
     mkdir -p \
       /tools-rootfs/dev \
       /tools-rootfs/etc \
@@ -132,7 +152,7 @@ RUN set -eux; \
     ln -sf agentenv/agentenv-init /tools-rootfs/init
 
 # ---------------------------------------------------------------------------
-# Stage 4: materialize the rootfs as an ext4 disk image.
+# Stage 5: materialize the rootfs as an ext4 disk image.
 #
 # We do this inside Docker so contributors do not need host e2fsprogs. The
 # image gets 50% content headroom and a 16 MiB floor to leave room for ext4
@@ -157,7 +177,7 @@ RUN set -eux; \
     chmod 0644 /out/tools.ext4
 
 # ---------------------------------------------------------------------------
-# Stage 5: export contract.
+# Stage 6: export contract.
 #
 # Keep the final stage tiny and stable: consumers should only rely on
 # /tools.ext4 being present at the root of this image.
