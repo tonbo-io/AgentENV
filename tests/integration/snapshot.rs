@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use agentenv::cfg::ConfigManager;
 use agentenv::sandbox::{
     CapturedSandboxSnapshot, FirecrackerSandbox, SandboxBackend, SandboxExecutor,
-    SandboxLaunchConfig,
+    SandboxLaunchConfig, SandboxSnapshotCaptureOutcome, SandboxSnapshotCaptureRequest,
 };
 use agentenv::snapshot::{
     SnapshotAlias, SnapshotId, SnapshotPublishMetadata, SnapshotPublishSource, SnapshotRecord,
@@ -39,6 +39,20 @@ async fn write_guest_file(sandbox: &FirecrackerSandbox, path: &str, contents: &s
         bail!("write guest file {path} failed: {}", output.stderr);
     }
     Ok(())
+}
+
+async fn capture_running_snapshot(
+    sandbox: &mut dyn SandboxBackend,
+) -> Result<CapturedSandboxSnapshot> {
+    match sandbox
+        .capture_snapshot(SandboxSnapshotCaptureRequest::resume_source())
+        .await?
+    {
+        SandboxSnapshotCaptureOutcome::SourceRunning { captured_snapshot } => Ok(captured_snapshot),
+        SandboxSnapshotCaptureOutcome::SourcePaused { .. } => {
+            bail!("resume-source capture left sandbox paused")
+        }
+    }
 }
 
 async fn assert_guest_file(
@@ -323,7 +337,7 @@ async fn persistent_snapshot_lifecycle_preserves_original_pause_resume_state() -
 
     write_guest_file(&original, "/tmp/agentenv-lifecycle/base.txt", "base").await?;
     let first_alias = unique_alias_for_test("lifecycle_first");
-    let first_capture = SandboxBackend::snapshot(&mut original).await?;
+    let first_capture = capture_running_snapshot(&mut original).await?;
     assert_guest_file(&original, "/tmp/agentenv-lifecycle/base.txt", "base").await?;
     write_guest_file(
         &original,
@@ -340,7 +354,7 @@ async fn persistent_snapshot_lifecycle_preserves_original_pause_resume_state() -
     .await?;
 
     let second_alias = unique_alias_for_test("lifecycle_second");
-    let second_capture = SandboxBackend::snapshot(&mut original).await?;
+    let second_capture = capture_running_snapshot(&mut original).await?;
     assert_guest_file(&original, "/tmp/agentenv-lifecycle/base.txt", "base").await?;
     assert_guest_file(
         &original,
@@ -536,7 +550,7 @@ async fn randomized_snapshot_lifecycle_operations_preserve_artifact_ownership() 
                     else {
                         unreachable!("candidate must be running");
                     };
-                    let captured = SandboxBackend::snapshot(sandbox.as_mut()).await?;
+                    let captured = capture_running_snapshot(sandbox.as_mut()).await?;
                     assert_expected_files(sandbox, &expected_files_at_capture).await?;
                     let record = publish_captured_snapshot_for_test(
                         &snapshot_manager,
