@@ -322,9 +322,11 @@ compression_algorithm = "lz4"
 compression_workers = 1
 
 [memory_snapshot.background_download]
-# Download missing blocks from remote memory layers; never start before envd
-# becomes ready.
+# Download missing blocks from remote memory layers.
 enable = true
+# Start filling the node-local cache before Firecracker resumes. Disabled by
+# default because it trades restore latency for immediate remote I/O bandwidth.
+prefetch_before_resume = false
 # Base delay in seconds. A 20-second fallback applies if readiness is lost.
 delay = 0
 # Exclusive upper bound for random extra delay; 1 adds no jitter.

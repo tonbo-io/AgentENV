@@ -270,10 +270,9 @@ impl UblkDeviceManager {
             .context("ublk daemon client is unavailable")
     }
 
-    /// Tell the daemon the sandbox owning `device_key` finished booting,
-    /// releasing held background downloads. Best-effort: failures only mean
-    /// the downloads start after the fallback timeout instead.
-    pub(crate) async fn notify_sandbox_ready(&self, device_key: &Path) {
+    /// Release held background downloads for `device_key`. Best-effort:
+    /// failures only mean the downloads start after the fallback timeout.
+    pub(crate) async fn release_background_downloads(&self, device_key: &Path) {
         let Ok(client) = self.require_client() else {
             return;
         };
@@ -282,11 +281,14 @@ impl UblkDeviceManager {
         // the same form — otherwise the held download silently waits out the
         // 20s fallback on symlinked or relative spellings.
         let key = std::fs::canonicalize(device_key).unwrap_or_else(|_| device_key.to_path_buf());
-        if let Err(error) = client.notify_sandbox_ready(&key.to_string_lossy()).await {
+        if let Err(error) = client
+            .release_background_downloads(&key.to_string_lossy())
+            .await
+        {
             tracing::warn!(
                 %error,
                 device_key = %key.display(),
-                "failed to notify daemon of sandbox readiness; downloads start after fallback timeout"
+                "failed to release background downloads; downloads start after fallback timeout"
             );
         }
     }

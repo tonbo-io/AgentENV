@@ -17,12 +17,12 @@ use url::Url;
 
 use crate::observability::prometheus::MetricGuard;
 
-/// Multipart part size for streaming file uploads. S3/OSS caps a multipart
-/// upload at 10,000 parts, so this bounds the largest uploadable object
-/// (~625 GiB at 64 MiB). Must be passed explicitly to opendal via
-/// `writer_with().chunk()`: without it opendal falls back to the service's
-/// minimum multipart part size (5 MiB), capping uploads at ~50 GiB.
-const CHUNK_SIZE: usize = 64 * 1024 * 1024;
+/// Prefer enough parts to use the upload concurrency for ordinary snapshot
+/// layers while growing the part size for large objects so S3's 10,000-part
+/// limit never becomes the repository's snapshot-size limit.
+const MIN_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+const CHUNK_ALIGNMENT: usize = 1024 * 1024;
+const MAX_MULTIPART_PARTS: u64 = 10_000;
 /// Number of multipart parts uploaded concurrently per file. A single
 /// sequential stream tops out at roughly 100 MB/s to the OSS internal
 /// endpoint; concurrent parts multiply effective throughput.
@@ -245,7 +245,7 @@ impl OssClient {
             self.run_with_operator(|operator| {
                 let oss_key = oss_key.clone();
                 let path = path.clone();
-                async move { upload_file_to_operator(&operator, &oss_key, &path).await }
+                async move { upload_file_to_operator(&operator, &oss_key, &path, size).await }
             })
             .await
             .with_context(|| format!("oss put file '{key}'"))?;
@@ -440,16 +440,18 @@ async fn upload_file_to_operator(
     operator: &Operator,
     key: &str,
     path: &Path,
+    size: u64,
 ) -> opendal::Result<()> {
+    let chunk_size = upload_chunk_size(size);
     let mut writer = operator
         .writer_with(key)
-        .chunk(CHUNK_SIZE)
+        .chunk(chunk_size)
         .concurrent(UPLOAD_CONCURRENCY)
         .await?;
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|err| io_error_to_opendal(err, "open upload source file"))?;
-    let mut buf = vec![0_u8; CHUNK_SIZE];
+    let mut buf = vec![0_u8; chunk_size];
     loop {
         let read = file
             .read(&mut buf)
@@ -464,13 +466,21 @@ async fn upload_file_to_operator(
     Ok(())
 }
 
+fn upload_chunk_size(size: u64) -> usize {
+    let required = usize::try_from(size.div_ceil(MAX_MULTIPART_PARTS)).unwrap_or(usize::MAX);
+    required
+        .max(MIN_CHUNK_SIZE)
+        .div_ceil(CHUNK_ALIGNMENT)
+        .saturating_mul(CHUNK_ALIGNMENT)
+}
+
 fn io_error_to_opendal(error: std::io::Error, message: &'static str) -> OpenDalError {
     OpenDalError::new(OpenDalErrorKind::Unexpected, message).set_source(error)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OssClient;
+    use super::{upload_chunk_size, OssClient, MAX_MULTIPART_PARTS, MIN_CHUNK_SIZE};
     use object_store_operator::{AddressingStyle, CredentialSource};
 
     #[test]
@@ -515,5 +525,16 @@ mod tests {
             Some(AddressingStyle::Virtual),
         )
         .expect_err("malformed endpoint must fail even with an explicit override");
+    }
+
+    #[test]
+    fn upload_chunk_size_uses_concurrency_without_exceeding_the_part_limit() {
+        let ordinary_snapshot_layer = 252 * 1024 * 1024;
+        assert_eq!(upload_chunk_size(ordinary_snapshot_layer), MIN_CHUNK_SIZE);
+
+        let large_snapshot_layer = 512_u64 * 1024 * 1024 * 1024;
+        let chunk_size = upload_chunk_size(large_snapshot_layer);
+        assert!(chunk_size > MIN_CHUNK_SIZE);
+        assert!(large_snapshot_layer.div_ceil(chunk_size as u64) <= MAX_MULTIPART_PARTS);
     }
 }
