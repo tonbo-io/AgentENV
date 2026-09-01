@@ -8,12 +8,22 @@ import (
 	"strings"
 )
 
-// cpuConfig mirrors the top-level Firecracker cpu_config_json structure.
-type cpuConfig struct {
+// x86CPUConfig mirrors the x86_64 Firecracker cpu_config_json structure.
+// ARM configs are deliberately handled separately: serializing this type on
+// aarch64 introduces x86-only fields that Firecracker rejects.
+type x86CPUConfig struct {
 	KvmCapabilities []string        `json:"kvm_capabilities"`
 	CpuidModifiers  []cpuidModifier `json:"cpuid_modifiers"`
 	MsrModifiers    []msrModifier   `json:"msr_modifiers"`
 }
+
+type cpuConfigArchitecture int
+
+const (
+	cpuConfigArchitectureNeutral cpuConfigArchitecture = iota
+	cpuConfigArchitectureX86
+	cpuConfigArchitectureARM
+)
 
 type cpuidModifier struct {
 	Leaf      string        `json:"leaf"`
@@ -38,19 +48,56 @@ type cpuidLeafKey struct {
 	flags         int
 }
 
-// IntersectCpuConfigs computes a conservative bitwise AND intersection of
-// Firecracker cpu_config_json strings. Only entries present in every input
-// config are retained; bitmap fields for shared entries are ANDed together.
+// IntersectCpuConfigs computes a conservative common Firecracker CPU config.
+// x86_64 entries present in every input are retained and their shared bitmap
+// fields are ANDed. aarch64 configs are returned only when they are identical;
+// synthesizing an ARM template requires explicit Firecracker verification.
 // Returns an empty string when jsons is empty.
 func IntersectCpuConfigs(jsons []string) (string, error) {
 	if len(jsons) == 0 {
 		return "", nil
 	}
 
-	configs := make([]cpuConfig, len(jsons))
+	canonical := make([]string, len(jsons))
+	architecture := cpuConfigArchitectureNeutral
 	for i, j := range jsons {
-		if err := json.Unmarshal([]byte(j), &configs[i]); err != nil {
+		config, configArchitecture, err := canonicalCPUConfig(j)
+		if err != nil {
 			return "", fmt.Errorf("parse config %d: %w", i, err)
+		}
+		canonical[i] = config
+		if configArchitecture == cpuConfigArchitectureNeutral {
+			continue
+		}
+		if architecture != cpuConfigArchitectureNeutral && architecture != configArchitecture {
+			return "", fmt.Errorf("configs contain mixed x86_64 and aarch64 fields")
+		}
+		architecture = configArchitecture
+	}
+
+	if architecture == cpuConfigArchitectureARM {
+		for _, config := range canonical[1:] {
+			if config != canonical[0] {
+				return "", fmt.Errorf("aarch64 configs differ; a verified common CPU template is required")
+			}
+		}
+		return canonical[0], nil
+	}
+
+	if architecture == cpuConfigArchitectureNeutral {
+		allEqual := true
+		for _, config := range canonical[1:] {
+			allEqual = allEqual && config == canonical[0]
+		}
+		if allEqual {
+			return canonical[0], nil
+		}
+	}
+
+	configs := make([]x86CPUConfig, len(canonical))
+	for i, config := range canonical {
+		if err := json.Unmarshal([]byte(config), &configs[i]); err != nil {
+			return "", fmt.Errorf("parse canonical config %d: %w", i, err)
 		}
 	}
 
@@ -63,7 +110,7 @@ func IntersectCpuConfigs(jsons []string) (string, error) {
 		return "", err
 	}
 
-	result := cpuConfig{
+	result := x86CPUConfig{
 		KvmCapabilities: intersectKvmCapabilities(configs),
 		CpuidModifiers:  cpuidMods,
 		MsrModifiers:    msrMods,
@@ -76,12 +123,51 @@ func IntersectCpuConfigs(jsons []string) (string, error) {
 	return string(out), nil
 }
 
+func canonicalCPUConfig(input string) (string, cpuConfigArchitecture, error) {
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(input), &fields); err != nil {
+		return "", cpuConfigArchitectureNeutral, err
+	}
+	if fields == nil {
+		return "", cpuConfigArchitectureNeutral, fmt.Errorf("CPU config must be a JSON object")
+	}
+
+	hasX86Fields := false
+	hasARMFields := false
+	for field := range fields {
+		switch field {
+		case "kvm_capabilities":
+		case "cpuid_modifiers", "msr_modifiers":
+			hasX86Fields = true
+		case "reg_modifiers", "vcpu_features":
+			hasARMFields = true
+		default:
+			return "", cpuConfigArchitectureNeutral, fmt.Errorf("unknown Firecracker CPU config field %q", field)
+		}
+	}
+	if hasX86Fields && hasARMFields {
+		return "", cpuConfigArchitectureNeutral, fmt.Errorf("config contains both x86_64 and aarch64 fields")
+	}
+
+	architecture := cpuConfigArchitectureNeutral
+	if hasX86Fields {
+		architecture = cpuConfigArchitectureX86
+	} else if hasARMFields {
+		architecture = cpuConfigArchitectureARM
+	}
+	canonical, err := json.Marshal(fields)
+	if err != nil {
+		return "", cpuConfigArchitectureNeutral, fmt.Errorf("marshal canonical config: %w", err)
+	}
+	return string(canonical), architecture, nil
+}
+
 var kvmReadOnlyLeafIDs = map[uint32]bool{
 	0xb:  true,
 	0x1f: true,
 }
 
-func intersectCpuidModifiers(configs []cpuConfig) ([]cpuidModifier, error) {
+func intersectCpuidModifiers(configs []x86CPUConfig) ([]cpuidModifier, error) {
 	n := len(configs)
 
 	// Build per-config maps: leafKey -> register -> u32 bitmap value.
@@ -181,7 +267,7 @@ func intersectCpuidModifiers(configs []cpuConfig) ([]cpuidModifier, error) {
 	return result, nil
 }
 
-func intersectMsrModifiers(configs []cpuConfig) ([]msrModifier, error) {
+func intersectMsrModifiers(configs []x86CPUConfig) ([]msrModifier, error) {
 	n := len(configs)
 
 	perConfig := make([]map[uint32]uint64, n)
@@ -234,7 +320,7 @@ func intersectMsrModifiers(configs []cpuConfig) ([]msrModifier, error) {
 	return result, nil
 }
 
-func intersectKvmCapabilities(configs []cpuConfig) []string {
+func intersectKvmCapabilities(configs []x86CPUConfig) []string {
 	counts := make(map[string]int)
 	for _, cfg := range configs {
 		seen := make(map[string]bool)

@@ -324,12 +324,41 @@ func TestHeartbeatReturnsCpuIntersectionForSingleNode(t *testing.T) {
 		t.Fatal("single-node cluster: expected intersection in response, got empty")
 	}
 	// Intersection of one config is the config itself.
-	var got cpuConfig
+	var got x86CPUConfig
 	if err := json.Unmarshal([]byte(result), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.CpuidModifiers[0].Modifiers[0].Bitmap != bm32(0xFF) {
 		t.Errorf("want %s, got %s", bm32(0xFF), got.CpuidModifiers[0].Modifiers[0].Bitmap)
+	}
+}
+
+func TestHeartbeatPreservesIdenticalArmCpuConfig(t *testing.T) {
+	armConfig := `{"kvm_capabilities":[],"reg_modifiers":[{"addr":"0x603000000013c020","bitmap":"0b0011"}],"vcpu_features":[]}`
+	registry := NewAtomicNodeRegistry([]Node{
+		{ID: "node-a", Endpoint: "http://node-a"},
+		{ID: "node-b", Endpoint: "http://node-b"},
+	}, 30*time.Second)
+
+	heartbeatWithConfig(t, registry, "node-a", "cluster-1", "svc-a", "")
+	heartbeatWithConfig(t, registry, "node-b", "cluster-1", "svc-b", "")
+	if result := heartbeatWithConfig(t, registry, "node-a", "cluster-1", "svc-a", armConfig); result != "" {
+		t.Fatalf("expected node-b config before computing the common config, got %s", result)
+	}
+	result := heartbeatWithConfig(t, registry, "node-b", "cluster-1", "svc-b", armConfig)
+	if result == "" {
+		t.Fatal("expected identical ARM config in heartbeat response")
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(result), &fields); err != nil {
+		t.Fatalf("unmarshal ARM config: %v", err)
+	}
+	if _, ok := fields["reg_modifiers"]; !ok {
+		t.Fatal("ARM reg_modifiers missing from heartbeat response")
+	}
+	if _, ok := fields["cpuid_modifiers"]; ok {
+		t.Fatal("x86_64 cpuid_modifiers leaked into ARM heartbeat response")
 	}
 }
 
@@ -401,7 +430,7 @@ func TestHeartbeatDeliversIntersectionExactlyOncePerNode(t *testing.T) {
 	}
 
 	// Verify the intersection value is the bitwise AND of both configs.
-	var result cpuConfig
+	var result x86CPUConfig
 	if err := json.Unmarshal([]byte(resultA2), &result); err != nil {
 		t.Fatalf("unmarshal intersection: %v", err)
 	}
@@ -457,7 +486,7 @@ func TestMultiClusterCpuIntersectionsAreIndependent(t *testing.T) {
 	}
 
 	// cluster-x intersection must be 0xFF & 0x0F = 0x0F.
-	var ix cpuConfig
+	var ix x86CPUConfig
 	if err := json.Unmarshal([]byte(resultX), &ix); err != nil {
 		t.Fatalf("unmarshal cluster-x intersection: %v", err)
 	}
@@ -466,7 +495,7 @@ func TestMultiClusterCpuIntersectionsAreIndependent(t *testing.T) {
 	}
 
 	// cluster-y intersection must be 0xF0 (unaffected by cluster-x nodes).
-	var iy cpuConfig
+	var iy x86CPUConfig
 	if err := json.Unmarshal([]byte(resultY), &iy); err != nil {
 		t.Fatalf("unmarshal cluster-y intersection: %v", err)
 	}
@@ -477,12 +506,12 @@ func TestMultiClusterCpuIntersectionsAreIndependent(t *testing.T) {
 	// cluster-x nodes must not receive cluster-y's intersection and vice versa:
 	// subsequent heartbeats with no pending intersection must return empty.
 	if r := heartbeatWithConfig(t, registry, "x2", "cluster-x", "svc-x2", ""); r != "" {
-		var c cpuConfig
+		var c x86CPUConfig
 		_ = json.Unmarshal([]byte(r), &c)
 		t.Errorf("cluster-x x2: got unexpected intersection %v", c)
 	}
 	if r := heartbeatWithConfig(t, registry, "y1", "cluster-y", "svc-y1", ""); r != "" {
-		var c cpuConfig
+		var c x86CPUConfig
 		_ = json.Unmarshal([]byte(r), &c)
 		t.Errorf("cluster-y y1: got unexpected second delivery %v", c)
 	}

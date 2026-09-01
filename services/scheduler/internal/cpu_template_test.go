@@ -20,7 +20,7 @@ func buildConfig(kvmCaps []string, cpuidEntries []cpuidModifier, msrEntries []ms
 	if msrEntries == nil {
 		msrEntries = []msrModifier{}
 	}
-	b, _ := json.Marshal(cpuConfig{
+	b, _ := json.Marshal(x86CPUConfig{
 		KvmCapabilities: kvmCaps,
 		CpuidModifiers:  cpuidEntries,
 		MsrModifiers:    msrEntries,
@@ -28,13 +28,13 @@ func buildConfig(kvmCaps []string, cpuidEntries []cpuidModifier, msrEntries []ms
 	return string(b)
 }
 
-func parsedResult(t *testing.T, jsons []string) cpuConfig {
+func parsedResult(t *testing.T, jsons []string) x86CPUConfig {
 	t.Helper()
 	out, err := IntersectCpuConfigs(jsons)
 	if err != nil {
 		t.Fatalf("IntersectCpuConfigs error: %v", err)
 	}
-	var cfg cpuConfig
+	var cfg x86CPUConfig
 	if err := json.Unmarshal([]byte(out), &cfg); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
@@ -255,6 +255,58 @@ func TestIntersectCpuConfigs_IdenticalConfigs(t *testing.T) {
 	want := bm32(0xABCD1234)
 	if got != want {
 		t.Errorf("identical AND: want %s, got %s", want, got)
+	}
+}
+
+func TestIntersectCpuConfigs_IdenticalArmConfigsPreserved(t *testing.T) {
+	configA := `{
+		"vcpu_features": [],
+		"reg_modifiers": [{"bitmap":"0b0011","addr":"0x603000000013c020"}],
+		"kvm_capabilities": []
+	}`
+	configB := `{"kvm_capabilities":[],"reg_modifiers":[{"addr":"0x603000000013c020","bitmap":"0b0011"}],"vcpu_features":[]}`
+
+	out, err := IntersectCpuConfigs([]string{configA, configB})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &fields); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	for _, field := range []string{"kvm_capabilities", "reg_modifiers", "vcpu_features"} {
+		if _, ok := fields[field]; !ok {
+			t.Errorf("aarch64 field %s is missing", field)
+		}
+	}
+	for _, field := range []string{"cpuid_modifiers", "msr_modifiers"} {
+		if _, ok := fields[field]; ok {
+			t.Errorf("x86_64 field %s must not be emitted for aarch64", field)
+		}
+	}
+}
+
+func TestIntersectCpuConfigs_DifferentArmConfigsFailClosed(t *testing.T) {
+	configA := `{"kvm_capabilities":[],"reg_modifiers":[{"addr":"0x1","bitmap":"0b0001"}],"vcpu_features":[]}`
+	configB := `{"kvm_capabilities":[],"reg_modifiers":[{"addr":"0x1","bitmap":"0b0011"}],"vcpu_features":[]}`
+
+	if _, err := IntersectCpuConfigs([]string{configA, configB}); err == nil {
+		t.Fatal("expected different aarch64 configs to fail closed")
+	}
+}
+
+func TestIntersectCpuConfigs_MixedArchitecturesFailClosed(t *testing.T) {
+	x86 := buildConfig(nil, nil, nil)
+	arm := `{"kvm_capabilities":[],"reg_modifiers":[],"vcpu_features":[]}`
+
+	if _, err := IntersectCpuConfigs([]string{x86, arm}); err == nil {
+		t.Fatal("expected mixed architecture configs to fail closed")
+	}
+}
+
+func TestIntersectCpuConfigs_UnknownFieldFailsClosed(t *testing.T) {
+	if _, err := IntersectCpuConfigs([]string{`{"kvm_capabilities":[],"future_field":[]}`}); err == nil {
+		t.Fatal("expected an unknown Firecracker field to fail closed")
 	}
 }
 
