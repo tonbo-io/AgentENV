@@ -17,7 +17,10 @@ use crate::orchestrator::{
     SandboxMetadata, SandboxState, SandboxTimeoutAction,
 };
 use crate::sandbox::CustomExtensionParams;
-use crate::sandbox::{BaseSandboxNetworkPolicy, SandboxNetworkEgressPolicy, SandboxNetworkPolicy};
+use crate::sandbox::{
+    BaseSandboxNetworkPolicy, SandboxNetworkEgressPolicy, SandboxNetworkPolicy,
+    SandboxSnapshotSourceDisposition,
+};
 use crate::snapshot::{
     CommandContext, SnapshotAlias, SnapshotId, SnapshotPublishMetadata, SnapshotPublishSource,
 };
@@ -1158,8 +1161,18 @@ impl Sandboxes<()> for ApiImpl {
             None => None,
         };
 
+        let pause_after_capture = body.pause_after_capture.unwrap_or(false);
+        let source_disposition = if pause_after_capture {
+            SandboxSnapshotSourceDisposition::LeavePaused
+        } else {
+            SandboxSnapshotSourceDisposition::Resume
+        };
         let capture = match timer
-            .time("capture", self.orchestrator.capture_snapshot(sandbox_id))
+            .time(
+                "capture",
+                self.orchestrator
+                    .capture_snapshot(sandbox_id, source_disposition),
+            )
             .await
         {
             Ok(capture) => capture,
@@ -1184,31 +1197,6 @@ impl Sandboxes<()> for ApiImpl {
                 );
             }
         };
-
-        let pause_after_capture = body.pause_after_capture.unwrap_or(false);
-        if pause_after_capture {
-            match timer
-                .time(
-                    "pause_after_capture",
-                    self.orchestrator.pause_sandbox(sandbox_id),
-                )
-                .await
-            {
-                Ok(()) => {}
-                Err(OrchestratorError::SandboxNotFound(id)) => {
-                    return Ok(SandboxesSandboxIdSnapshotsPostResponse::Status404_NotFound(
-                        sandbox_not_found(id),
-                    ));
-                }
-                Err(err) => {
-                    return Ok(
-                        SandboxesSandboxIdSnapshotsPostResponse::Status500_ServerError(
-                            Self::internal_error(&err),
-                        ),
-                    );
-                }
-            }
-        }
 
         let published = match timer
             .time(

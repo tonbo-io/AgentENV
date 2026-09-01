@@ -5,7 +5,10 @@ use agentenv::orchestrator::{
     CreateSandboxRequest, FileBackedSandboxPersister, InMemoryMetadataStore, NewTimeout,
     Orchestrator, ProxyLookupResult, SandboxLaunchSource, SandboxState, SandboxTimeoutAction,
 };
-use agentenv::sandbox::{FirecrackerSandboxFactory, SandboxNetworkPolicy};
+use agentenv::sandbox::{
+    FirecrackerCapturedSnapshot, FirecrackerPausedState, FirecrackerSandboxFactory,
+    SandboxNetworkPolicy, SandboxSnapshotSourceDisposition,
+};
 use agentenv::snapshot::{
     SnapshotAlias, SnapshotId, SnapshotPublishMetadata, SnapshotPublishSource, SnapshotSource,
     StartupCommand,
@@ -253,7 +256,9 @@ async fn orchestrator_capture_snapshot_can_be_published_and_relaunched() -> Resu
             })
             .await?;
         let sandbox_id = created.id;
-        let capture = orchestrator.capture_snapshot(sandbox_id).await?;
+        let capture = orchestrator
+            .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
+            .await?;
         assert_eq!(capture.metadata.id, sandbox_id);
         assert_eq!(capture.metadata.state, SandboxState::Running);
         assert_eq!(capture.metadata.context.workdir, "/workspace");
@@ -356,6 +361,129 @@ async fn orchestrator_capture_snapshot_can_be_published_and_relaunched() -> Resu
         );
 
         orchestrator.delete_sandbox(relaunched.id).await?;
+        orchestrator.delete_sandbox(sandbox_id).await?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("test timed out"))?
+}
+
+#[tokio::test]
+async fn orchestrator_capture_snapshot_can_atomically_leave_source_paused() -> Result<()> {
+    common::setup().await;
+    timeout(TEST_TIMEOUT, async {
+        let root = tempdir()?;
+        let (builder, snapshot_manager, _) = common::snapshot_test_parts(root.path());
+        let base_alias = format!("orchestrator-atomic-capture-base-{}", Uuid::now_v7());
+        let stored = builder
+            .build_and_publish(
+                &snapshot_manager,
+                common::default_rootfs_template_build_spec()
+                    .alias(base_alias)
+                    .run("mkdir -p /workspace && echo atomic-capture > /workspace/state.txt")
+                    .workdir("/workspace")
+                    .start_cmd("sleep 1000000")
+                    .ready_cmd("grep -q atomic-capture state.txt"),
+            )
+            .await?;
+        let runnable = snapshot_manager.resolve_runnable(stored).await?;
+        let orchestrator = Orchestrator::with_in_memory_store().await;
+        let created = orchestrator
+            .create_sandbox(CreateSandboxRequest {
+                source: SandboxLaunchSource::Snapshot(Box::new(runnable)),
+                timeout: Some(Duration::from_secs(30)),
+                timeout_action: SandboxTimeoutAction::Pause,
+                user_metadata: None,
+                env_vars: None,
+                network_policy: SandboxNetworkPolicy::default(),
+                auto_resume: false,
+                custom_extension_params: None,
+                secure: false,
+            })
+            .await?;
+        let sandbox_id = created.id;
+
+        let capture = orchestrator
+            .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::LeavePaused)
+            .await?;
+        assert_eq!(capture.metadata.state, SandboxState::Paused);
+        assert!(matches!(
+            orchestrator.proxy_lookup_for(&sandbox_id).await?,
+            ProxyLookupResult::Unavailable(SandboxState::Paused)
+        ));
+
+        let captured = capture
+            .captured_snapshot
+            .downcast_ref::<FirecrackerCapturedSnapshot>()
+            .expect("Firecracker backend should return Firecracker capture artifacts");
+        let paused = capture
+            .metadata
+            .paused_state
+            .as_ref()
+            .and_then(|state| state.downcast_ref::<FirecrackerPausedState>())
+            .expect("leave-paused capture should retain Firecracker paused state");
+        let manifest = captured.manifest();
+        let paused_config = paused.snapshot_config();
+        assert_eq!(manifest.vm_state.path, paused_config.vm_state_path);
+        assert_eq!(
+            manifest.memory.image_config_path,
+            paused_config.mem_overlaybd_config.image_config_path
+        );
+        assert_eq!(manifest.memory.virtual_size, paused_config.mem_virtual_size);
+        assert_eq!(
+            manifest.rootfs.image_config_path,
+            paused_config
+                .common
+                .rootfs_image_config
+                .as_ref()
+                .expect("paused snapshot should retain rootfs config")
+                .image_config_path
+        );
+
+        let published = snapshot_manager
+            .publish_captured(
+                SnapshotPublishMetadata {
+                    id: SnapshotId::generate(),
+                    alias: Some(SnapshotAlias::parse(&format!(
+                        "orchestrator-atomic-captured-{}",
+                        Uuid::now_v7()
+                    ))?),
+                    source: SnapshotPublishSource::Sandbox {
+                        source_sandbox_id: sandbox_id.to_string(),
+                    },
+                    context: capture.metadata.context.clone(),
+                    startup: capture.metadata.startup.clone(),
+                    resources: capture.metadata.resources,
+                    runtime_versions: capture.metadata.runtime_versions.clone(),
+                    virtualization_mode: capture.metadata.virtualization_mode,
+                    image_configs: capture.metadata.image_configs.clone(),
+                    custom_extension_params: capture.metadata.custom_extension_params.clone(),
+                },
+                capture.captured_snapshot,
+            )
+            .await?;
+        let target = orchestrator
+            .create_sandbox(CreateSandboxRequest {
+                source: SandboxLaunchSource::Snapshot(Box::new(
+                    snapshot_manager.resolve_runnable(published).await?,
+                )),
+                timeout: Some(Duration::from_secs(30)),
+                timeout_action: SandboxTimeoutAction::Pause,
+                user_metadata: None,
+                env_vars: None,
+                network_policy: SandboxNetworkPolicy::default(),
+                auto_resume: false,
+                custom_extension_params: None,
+                secure: false,
+            })
+            .await?;
+        assert_eq!(target.state, SandboxState::Running);
+
+        let resumed_source = orchestrator
+            .resume_sandbox(sandbox_id, NewTimeout::UseExisting)
+            .await?;
+        assert_eq!(resumed_source.state, SandboxState::Running);
+        orchestrator.delete_sandbox(target.id).await?;
         orchestrator.delete_sandbox(sandbox_id).await?;
         Ok(())
     })

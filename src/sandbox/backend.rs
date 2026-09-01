@@ -84,6 +84,16 @@ impl From<anyhow::Error> for SandboxCaptureError {
 pub type SandboxCaptureResult<T> = std::result::Result<T, SandboxCaptureError>;
 pub type SandboxForkResult = anyhow::Result<Box<dyn SandboxBackend>>;
 
+/// State in which a snapshot capture must leave its source sandbox.
+///
+/// `LeavePaused` is useful when the captured snapshot is about to be moved or
+/// published and no guest execution may occur after the capture point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxSnapshotSourceDisposition {
+    Resume,
+    LeavePaused,
+}
+
 #[derive(Clone, Debug)]
 pub struct SandboxForkSpec {
     pub sandbox_id: SandboxId,
@@ -174,6 +184,56 @@ impl fmt::Debug for CapturedSandboxSnapshot {
     }
 }
 
+/// Backend request for capturing a running sandbox.
+///
+/// The artifact root is only meaningful for `LeavePaused`: it lets the
+/// orchestrator place the resumable source state under its durable lifecycle
+/// store. When it is absent, the backend owns the artifact lifetime.
+#[derive(Clone, Copy, Debug)]
+pub struct SandboxSnapshotCaptureRequest<'a> {
+    source_disposition: SandboxSnapshotSourceDisposition,
+    artifact_root: Option<&'a Path>,
+}
+
+impl<'a> SandboxSnapshotCaptureRequest<'a> {
+    pub fn resume_source() -> Self {
+        Self {
+            source_disposition: SandboxSnapshotSourceDisposition::Resume,
+            artifact_root: None,
+        }
+    }
+
+    pub fn leave_source_paused(artifact_root: Option<&'a Path>) -> Self {
+        Self {
+            source_disposition: SandboxSnapshotSourceDisposition::LeavePaused,
+            artifact_root,
+        }
+    }
+
+    pub fn source_disposition(self) -> SandboxSnapshotSourceDisposition {
+        self.source_disposition
+    }
+
+    pub fn artifact_root(self) -> Option<&'a Path> {
+        self.artifact_root
+    }
+}
+
+/// Successful snapshot capture and the resulting source-sandbox state.
+///
+/// Encoding the state in the outcome prevents callers from mistaking a paused
+/// source for a running one or from discarding the state needed to resume it.
+#[derive(Debug)]
+pub enum SandboxSnapshotCaptureOutcome {
+    SourceRunning {
+        captured_snapshot: CapturedSandboxSnapshot,
+    },
+    SourcePaused {
+        captured_snapshot: CapturedSandboxSnapshot,
+        paused_state: Arc<dyn PausedSandboxState>,
+    },
+}
+
 /// Lifecycle interface for a single sandbox instance.
 ///
 /// Implementors must be `Send + 'static` so that they can be stored inside
@@ -192,37 +252,29 @@ pub trait SandboxBackend: Send + 'static {
     /// workload is submitted.
     async fn wait_for_ready(&self) -> Result<()>;
 
-    /// Pause the sandbox and capture its state for later resume.
-    ///
-    /// After this call the caller is expected to invoke [`stop`][Self::stop]
-    /// to release system resources; the paused state encapsulates everything
-    /// needed to resume the sandbox later via
-    /// [`SandboxBackendFactory::build_from_paused_state`].
-    ///
-    /// [`SandboxCaptureError::Terminal`] indicates snapshot capture mutated the live
-    /// runtime before failing, so callers must not keep treating the sandbox
-    /// as safely runnable.
-    ///
-    /// For simplicity, [`SandboxCaptureError::Recoverable`] must guarantee the sandbox
-    /// has already been restored to a running state before the error is returned.
-    async fn pause(
-        &mut self,
-        artifact_root: Option<&Path>,
-    ) -> SandboxCaptureResult<Arc<dyn PausedSandboxState>>;
-
     /// Resume a paused but not-yet-stopped sandbox from its snapshot.
     ///
     /// Idempotent: calling `resume` more than once must not return an error.
     async fn resume(&mut self) -> Result<()>;
 
-    /// Capture a persistent snapshot from a running sandbox.
+    /// Capture a persistent snapshot from a running sandbox and leave the
+    /// source in the state selected by `request`.
     ///
-    /// After this call the sandbox is expected to continue running.
+    /// A successful `LeavePaused` capture must return the exact paused state
+    /// represented by the captured snapshot. The caller is then expected to
+    /// persist that state before invoking [`stop`][Self::stop]. A successful
+    /// `Resume` capture must return only after the source is running again.
     ///
     /// [`SandboxCaptureError::Terminal`] indicates snapshot capture mutated the live
     /// runtime before failing, so callers must not keep treating the sandbox
     /// as safely runnable.
-    async fn snapshot(&mut self) -> SandboxCaptureResult<CapturedSandboxSnapshot>;
+    /// [`SandboxCaptureError::Recoverable`] must guarantee the source has been
+    /// restored to a running state before the error is returned, regardless of
+    /// the requested source disposition.
+    async fn capture_snapshot(
+        &mut self,
+        request: SandboxSnapshotCaptureRequest<'_>,
+    ) -> SandboxCaptureResult<SandboxSnapshotCaptureOutcome>;
 
     /// Fork this running sandbox into ready child backends.
     ///

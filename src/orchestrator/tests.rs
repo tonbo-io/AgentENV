@@ -1579,7 +1579,7 @@ async fn pause_terminal_failure_removes_sandbox_and_metrics() -> Result<()> {
     setup();
     let behavior = Arc::new(MockBehavior::new());
     behavior.push_action(
-        MockOperation::Pause,
+        MockOperation::Snapshot,
         MockAction::FailTerminal {
             message: "restack succeeded but snapshot staging failed".to_string(),
         },
@@ -1659,9 +1659,10 @@ async fn pause_removes_handle_less_running_sandbox_and_releases_metrics() -> Res
 async fn pause_persists_before_publishing_paused_metadata() -> Result<()> {
     setup();
     let persister = RecordingPersister::default();
+    let behavior = Arc::new(MockBehavior::new());
     let orchestrator = make_orchestrator_without_background_with_factory_and_persister(
         InMemoryMetadataStore::new(),
-        MockBackendFactory::new(),
+        MockBackendFactory::with_behavior(behavior.clone()),
         persister.clone(),
     );
     let created = orchestrator
@@ -1682,6 +1683,10 @@ async fn pause_persists_before_publishing_paused_metadata() -> Result<()> {
         .await?
         .expect("metadata should remain after pause");
     assert_eq!(metadata.state, SandboxState::Paused);
+    assert_eq!(
+        behavior.snapshot_dispositions(),
+        vec![SandboxSnapshotSourceDisposition::LeavePaused]
+    );
     Ok(())
 }
 
@@ -1839,15 +1844,23 @@ async fn pause_artifact_root_allocation_failure_restores_running_for_retry() -> 
 #[tokio::test]
 async fn capture_snapshot_returns_snapshot_and_preserves_running_sandbox() -> Result<()> {
     setup();
-    let orchestrator = make_orchestrator().await;
+    let behavior = Arc::new(MockBehavior::new());
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior.clone())).await;
     let created = orchestrator
         .create_sandbox(create_request(Some(60), &[("team", "snapshot-success")]))
         .await?;
     let sandbox_id = created.id;
 
-    let result = orchestrator.capture_snapshot(sandbox_id).await?;
+    let result = orchestrator
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
+        .await?;
     assert_eq!(result.metadata.id, sandbox_id);
     assert_eq!(result.metadata.state, SandboxState::Running);
+    assert_eq!(
+        behavior.snapshot_dispositions(),
+        vec![SandboxSnapshotSourceDisposition::Resume]
+    );
     assert!(
         result
             .captured_snapshot
@@ -1878,6 +1891,112 @@ async fn capture_snapshot_returns_snapshot_and_preserves_running_sandbox() -> Re
 }
 
 #[tokio::test]
+async fn capture_snapshot_can_atomically_leave_source_paused() -> Result<()> {
+    setup();
+    let behavior = Arc::new(MockBehavior::new());
+    let persister = RecordingPersister::default();
+    let orchestrator = make_orchestrator_without_background_with_factory_and_persister(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::with_behavior(behavior.clone()),
+        persister.clone(),
+    );
+    let created = orchestrator
+        .create_sandbox(create_request(
+            Some(60),
+            &[("team", "snapshot-source-paused")],
+        ))
+        .await?;
+    let sandbox_id = created.id;
+
+    let result = orchestrator
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::LeavePaused)
+        .await?;
+
+    assert_eq!(result.metadata.state, SandboxState::Paused);
+    assert!(result.metadata.paused_state.is_some());
+    assert!(result
+        .captured_snapshot
+        .downcast_ref::<crate::sandbox::mock::MockCapturedSnapshot>()
+        .is_some());
+    assert_eq!(
+        behavior.snapshot_dispositions(),
+        vec![SandboxSnapshotSourceDisposition::LeavePaused],
+        "leaving the source paused must be one backend capture, not snapshot plus pause"
+    );
+    assert_eq!(behavior.stop_calls(), 1);
+    assert_eq!(
+        persister.calls(),
+        vec![
+            RecordingCall::AllocateArtifactRoot,
+            RecordingCall::PersistPaused,
+        ]
+    );
+    assert_proxy_paused(&orchestrator, &sandbox_id).await?;
+    assert_metrics_values(&orchestrator, 1, 0, 0, 0, 0, 0).await;
+
+    orchestrator.delete_sandbox(sandbox_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn leave_paused_capture_persistence_failure_resumes_source() -> Result<()> {
+    setup();
+    let behavior = Arc::new(MockBehavior::new());
+    let resume_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resume_calls_for_hook = resume_calls.clone();
+    behavior.set_on_operation(
+        MockOperation::Resume,
+        Arc::new(move || {
+            resume_calls_for_hook.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }),
+    );
+    let persister = RecordingPersister::default();
+    persister.fail_next(RecordingCall::PersistPaused);
+    let orchestrator = make_orchestrator_without_background_with_factory_and_persister(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::with_behavior(behavior.clone()),
+        persister.clone(),
+    );
+    let created = orchestrator
+        .create_sandbox(create_request(
+            Some(60),
+            &[("team", "snapshot-source-persist-failure")],
+        ))
+        .await?;
+    let sandbox_id = created.id;
+
+    let err = orchestrator
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::LeavePaused)
+        .await
+        .expect_err("capture must fail if its paused source state cannot be persisted");
+
+    assert!(matches!(err, OrchestratorError::InternalError(_)));
+    assert_eq!(
+        behavior.snapshot_dispositions(),
+        vec![SandboxSnapshotSourceDisposition::LeavePaused]
+    );
+    assert_eq!(resume_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(behavior.stop_calls(), 0);
+    assert_eq!(
+        persister.calls(),
+        vec![
+            RecordingCall::AllocateArtifactRoot,
+            RecordingCall::PersistPaused,
+        ]
+    );
+    let metadata = orchestrator
+        .get_sandbox(&sandbox_id)
+        .await?
+        .expect("source should remain available after rollback");
+    assert_eq!(metadata.state, SandboxState::Running);
+    assert!(metadata.paused_state.is_none());
+    assert_proxy_ready(&orchestrator, &sandbox_id).await?;
+
+    orchestrator.delete_sandbox(sandbox_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn capture_snapshot_recoverable_failure_rolls_back_to_running_and_allows_retry() -> Result<()>
 {
     setup();
@@ -1897,7 +2016,7 @@ async fn capture_snapshot_recoverable_failure_rolls_back_to_running_and_allows_r
     let baseline_metrics = current_metrics(&orchestrator).await;
 
     let err = orchestrator
-        .capture_snapshot(sandbox_id)
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
         .await
         .expect_err("recoverable snapshot failure should be returned to the caller");
     assert!(matches!(
@@ -1916,7 +2035,9 @@ async fn capture_snapshot_recoverable_failure_rolls_back_to_running_and_allows_r
     assert_proxy_ready(&orchestrator, &sandbox_id).await?;
     assert_metrics_snapshot(&orchestrator, &baseline_metrics).await;
 
-    let retry = orchestrator.capture_snapshot(sandbox_id).await?;
+    let retry = orchestrator
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
+        .await?;
     assert_eq!(retry.metadata.state, SandboxState::Running);
     assert!(
         retry
@@ -1954,7 +2075,7 @@ async fn capture_snapshot_terminal_failure_removes_sandbox_and_releases_metrics(
     let sandbox_id = created.id;
 
     let err = orchestrator
-        .capture_snapshot(sandbox_id)
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
         .await
         .expect_err("terminal snapshot failure should fail the operation");
     assert!(matches!(
@@ -2005,7 +2126,7 @@ async fn capture_snapshot_without_runtime_handle_removes_sandbox_and_releases_me
     );
 
     let err = orchestrator
-        .capture_snapshot(sandbox_id)
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
         .await
         .expect_err("capture_snapshot should fail when persisted running sandbox has no handle");
     assert!(matches!(err, OrchestratorError::SandboxNotFound(_)));
@@ -2033,7 +2154,7 @@ async fn capture_snapshot_rejects_non_running_states() -> Result<()> {
     orchestrator.pause_sandbox(sandbox_id).await?;
 
     let err = orchestrator
-        .capture_snapshot(sandbox_id)
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
         .await
         .expect_err("capture_snapshot should reject paused sandboxes");
     assert!(matches!(
@@ -2057,7 +2178,7 @@ async fn capture_snapshot_maps_killing_state_to_not_found() -> Result<()> {
         .await?;
 
     let err = orchestrator
-        .capture_snapshot(sandbox_id)
+        .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::Resume)
         .await
         .expect_err("capture_snapshot should treat killing sandboxes as gone");
     assert!(matches!(err, OrchestratorError::SandboxNotFound(id) if id == sandbox_id));
@@ -2185,7 +2306,7 @@ async fn orchestrator_concurrent_pause_calls_all_succeed() -> Result<()> {
     setup();
     let behavior = Arc::new(MockBehavior::new());
     behavior.push_action(
-        MockOperation::Pause,
+        MockOperation::Snapshot,
         MockAction::SucceedAfter(Duration::from_millis(200)),
     );
     let orchestrator =
@@ -2513,7 +2634,7 @@ async fn orchestrator_delete_during_pause_completes_cleanly() -> Result<()> {
     setup();
     let behavior = Arc::new(MockBehavior::new());
     behavior.push_action(
-        MockOperation::Pause,
+        MockOperation::Snapshot,
         MockAction::SucceedAfter(Duration::from_millis(200)),
     );
     let orchestrator =
@@ -2960,7 +3081,7 @@ async fn pause_failure_rolls_back_to_running_and_preserves_handle() -> Result<()
         }),
     );
     behavior.push_action(
-        MockOperation::Pause,
+        MockOperation::Snapshot,
         MockAction::Fail {
             message: "forced pause failure".to_string(),
         },
@@ -3028,7 +3149,7 @@ async fn pause_failure_with_failed_recovery_removes_sandbox() -> Result<()> {
     setup();
     let behavior = Arc::new(MockBehavior::new());
     behavior.push_action(
-        MockOperation::Pause,
+        MockOperation::Snapshot,
         MockAction::Fail {
             message: "forced pause failure".to_string(),
         },
@@ -3078,7 +3199,7 @@ async fn concurrent_pause_when_leader_fails_maps_waiter_to_running_state() -> an
     setup();
     let behavior = Arc::new(MockBehavior::new());
     behavior.push_action(
-        MockOperation::Pause,
+        MockOperation::Snapshot,
         MockAction::FailAfter {
             delay: Duration::from_millis(150),
             message: "forced concurrent pause failure".to_string(),
@@ -3838,7 +3959,7 @@ async fn shutdown_retries_pause_failures_and_preserves_sandbox_on_success() -> R
     setup();
     let behavior = Arc::new(MockBehavior::new());
     behavior.push_action(
-        MockOperation::Pause,
+        MockOperation::Snapshot,
         MockAction::Fail {
             message: "shutdown pause failure".to_string(),
         },
@@ -3871,7 +3992,7 @@ async fn shutdown_returns_error_after_exhausting_pause_retries() -> Result<()> {
     let behavior = Arc::new(MockBehavior::new());
     for pass in 1..=3 {
         behavior.push_action(
-            MockOperation::Pause,
+            MockOperation::Snapshot,
             MockAction::Fail {
                 message: format!("shutdown pause failure pass {pass}"),
             },

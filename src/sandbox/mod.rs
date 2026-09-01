@@ -23,7 +23,8 @@ pub use access::{EnvdAccessToken, SandboxAccessTokenGenerator};
 pub use backend::{
     CapturedSandboxSnapshot, PausedSandboxState, RuntimeArtifactSet, SandboxBackend,
     SandboxBackendFactory, SandboxCaptureError, SandboxCaptureResult, SandboxExecutor,
-    SandboxForkResult, SandboxForkSpec, SandboxRuntimeInfo,
+    SandboxForkResult, SandboxForkSpec, SandboxRuntimeInfo, SandboxSnapshotCaptureOutcome,
+    SandboxSnapshotCaptureRequest, SandboxSnapshotSourceDisposition,
 };
 pub use extra_drive::{
     normalize_mount_path_for_drive, validate_drive_id, validate_mount_path, validate_sub_path,
