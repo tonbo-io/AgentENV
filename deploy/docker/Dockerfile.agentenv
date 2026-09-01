@@ -50,6 +50,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     test -n "${AENV_GIT_COMMIT}" \
     && AENV_GIT_COMMIT="${AENV_GIT_COMMIT}" cargo build --release -p agentenv --bin server -p uvm-ublk-daemon --bin uvm-ublk-daemon \
+    && grep -aFq "${AENV_GIT_COMMIT}" /build/target/release/server \
     && cp /build/target/release/server /out-server \
     && cp /build/target/release/uvm-ublk-daemon /out-uvm-ublk-daemon
 
