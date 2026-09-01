@@ -17,6 +17,16 @@ type x86CPUConfig struct {
 	MsrModifiers    []msrModifier   `json:"msr_modifiers"`
 }
 
+// armCPUConfig contains only fields accepted by the aarch64 Firecracker API.
+// The Scheduler currently emits an empty native template after proving every
+// node has the same fingerprint; a heterogeneous ARM template must be built
+// and verified explicitly rather than replaying a fingerprint dump.
+type armCPUConfig struct {
+	KvmCapabilities []string          `json:"kvm_capabilities"`
+	RegModifiers    []json.RawMessage `json:"reg_modifiers"`
+	VcpuFeatures    []json.RawMessage `json:"vcpu_features"`
+}
+
 type cpuConfigArchitecture int
 
 const (
@@ -50,8 +60,9 @@ type cpuidLeafKey struct {
 
 // IntersectCpuConfigs computes a conservative common Firecracker CPU config.
 // x86_64 entries present in every input are retained and their shared bitmap
-// fields are ANDed. aarch64 configs are returned only when they are identical;
-// synthesizing an ARM template requires explicit Firecracker verification.
+// fields are ANDed. Identical aarch64 fingerprints select an empty native ARM
+// template; synthesizing a heterogeneous ARM template requires explicit
+// Firecracker verification.
 // Returns an empty string when jsons is empty.
 func IntersectCpuConfigs(jsons []string) (string, error) {
 	if len(jsons) == 0 {
@@ -81,7 +92,16 @@ func IntersectCpuConfigs(jsons []string) (string, error) {
 				return "", fmt.Errorf("aarch64 configs differ; a verified common CPU template is required")
 			}
 		}
-		return canonical[0], nil
+		result := armCPUConfig{
+			KvmCapabilities: []string{},
+			RegModifiers:    []json.RawMessage{},
+			VcpuFeatures:    []json.RawMessage{},
+		}
+		out, err := json.Marshal(result)
+		if err != nil {
+			return "", fmt.Errorf("marshal native aarch64 template: %w", err)
+		}
+		return string(out), nil
 	}
 
 	if architecture == cpuConfigArchitectureNeutral {

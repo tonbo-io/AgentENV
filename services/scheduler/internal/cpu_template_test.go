@@ -258,7 +258,7 @@ func TestIntersectCpuConfigs_IdenticalConfigs(t *testing.T) {
 	}
 }
 
-func TestIntersectCpuConfigs_IdenticalArmConfigsPreserved(t *testing.T) {
+func TestIntersectCpuConfigs_IdenticalArmConfigsUseNativeTemplate(t *testing.T) {
 	configA := `{
 		"vcpu_features": [],
 		"reg_modifiers": [{"bitmap":"0b0011","addr":"0x603000000013c020"}],
@@ -277,6 +277,9 @@ func TestIntersectCpuConfigs_IdenticalArmConfigsPreserved(t *testing.T) {
 	for _, field := range []string{"kvm_capabilities", "reg_modifiers", "vcpu_features"} {
 		if _, ok := fields[field]; !ok {
 			t.Errorf("aarch64 field %s is missing", field)
+		}
+		if string(fields[field]) != "[]" {
+			t.Errorf("native aarch64 field %s must be empty, got %s", field, fields[field])
 		}
 	}
 	for _, field := range []string{"cpuid_modifiers", "msr_modifiers"} {
