@@ -528,6 +528,30 @@ components:
         envdVersion:
           $ref: "#/components/schemas/EnvdVersion"
 
+    SandboxPlacement:
+      type: object
+      additionalProperties: false
+      description: Hard node-placement constraints applied and consumed by the multi-node gateway. A direct runtime-node request containing a placement object is rejected.
+      properties:
+        differentNodeFrom:
+          type: array
+          uniqueItems: true
+          maxItems: 32
+          description: Sandbox IDs whose currently assigned nodes must be excluded. Every referenced assignment must exist and be live; placement fails closed otherwise.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 200
+        snapshotCompatibleWith:
+          type: array
+          uniqueItems: true
+          maxItems: 32
+          description: Sandbox IDs that define the required snapshot-compatibility class for the selected node. Every referenced assignment must exist and be live. AgentENV release, cluster, CPU identity, and Firecracker CPU configuration must match every reference.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 200
+
     NewSandbox:
       required:
         - templateID
@@ -562,6 +586,8 @@ components:
           $ref: "#/components/schemas/SandboxNetworkConfig"
         metadata:
           $ref: "#/components/schemas/SandboxMetadata"
+        placement:
+          $ref: "#/components/schemas/SandboxPlacement"
         envVars:
           $ref: "#/components/schemas/EnvVars"
         customExtensionParams:
