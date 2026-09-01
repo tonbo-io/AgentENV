@@ -18,7 +18,7 @@ use nix::unistd::Pid;
 use overlaybd::backend::local::LocalFile;
 use overlaybd::config::{ImageConfig, LayerConfig};
 use overlaybd::index::{Segment, SegmentMapping};
-use overlaybd::index_file::compact_to;
+use overlaybd::index_file::{compact_to, LayerDescriptor};
 use overlaybd::virtual_file::VirtualFile;
 use tracing::{debug, warn};
 
@@ -65,6 +65,7 @@ fn into_terminal_snapshot_failure(err: anyhow::Error) -> anyhow::Error {
     SandboxCaptureError::terminal(err).into()
 }
 
+#[cfg(test)]
 fn local_layer_config(path: &Path) -> LayerConfig {
     local_layer_config_with_descriptor(path, None)
 }
@@ -431,14 +432,17 @@ async fn rewrite_lowers_with_runtime_roots(
         if runtime_suffix.iter().any(|lower| lower.file.is_empty()) {
             anyhow::bail!("cannot compact runtime-owned overlaybd suffix with remote lowers");
         }
-        if let Some(compacted_path) = compact_layers(
+        if let Some(compacted) = compact_layers(
             &runtime_suffix,
             &output_dir.join(compaction_output_name),
             compaction_output,
         )
         .await?
         {
-            lowers.push(local_layer_config(&compacted_path));
+            lowers.push(local_layer_config_with_descriptor(
+                &compacted.path,
+                compacted.descriptor.as_ref(),
+            ));
         }
         return Ok(lowers);
     }
@@ -559,12 +563,13 @@ async fn capture_live_overlaybd_snapshot(
 pub(super) async fn build_mem_snapshot_image_config(
     resume_mem_image_config_path: Option<&Path>,
     new_layer_path: &Path,
+    new_layer_descriptor: Option<&LayerDescriptor>,
     output_dir: &Path,
     memory_output: OverlaybdCompactOutput,
 ) -> Result<ImageConfig> {
     let inherited_image_config =
         load_existing_image_config(resume_mem_image_config_path, "memory snapshot")?;
-    let new_layer = local_layer_config(new_layer_path);
+    let new_layer = local_layer_config_with_descriptor(new_layer_path, new_layer_descriptor);
     let lowers = rewrite_lowers_with_owned_runtime_suffix(
         inherited_image_config.lowers,
         output_dir,
@@ -639,17 +644,20 @@ async fn publish_memory_overlaybd_layer(
     output_path: &Path,
     mode: OverlaybdCompactOutput,
     concurrency: usize,
-) -> Result<()> {
+) -> Result<Option<LayerDescriptor>> {
     let lower_tmp = output_path.with_extension("commit.tmp");
     let build_result = async {
         let output_file: Arc<dyn VirtualFile> = Arc::new(
             LocalFile::new(&lower_tmp)
                 .with_context(|| format!("create temp lower failed: {}", lower_tmp.display()))?,
         );
-        let commit_args = create_commit_args(output_file, mode, concurrency).await?;
+        let (commit_args, descriptor_source) = create_commit_args(output_file, mode, concurrency)
+            .await?
+            .into_parts();
         compact_to(src_layers, mappings, virtual_size, commit_args)
             .await
             .context("compact memory layer")?;
+        let descriptor = descriptor_source.finish().await;
         tokio::fs::rename(&lower_tmp, output_path)
             .await
             .with_context(|| {
@@ -658,7 +666,7 @@ async fn publish_memory_overlaybd_layer(
                     output_path.display()
                 )
             })?;
-        Ok(())
+        Ok(descriptor)
     }
     .await;
 
@@ -758,7 +766,7 @@ pub(crate) async fn convert_dirty_memory_to_overlaybd(
     dirty_ranges: &DirtyMemoryRanges,
     output_dir: &Path,
     mode: OverlaybdCompactOutput,
-) -> Result<(PathBuf, u64)> {
+) -> Result<(PathBuf, u64, Option<LayerDescriptor>)> {
     tokio::fs::create_dir_all(output_dir)
         .await
         .with_context(|| format!("create mem overlaybd dir: {}", output_dir.display()))?;
@@ -767,7 +775,7 @@ pub(crate) async fn convert_dirty_memory_to_overlaybd(
     let (mappings, memory_size) = dirty_ranges_to_segment_mappings(dirty_ranges)?;
     let source_file: Arc<dyn VirtualFile> = Arc::new(ProcessVmReader::new(firecracker_pid));
     let src_layers = vec![source_file];
-    publish_memory_overlaybd_layer(
+    let descriptor = publish_memory_overlaybd_layer(
         &src_layers,
         &mappings,
         memory_size,
@@ -778,7 +786,7 @@ pub(crate) async fn convert_dirty_memory_to_overlaybd(
     .await
     .context("compact dirty memory ranges as overlaybd layer")?;
 
-    Ok((data_path, memory_size))
+    Ok((data_path, memory_size, descriptor))
 }
 
 #[cfg(test)]
@@ -1072,6 +1080,7 @@ mod tests {
         let image_config = build_mem_snapshot_image_config(
             Some(&parent_config_path),
             &new_layer,
+            None,
             temp.path(),
             OverlaybdCompactOutput::Raw,
         )

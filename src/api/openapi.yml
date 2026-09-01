@@ -694,6 +694,10 @@ components:
     SandboxSnapshotRequest:
       type: object
       properties:
+        snapshotId:
+          type: string
+          format: uuid
+          description: Optional caller-assigned stable snapshot UUID. Repeating the same source, name, and UUID returns the already committed snapshot without capturing it again; reusing the UUID for a different snapshot is rejected.
         name:
           type: string
           description: Optional name for the snapshot template. If a snapshot template with this name already exists, a new build will be assigned to the existing template instead of creating a new one.
@@ -1896,6 +1900,8 @@ paths:
           $ref: "#/components/responses/401"
         "404":
           $ref: "#/components/responses/404"
+        "409":
+          $ref: "#/components/responses/409"
         "500":
           $ref: "#/components/responses/500"
 

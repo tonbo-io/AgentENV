@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use overlaybd::backend::local::LocalFile;
 use overlaybd::config::{LayerConfig, UpperMode};
-use overlaybd::index_file::{merge_files_ro, CommitArgs};
+use overlaybd::index_file::{merge_files_ro, CommitArgs, LayerDescriptor};
 use overlaybd::virtual_file::VirtualFile;
 use overlaybd::zfile::{CompressArgs, CompressOptions, ZFileCompactWriter};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,37 @@ pub(crate) enum OverlaybdCompactOutput {
         algorithm: MemorySnapshotCompressionAlgorithm,
         workers: usize,
     },
+}
+
+pub(crate) struct PreparedOverlaybdCommit {
+    args: CommitArgs,
+    descriptor_source: CommitDescriptorSource,
+}
+
+pub(crate) enum CommitDescriptorSource {
+    Unavailable,
+    ZFile(Arc<ZFileCompactWriter>),
+}
+
+impl PreparedOverlaybdCommit {
+    pub(crate) fn into_parts(self) -> (CommitArgs, CommitDescriptorSource) {
+        (self.args, self.descriptor_source)
+    }
+}
+
+impl CommitDescriptorSource {
+    pub(crate) async fn finish(self) -> Option<LayerDescriptor> {
+        match self {
+            Self::Unavailable => None,
+            Self::ZFile(writer) => writer.layer_descriptor().await,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CompactedOverlaybdLayer {
+    pub(crate) path: PathBuf,
+    pub(crate) descriptor: Option<LayerDescriptor>,
 }
 
 impl OverlaybdCompactOutput {
@@ -46,9 +77,11 @@ pub(crate) async fn create_commit_args(
     output: Arc<dyn VirtualFile>,
     mode: OverlaybdCompactOutput,
     concurrency: usize,
-) -> Result<CommitArgs> {
-    let mut args = match mode {
-        OverlaybdCompactOutput::Raw => CommitArgs::new(output),
+) -> Result<PreparedOverlaybdCommit> {
+    let (mut args, descriptor_source) = match mode {
+        OverlaybdCompactOutput::Raw => {
+            (CommitArgs::new(output), CommitDescriptorSource::Unavailable)
+        }
         OverlaybdCompactOutput::ZFile { algorithm, workers } => {
             let algorithm = match algorithm {
                 MemorySnapshotCompressionAlgorithm::Lz4 => CompressOptions::LZ4,
@@ -60,13 +93,18 @@ pub(crate) async fn create_commit_args(
                 0,
             ));
             compress_args.workers = workers.max(1);
-            CommitArgs::from_writer(Arc::new(
-                ZFileCompactWriter::new(output, &compress_args).await?,
-            ))
+            let writer = Arc::new(ZFileCompactWriter::new(output, &compress_args).await?);
+            (
+                CommitArgs::from_writer(writer.clone()),
+                CommitDescriptorSource::ZFile(writer),
+            )
         }
     };
     args.concurrency = concurrency;
-    Ok(args)
+    Ok(PreparedOverlaybdCommit {
+        args,
+        descriptor_source,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,7 +137,7 @@ pub(crate) async fn compact_layers(
     layers: &[LayerConfig],
     output_path: &Path,
     mode: OverlaybdCompactOutput,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<CompactedOverlaybdLayer>> {
     if layers.is_empty() {
         return Ok(None);
     }
@@ -123,13 +161,16 @@ pub(crate) async fn compact_layers(
     }
 
     let lower_tmp = output_path.with_extension(format!("commit.{}.tmp", Uuid::now_v7()));
-    let build_result: Result<()> = async {
+    let build_result: Result<Option<LayerDescriptor>> = async {
         let output_file: Arc<dyn VirtualFile> =
             Arc::new(LocalFile::new(&lower_tmp).context("create compacted layer output file")?);
-        let commit_args = create_commit_args(output_file, mode, 32).await?;
+        let (commit_args, descriptor_source) = create_commit_args(output_file, mode, 32)
+            .await?
+            .into_parts();
         merge_files_ro(&src_files, commit_args)
             .await
             .context("merge layers")?;
+        let descriptor = descriptor_source.finish().await;
         tokio::fs::rename(&lower_tmp, output_path)
             .await
             .with_context(|| {
@@ -138,21 +179,24 @@ pub(crate) async fn compact_layers(
                     output_path.display()
                 )
             })?;
-        Ok(())
+        Ok(descriptor)
     }
     .await;
 
     if build_result.is_err() {
         let _ = tokio::fs::remove_file(&lower_tmp).await;
     }
-    build_result?;
+    let descriptor = build_result?;
 
     debug!(
         output = %output_path.display(),
         input_layers = layers.len(),
         "compacted overlaybd layers"
     );
-    Ok(Some(output_path.to_path_buf()))
+    Ok(Some(CompactedOverlaybdLayer {
+        path: output_path.to_path_buf(),
+        descriptor,
+    }))
 }
 
 #[cfg(test)]
@@ -300,8 +344,10 @@ mod tests {
             let output_path = temp.path().join(format!("compacted-{name}.commit"));
             let published = compact_layers(&layers, &output_path, mode)
                 .await
-                .expect("compact mixed raw/lz4/zstd layers");
-            assert_eq!(published.as_deref(), Some(output_path.as_path()));
+                .expect("compact mixed raw/lz4/zstd layers")
+                .expect("non-empty input should produce a layer");
+            assert_eq!(published.path, output_path);
+            assert_eq!(published.descriptor.is_some(), expected_zfile == 1);
             assert!(!output_path.with_extension("commit.tmp").exists());
 
             let (zfile_flag, data) = read_sealed_layer(&output_path, vsize as usize).await;

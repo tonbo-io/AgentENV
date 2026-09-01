@@ -1,11 +1,12 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 use overlaybd::config::{DownloadConfig, LayerConfig};
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::client::OssClient;
 use super::layout::OssSnapshotArtifactLayout;
@@ -108,89 +109,96 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
                 })?;
         let layout = self.layout(&id);
         let mut handles: Vec<CacheHandle> = Vec::new();
-
-        // ── vm state snapshot ───────────────────────────────────────
-        let vm_state_key = layout.artifact_key(SNAPSHOT_ARTIFACT_LAYOUT.vm_state);
-        let vm_state_client = Arc::clone(&self.client);
-        let p2p_transport = self.p2p_transport.clone();
-        let vm_state_p2p_key = p2p::fixed_artifact_key(&id, SNAPSHOT_ARTIFACT_LAYOUT.vm_state);
-        let vm_state_handle = self
-            .cache
-            .ensure_cached(&vm_state_key, |dest| {
-                let client = Arc::clone(&vm_state_client);
-                let key = vm_state_key.clone();
-                let p2p_transport = p2p_transport.clone();
-                let p2p_key = vm_state_p2p_key.clone();
-                async move {
-                    if let Some(transport) = p2p_transport.as_ref() {
-                        match p2p::fetch_artifact(transport, &p2p_key, &dest).await {
-                            Ok(size) => return Ok(size),
-                            Err(error) => {
-                                debug!(
-                                    key = %p2p_key,
-                                    error = %error,
-                                    "P2P vm_state fetch failed; using backend fallback"
-                                );
-                            }
-                        }
-                    }
-                    client.get_to_file(&key, &dest).await
-                }
-            })
-            .await
-            .map_err(|e| RepositoryError::ArtifactNotFound {
-                artifact: format!("vm state artifact for snapshot '{id}': {e}"),
-            })?;
-        let vm_state_path = vm_state_handle.path().to_path_buf();
-        handles.push(vm_state_handle);
-
-        // ── firecracker manifest ───────────────────────────────────
-        let committed_manifest = self
-            .load_committed_firecracker_manifest(&layout, &id)
-            .await?;
-
-        // ── memory image config ────────────────────────────────────
+        let resolve_started = Instant::now();
         let memory_layers: Vec<OverlaybdLayerRef> = committed
             .memory_layers
             .iter()
             .map(|m| OverlaybdLayerRef::Managed(m.clone()))
             .collect();
-        let mem_cache_key = runtime_image_cache_key(&id, "memory/image.json");
-        let mem_image_config_path = self
-            .materialize_layers_and_pin(
-                &memory_layers,
-                &self.image_materializer.memory_image_config_path(&id),
-                MaterializeSpec {
-                    label: "memory",
-                    cache_key: &mem_cache_key,
-                    allow_empty_layers: true,
-                    download: None,
-                },
-                &mut handles,
-            )
-            .await?;
 
-        // ── rootfs image config ────────────────────────────────────
-        let rootfs_cache_key = runtime_image_cache_key(&id, "rootfs/image.json");
-        let rootfs_image_config_path = self
-            .materialize_layers_and_pin(
-                &committed.rootfs_layers,
-                &self.image_materializer.rootfs_image_config_path(&id),
-                MaterializeSpec {
-                    label: "rootfs",
-                    cache_key: &rootfs_cache_key,
-                    allow_empty_layers: false,
-                    download: None,
-                },
-                &mut handles,
-            )
-            .await?;
+        // Every branch reads immutable committed metadata and writes a distinct
+        // cache key or runtime image-config path. Drive them together so
+        // object-store round trips and local materialization do not serialize.
+        // `join!` deliberately lets every branch finish on error, preserving
+        // each cache operation's cleanup protocol.
+        let vm_state = self.resolve_vm_state(&id);
+        let firecracker_manifest = self.load_committed_firecracker_manifest(&layout, &id);
+        let memory = async {
+            let mut branch_handles = Vec::new();
+            let cache_key = runtime_image_cache_key(&id, "memory/image.json");
+            let path = self
+                .materialize_layers_and_pin(
+                    &memory_layers,
+                    &self.image_materializer.memory_image_config_path(&id),
+                    MaterializeSpec {
+                        label: "memory",
+                        cache_key: &cache_key,
+                        allow_empty_layers: true,
+                        download: None,
+                    },
+                    &mut branch_handles,
+                )
+                .await?;
+            Ok::<_, RepositoryError>((path, branch_handles))
+        };
+        let rootfs = async {
+            let mut branch_handles = Vec::new();
+            let cache_key = runtime_image_cache_key(&id, "rootfs/image.json");
+            let path = self
+                .materialize_layers_and_pin(
+                    &committed.rootfs_layers,
+                    &self.image_materializer.rootfs_image_config_path(&id),
+                    MaterializeSpec {
+                        label: "rootfs",
+                        cache_key: &cache_key,
+                        allow_empty_layers: false,
+                        download: None,
+                    },
+                    &mut branch_handles,
+                )
+                .await?;
+            Ok::<_, RepositoryError>((path, branch_handles))
+        };
+        let attached = async {
+            let mut branch_handles = Vec::new();
+            let drives = self
+                .resolve_attached_drives(&id, &committed.attached_drives, &mut branch_handles)
+                .await?;
+            Ok::<_, RepositoryError>((drives, branch_handles))
+        };
+        let tools = async {
+            let mut branch_handles = Vec::new();
+            let path = self
+                .resolve_tools_drive(committed, &mut branch_handles)
+                .await?;
+            Ok::<_, RepositoryError>((path, branch_handles))
+        };
 
-        // ── attached drives ────────────────────────────────────────
-        let attached_drives = self
-            .resolve_attached_drives(&id, &committed.attached_drives, &mut handles)
-            .await?;
-        let tools_drive_path = self.resolve_tools_drive(committed, &mut handles).await?;
+        let (vm_state, committed_manifest, memory, rootfs, attached, tools) = tokio::join!(
+            vm_state,
+            firecracker_manifest,
+            memory,
+            rootfs,
+            attached,
+            tools
+        );
+        let (vm_state_path, vm_state_handle) = vm_state?;
+        let committed_manifest = committed_manifest?;
+        let (mem_image_config_path, mut memory_handles) = memory?;
+        let (rootfs_image_config_path, mut rootfs_handles) = rootfs?;
+        let (attached_drives, mut attached_handles) = attached?;
+        let (tools_drive_path, mut tools_handles) = tools?;
+        handles.push(vm_state_handle);
+        handles.append(&mut memory_handles);
+        handles.append(&mut rootfs_handles);
+        handles.append(&mut attached_handles);
+        handles.append(&mut tools_handles);
+        info!(
+            snapshot_id = %id,
+            phase = "runtime_artifacts_resolved",
+            elapsed_ms = resolve_started.elapsed().as_secs_f64() * 1000.0,
+            "snapshot runtime resolution phase completed"
+        );
 
         // Runtime artifacts are protected by the sandbox start-window lease (over
         // local-only commits) + the orchestrator running set; the resolved-handle
@@ -216,6 +224,42 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
 // ── private helpers ───────────────────────────────────────────────────
 
 impl OssRuntimeResolver {
+    async fn resolve_vm_state(&self, id: &SnapshotId) -> RepositoryResult<(PathBuf, CacheHandle)> {
+        let layout = self.layout(id);
+        let key = layout.artifact_key(SNAPSHOT_ARTIFACT_LAYOUT.vm_state);
+        let client = Arc::clone(&self.client);
+        let p2p_transport = self.p2p_transport.clone();
+        let p2p_key = p2p::fixed_artifact_key(id, SNAPSHOT_ARTIFACT_LAYOUT.vm_state);
+        let handle = self
+            .cache
+            .ensure_cached(&key, |destination| {
+                let client = Arc::clone(&client);
+                let key = key.clone();
+                let p2p_transport = p2p_transport.clone();
+                let p2p_key = p2p_key.clone();
+                async move {
+                    if let Some(transport) = p2p_transport.as_ref() {
+                        match p2p::fetch_artifact(transport, &p2p_key, &destination).await {
+                            Ok(size) => return Ok(size),
+                            Err(error) => {
+                                debug!(
+                                    key = %p2p_key,
+                                    error = %error,
+                                    "P2P vm_state fetch failed; using backend fallback"
+                                );
+                            }
+                        }
+                    }
+                    client.get_to_file(&key, &destination).await
+                }
+            })
+            .await
+            .map_err(|error| RepositoryError::ArtifactNotFound {
+                artifact: format!("vm state artifact for snapshot '{id}': {error}"),
+            })?;
+        Ok((handle.path().to_path_buf(), handle))
+    }
+
     async fn resolve_tools_drive(
         &self,
         snapshot: &crate::snapshot::CommittedSnapshot,

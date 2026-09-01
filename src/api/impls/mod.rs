@@ -107,9 +107,9 @@ impl ApiImpl {
             | RepositoryError::AliasNotFound { .. }
             | RepositoryError::ArtifactNotFound { .. }
             | RepositoryError::ManagedLayerNotFound { .. } => Self::error(404, err.to_string()),
-            RepositoryError::AliasConflict { .. } | RepositoryError::IntegrityMismatch { .. } => {
-                Self::error(409, err.to_string())
-            }
+            RepositoryError::SnapshotIdConflict { .. }
+            | RepositoryError::AliasConflict { .. }
+            | RepositoryError::IntegrityMismatch { .. } => Self::error(409, err.to_string()),
             RepositoryError::Unsupported { .. } => Self::error(500, err.to_string()),
             RepositoryError::Backend { .. } => Self::internal_error(err),
         }

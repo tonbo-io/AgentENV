@@ -10,6 +10,7 @@ use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
+use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
 use std::cmp::min;
 use std::sync::Arc;
@@ -1391,7 +1392,7 @@ async fn write_header_trailer(
     overwrite_header: bool,
     ht: &mut HeaderTrailer,
     offset: u64,
-) -> Result<()> {
+) -> Result<[u8; HEADER_TRAILER_SPACE]> {
     if is_header {
         ht.set_header();
     } else {
@@ -1421,7 +1422,8 @@ async fn write_header_trailer(
     ht.digest = crc32c(&encoded);
     write_u32_le(&mut encoded, 28, ht.digest);
 
-    write_all_at(file, &encoded, offset).await
+    write_all_at(file, &encoded, offset).await?;
+    Ok(encoded)
 }
 
 fn compress_data(
@@ -1696,14 +1698,65 @@ pub struct ZFileBuilder {
     raw_data_size: u64,
     moffset: u64,
     ht: HeaderTrailer,
+    physical_digest: Option<PhysicalDigestTracker>,
     finished: bool,
+}
+
+struct PhysicalDigestTracker {
+    hasher: Sha256,
+    size: u64,
+}
+
+impl PhysicalDigestTracker {
+    fn new() -> Self {
+        Self {
+            hasher: Sha256::new(),
+            size: 0,
+        }
+    }
+
+    fn absorb(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            offset == self.size,
+            "zfile physical digest received offset {offset}, expected {}",
+            self.size
+        );
+        self.hasher.update(bytes);
+        self.size = self
+            .size
+            .checked_add(bytes.len() as u64)
+            .context("zfile physical digest size overflow")?;
+        Ok(())
+    }
+
+    fn absorb_zeros(&mut self, len: usize) -> Result<()> {
+        const ZEROES: [u8; 4096] = [0; 4096];
+        let mut remaining = len;
+        while remaining > 0 {
+            let chunk = remaining.min(ZEROES.len());
+            self.absorb(self.size, &ZEROES[..chunk])?;
+            remaining -= chunk;
+        }
+        Ok(())
+    }
+
+    fn descriptor(&self) -> crate::index_file::LayerDescriptor {
+        crate::index_file::LayerDescriptor {
+            digest: format!("sha256:{:x}", self.hasher.clone().finalize()),
+            size: self.size,
+        }
+    }
 }
 
 impl ZFileBuilder {
     pub async fn new(file: Arc<dyn VirtualFile>, args: &CompressArgs) -> Result<Self> {
         let mut ht = HeaderTrailer::new();
         ht.set_compress_option(args.opt);
-        write_header_trailer(file.as_ref(), true, false, true, false, &mut ht, 0).await?;
+        let header =
+            write_header_trailer(file.as_ref(), true, false, true, false, &mut ht, 0).await?;
+        let mut physical_digest = PhysicalDigestTracker::new();
+        physical_digest.absorb(0, &header)?;
+        physical_digest.absorb_zeros(args.opt.dict_size as usize)?;
 
         let block_size = usize::try_from(args.opt.block_size).context("invalid block_size")?;
         ensure!(block_size != 0, "block_size must be > 0");
@@ -1739,8 +1792,26 @@ impl ZFileBuilder {
             raw_data_size: 0,
             moffset: HEADER_TRAILER_SPACE as u64 + args.opt.dict_size as u64,
             ht,
+            physical_digest: Some(physical_digest),
             finished: false,
         })
+    }
+
+    fn absorb_physical(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        if let Some(digest) = self.physical_digest.as_mut() {
+            digest.absorb(offset, bytes)?;
+        }
+        Ok(())
+    }
+
+    pub fn layer_descriptor(&self) -> Option<crate::index_file::LayerDescriptor> {
+        self.finished
+            .then(|| {
+                self.physical_digest
+                    .as_ref()
+                    .map(|digest| digest.descriptor())
+            })
+            .flatten()
     }
 
     async fn write_buffer(&mut self, src: &[u8]) -> Result<()> {
@@ -1757,6 +1828,9 @@ impl ZFileBuilder {
             self.moffset,
         )
         .await?;
+        if let Some(digest) = self.physical_digest.as_mut() {
+            digest.absorb(self.moffset, &self.compressed_data[..compressed_len])?;
+        }
         self.block_len.push(
             u32::try_from(compressed_len)
                 .context("compressed_len cannot fit in u32 jump table entry")?,
@@ -1803,6 +1877,7 @@ impl ZFileBuilder {
         } else {
             write_all_at(self.dest.as_ref(), &batch.bytes, self.moffset).await?;
         }
+        self.absorb_physical(self.moffset, &batch.bytes)?;
         self.block_len.extend(batch.block_lengths);
         self.moffset = next_offset;
         Ok(())
@@ -2032,6 +2107,7 @@ impl ZFileBuilder {
         }
 
         write_all_at(self.dest.as_ref(), &index_raw, index_offset).await?;
+        self.absorb_physical(index_offset, &index_raw)?;
 
         self.ht.index_crc = crc32c(&index_raw);
         self.ht.index_offset = index_offset;
@@ -2041,7 +2117,7 @@ impl ZFileBuilder {
         let trailer_offset = index_offset
             .checked_add(index_raw.len() as u64)
             .context("trailer offset overflow")?;
-        write_header_trailer(
+        let trailer = write_header_trailer(
             self.dest.as_ref(),
             false,
             true,
@@ -2051,9 +2127,14 @@ impl ZFileBuilder {
             trailer_offset,
         )
         .await?;
+        self.absorb_physical(trailer_offset, &trailer)?;
         if self.args.overwrite_header {
             write_header_trailer(self.dest.as_ref(), true, false, true, true, &mut self.ht, 0)
                 .await?;
+            // Rewriting offset zero invalidates the append-only digest. This
+            // compatibility mode is not used by snapshot compaction; callers
+            // can fall back to describing the completed file when enabled.
+            self.physical_digest = None;
         }
 
         self.finished = true;
@@ -2124,6 +2205,17 @@ impl ZFileCompactWriter {
         state.next_offset = next_offset;
         state.failed = false;
         Ok(())
+    }
+
+    /// Returns the final physical zfile descriptor without rereading the
+    /// completed file. Available only after successful finalization and when
+    /// the builder did not rewrite its header in compatibility mode.
+    pub async fn layer_descriptor(&self) -> Option<crate::index_file::LayerDescriptor> {
+        let state = self.state.lock().await;
+        state
+            .finalized
+            .then(|| state.builder.layer_descriptor())
+            .flatten()
     }
 }
 
@@ -2695,12 +2787,27 @@ mod tests {
         storage_util::CompactWriter::write_all_at(&writer, &data, 0)
             .await
             .expect("write bounded batches");
+        storage_util::CompactWriter::finalize(&writer)
+            .await
+            .expect("finalize compact writer");
         let max_write_len = backing.max_write_len();
         assert!(max_write_len > 0, "expected at least one physical write");
         // Non-LocalFile fallback writes the full batch in one async call.
         assert!(
             max_write_len > ZFILE_PHYSICAL_WRITE_CHUNK_SIZE as u64,
             "fallback should write full batch, got max_write_len={max_write_len}"
+        );
+
+        let descriptor = writer
+            .layer_descriptor()
+            .await
+            .expect("append-only zfile should expose its physical descriptor");
+        let backing_vfile: Arc<dyn VirtualFile> = backing;
+        let encoded = read_all(&backing_vfile).await;
+        assert_eq!(descriptor.size, encoded.len() as u64);
+        assert_eq!(
+            descriptor.digest,
+            format!("sha256:{:x}", Sha256::digest(&encoded))
         );
     }
 

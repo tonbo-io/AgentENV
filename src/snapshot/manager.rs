@@ -16,7 +16,7 @@ use crate::snapshot::repository::interfaces::{SnapshotRepository, SnapshotRuntim
 use crate::snapshot::repository::{RepositoryError, SnapshotListFilter};
 use crate::snapshot::{
     ManagedLayer, OverlaybdLayerRef, RunnableSnapshot, SnapshotId, SnapshotPublishMetadata,
-    SnapshotRecord,
+    SnapshotPublishSource, SnapshotRecord,
 };
 
 /// Concurrency limit for publishing snapshot artifacts to P2P after commit.
@@ -104,6 +104,22 @@ impl SnapshotManager {
         metadata: SnapshotPublishMetadata,
         captured_snapshot: CapturedSandboxSnapshot,
     ) -> crate::snapshot::RepositoryResult<SnapshotRecord> {
+        if let Some(existing) = self.repository.get(&metadata.id.to_string()).await? {
+            if matches!(
+                &metadata.source,
+                SnapshotPublishSource::Sandbox { source_sandbox_id }
+                    if existing.matches_committed_sandbox_publication(
+                        source_sandbox_id,
+                        metadata.alias.as_ref(),
+                    )
+            ) {
+                return Ok(existing);
+            }
+            return Err(RepositoryError::SnapshotIdConflict {
+                id: metadata.id.clone(),
+            });
+        }
+
         let manifest = captured_snapshot
             .downcast_ref::<FirecrackerCapturedSnapshot>()
             .map(|snapshot| snapshot.manifest().clone())
@@ -291,7 +307,7 @@ mod tests {
     use crate::snapshot::mock::write_mock_built_artifacts;
     use crate::snapshot::p2p::fixed_artifact_key;
     use crate::snapshot::repository::backends::{PosixFsBackend, PosixFsBackendConfig};
-    use crate::snapshot::{SnapshotAlias, SnapshotId, SnapshotPublishMetadata};
+    use crate::snapshot::{SnapshotAlias, SnapshotId, SnapshotPublishMetadata, SnapshotSource};
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -304,6 +320,35 @@ mod tests {
         .expect("posix backend");
         let (repository, runtime_resolver) = backend.into_parts();
         SnapshotManager::from_parts(repository, runtime_resolver, None)
+    }
+
+    #[test]
+    fn captured_publication_replay_requires_the_same_committed_identity() {
+        let source_sandbox_id = "sandbox-a".to_string();
+        let alias = SnapshotAlias::parse("relocation").expect("valid alias");
+        let metadata = SnapshotPublishMetadata {
+            alias: Some(alias.clone()),
+            source: SnapshotPublishSource::Sandbox {
+                source_sandbox_id: source_sandbox_id.clone(),
+            },
+            ..SnapshotPublishMetadata::mock()
+        };
+        let mut existing = SnapshotRecord::mock_ready(crate::snapshot::CommittedSnapshot::mock());
+        existing.alias = Some(alias);
+        existing.source = SnapshotSource::Sandbox { source_sandbox_id };
+
+        assert!(
+            existing.matches_committed_sandbox_publication("sandbox-a", metadata.alias.as_ref())
+        );
+
+        assert!(
+            !existing.matches_committed_sandbox_publication("sandbox-b", metadata.alias.as_ref())
+        );
+
+        existing.committed = None;
+        assert!(
+            !existing.matches_committed_sandbox_publication("sandbox-a", metadata.alias.as_ref())
+        );
     }
 
     async fn seed_built_snapshot(manager: &SnapshotManager, snapshot_id: SnapshotId, alias: &str) {
