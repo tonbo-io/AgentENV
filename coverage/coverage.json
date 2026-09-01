@@ -5,21 +5,21 @@
     "total": 0
   },
   "functions": {
-    "coverage": "74.15%",
-    "missed": 1373,
-    "total": 5312
+    "coverage": "74.16%",
+    "missed": 1375,
+    "total": 5321
   },
-  "generated_at": "2026-09-01T10:55:43Z",
+  "generated_at": "2026-09-01T15:12:52Z",
   "lines": {
-    "coverage": "78.29%",
-    "missed": 9711,
-    "total": 44737
+    "coverage": "78.31%",
+    "missed": 9717,
+    "total": 44801
   },
   "package": "workspace",
   "regions": {
     "coverage": "77.43%",
-    "missed": 14232,
-    "total": 63052
+    "missed": 14253,
+    "total": 63141
   },
-  "run_url": "https://github.com/tonbo-io/AgentENV/actions/runs/33496859091"
+  "run_url": "https://github.com/tonbo-io/AgentENV/actions/runs/33522280719"
 }
