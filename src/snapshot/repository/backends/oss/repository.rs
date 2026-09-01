@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -46,6 +46,22 @@ pub(crate) struct OssSnapshotRepository {
 
 const MAX_ALIAS_BIND_ATTEMPTS: usize = 5;
 const SNAPSHOT_LAYER_UPLOAD_CONCURRENCY: usize = 4;
+
+fn prioritize_layers_for_publication(layers: Vec<LayerConfig>) -> Vec<(usize, LayerConfig)> {
+    let mut indexed = layers.into_iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(|(left_index, left), (right_index, right)| {
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    indexed
+}
+
+fn restore_layer_order<T>(mut layers: Vec<(usize, T)>) -> Vec<T> {
+    layers.sort_by_key(|(index, _)| *index);
+    layers.into_iter().map(|(_, layer)| layer).collect()
+}
 
 impl OssSnapshotRepository {
     pub(crate) fn new(
@@ -196,6 +212,7 @@ impl SnapshotRepository for OssSnapshotRepository {
     ) -> RepositoryResult<SnapshotRecord> {
         let id = &metadata.id;
         let layout = self.layout(id);
+        let publish_started = Instant::now();
 
         // 0. Validate no duplicate drive ids.
         let mut drive_ids_set = HashSet::new();
@@ -300,11 +317,23 @@ impl SnapshotRepository for OssSnapshotRepository {
             vm_state_result?;
             manifest_result?;
             let rootfs_layers = rootfs_outcome.layers;
+            info!(
+                snapshot_id = %id,
+                phase = "core_artifacts_published",
+                elapsed_ms = publish_started.elapsed().as_secs_f64() * 1000.0,
+                "snapshot publication phase completed"
+            );
 
             // 2. Export attached-drive disk images and derive their committed metadata.
             let attached_drives = self
                 .export_attached_drives(id, &manifest, &mut disk_publications)
                 .await?;
+            info!(
+                snapshot_id = %id,
+                phase = "attached_drives_published",
+                elapsed_ms = publish_started.elapsed().as_secs_f64() * 1000.0,
+                "snapshot publication phase completed"
+            );
 
             // 3. Construct committed CommittedSnapshot.
             let committed = CommittedSnapshot {
@@ -332,15 +361,30 @@ impl SnapshotRepository for OssSnapshotRepository {
                     return Err(e);
                 }
             }
+            info!(
+                snapshot_id = %id,
+                phase = "alias_processed",
+                alias_bound = metadata.alias.is_some(),
+                elapsed_ms = publish_started.elapsed().as_secs_f64() * 1000.0,
+                "snapshot publication phase completed"
+            );
 
-            self.write_committed_record(
-                metadata.id.clone(),
-                metadata.alias.clone(),
-                metadata.resources,
-                committed,
-                metadata.source.clone(),
-            )
-            .await
+            let record = self
+                .write_committed_record(
+                    metadata.id.clone(),
+                    metadata.alias.clone(),
+                    metadata.resources,
+                    committed,
+                    metadata.source.clone(),
+                )
+                .await?;
+            info!(
+                snapshot_id = %id,
+                phase = "record_committed",
+                elapsed_ms = publish_started.elapsed().as_secs_f64() * 1000.0,
+                "snapshot publication phase completed"
+            );
+            Ok(record)
         }
         .await;
 
@@ -736,7 +780,7 @@ impl OssSnapshotRepository {
         })?;
 
         let repo_blob_url = image_config.repo_blob_url;
-        stream::iter(image_config.lowers.into_iter().enumerate())
+        let layers = stream::iter(prioritize_layers_for_publication(image_config.lowers))
             .map(|(index, layer)| {
                 let repo_blob_url = repo_blob_url.clone();
                 async move {
@@ -751,7 +795,7 @@ impl OssSnapshotRepository {
                                     artifact,
                                 )
                                 .await?;
-                            return Ok(OverlaybdLayerRef::Managed(managed));
+                            return Ok((index, OverlaybdLayerRef::Managed(managed)));
                         }
                         if crate::image::local_layer::rootfs_layer_is_runtime_generated_delta(
                             layer_path,
@@ -759,7 +803,7 @@ impl OssSnapshotRepository {
                             let managed = self
                                 .import_descriptorless_rootfs_layer(layer_path, artifact)
                                 .await?;
-                            return Ok(OverlaybdLayerRef::Managed(managed));
+                            return Ok((index, OverlaybdLayerRef::Managed(managed)));
                         }
                         return Err(RepositoryError::Unsupported {
                             feature: format!(
@@ -778,11 +822,14 @@ impl OssSnapshotRepository {
                         } else {
                             format!("external:{index}")
                         };
-                        return Ok(OverlaybdLayerRef::External(ExternalLayer {
-                            digest,
-                            repo_blob_url: effective_repo_blob_url,
-                            size: layer.size,
-                        }));
+                        return Ok((
+                            index,
+                            OverlaybdLayerRef::External(ExternalLayer {
+                                digest,
+                                repo_blob_url: effective_repo_blob_url,
+                                size: layer.size,
+                            }),
+                        ));
                     }
                     Err(RepositoryError::Unsupported {
                         feature: format!(
@@ -791,9 +838,10 @@ impl OssSnapshotRepository {
                     })
                 }
             })
-            .buffered(SNAPSHOT_LAYER_UPLOAD_CONCURRENCY)
+            .buffer_unordered(SNAPSHOT_LAYER_UPLOAD_CONCURRENCY)
             .try_collect()
-            .await
+            .await?;
+        Ok(restore_layer_order(layers))
     }
 
     async fn derive_and_upload_memory_layers(
@@ -812,7 +860,7 @@ impl OssSnapshotRepository {
 
         let repo_blob_url = image_config.repo_blob_url;
         let managed_layers_repo_blob_url = self.client.managed_layers_repo_blob_url();
-        stream::iter(image_config.lowers.into_iter().enumerate())
+        let layers = stream::iter(prioritize_layers_for_publication(image_config.lowers))
             .map(|(index, layer)| {
                 let managed_layers_repo_blob_url = managed_layers_repo_blob_url.clone();
                 let repo_blob_url = repo_blob_url.clone();
@@ -826,7 +874,8 @@ impl OssSnapshotRepository {
                                 layer,
                                 &effective_repo_blob_url,
                                 &managed_layers_repo_blob_url,
-                            );
+                            )
+                            .map(|layer| (index, layer));
                         }
                         return Err(RepositoryError::Unsupported {
                             feature: format!("memory layer {index} without local file path"),
@@ -841,15 +890,18 @@ impl OssSnapshotRepository {
                                 layer.size,
                                 OssUploadArtifact::MemoryLayer,
                             )
-                            .await;
+                            .await
+                            .map(|layer| (index, layer));
                     }
                     self.import_managed_layer_by_hash(layer_path, OssUploadArtifact::MemoryLayer)
                         .await
+                        .map(|layer| (index, layer))
                 }
             })
-            .buffered(SNAPSHOT_LAYER_UPLOAD_CONCURRENCY)
+            .buffer_unordered(SNAPSHOT_LAYER_UPLOAD_CONCURRENCY)
             .try_collect()
-            .await
+            .await?;
+        Ok(restore_layer_order(layers))
     }
 
     async fn export_disk_image(
@@ -1267,6 +1319,39 @@ mod tests {
         )
         .expect("oss client");
         OssSnapshotRepository::new(Arc::new(client), SnapshotImageStoragePolicy::ObjectStorage)
+    }
+
+    #[test]
+    fn publication_prioritizes_large_layers_without_changing_committed_order() {
+        let layers = [11_u64, 4096, 1024, 4096]
+            .into_iter()
+            .enumerate()
+            .map(|(index, size)| LayerConfig {
+                digest: format!("sha256:{index}"),
+                size,
+                ..Default::default()
+            })
+            .collect();
+
+        let prioritized = prioritize_layers_for_publication(layers);
+        assert_eq!(
+            prioritized
+                .iter()
+                .map(|(index, layer)| (*index, layer.size))
+                .collect::<Vec<_>>(),
+            vec![(1, 4096), (3, 4096), (2, 1024), (0, 11)]
+        );
+
+        let committed = restore_layer_order(
+            prioritized
+                .into_iter()
+                .map(|(index, layer)| (index, layer.digest))
+                .collect(),
+        );
+        assert_eq!(
+            committed,
+            vec!["sha256:0", "sha256:1", "sha256:2", "sha256:3"]
+        );
     }
 
     #[test]
