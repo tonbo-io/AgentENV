@@ -63,7 +63,7 @@ pub struct SandboxMetadata {
     /// Older records deserialize as non-secure sandboxes.
     #[serde(default)]
     pub secure: bool,
-    /// Paused state produced by the sandbox backend during `pause`.
+    /// Paused state produced by a snapshot capture that leaves the source paused.
     /// Passed back to the backend factory when `resume_sandbox` is called.
     #[serde(skip)]
     pub paused_state: Option<Arc<dyn PausedSandboxState>>,

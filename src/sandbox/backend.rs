@@ -344,7 +344,7 @@ pub trait SandboxBackendFactory: Send + Sync + 'static {
         state: Value,
     ) -> Result<Arc<dyn PausedSandboxState>>;
 
-    /// Build a sandbox backend from backend-specific paused state captured by `pause`.
+    /// Build a sandbox backend from backend-specific paused snapshot state.
     fn build_from_paused_state(
         &self,
         sandbox_id: crate::types::SandboxId,
