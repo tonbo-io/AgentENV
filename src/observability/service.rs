@@ -1,14 +1,14 @@
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio::sync::broadcast;
+use tracing::warn;
 
 use crate::orchestrator::{Orchestrator, SandboxLifecycleEvent};
 
 use super::host::HostMetricsCollector;
 use super::machine::detect_machine_info;
-use super::{MachineInfo, NodeMetricsSnapshot, NodeSnapshot};
+use super::{CpuTemplateDumpConfig, MachineInfo, NodeMetricsSnapshot, NodeSnapshot};
 use crate::identity::NodeIdentity;
 
 /// Projects node-level observability responses from precomputed inputs.
@@ -26,7 +26,6 @@ pub struct ObservabilityService {
     identity: NodeIdentity,
     machine_info: MachineInfo,
     host_metrics: HostMetricsCollector,
-    pending_cpu_config: Arc<Mutex<Option<String>>>,
     cluster_cpu_config: Arc<RwLock<Option<String>>>,
 }
 
@@ -34,28 +33,27 @@ impl ObservabilityService {
     pub async fn new(
         identity: NodeIdentity,
         orchestrator: Arc<Orchestrator>,
-        cpu_template_helper: Option<PathBuf>,
+        cpu_template_dump: Option<CpuTemplateDumpConfig>,
         cluster_cpu_arc: Arc<RwLock<Option<String>>>,
     ) -> Self {
-        let machine_info = detect_machine_info();
+        let mut machine_info = detect_machine_info();
         let host_metrics = HostMetricsCollector::new();
-        let cpu_config_json = if let Some(p) = cpu_template_helper {
-            super::machine::dump_cpu_config(p).await
-        } else {
-            None
-        };
+        if let Some(config) = cpu_template_dump {
+            match super::machine::dump_cpu_config(config).await {
+                Ok(cpu_config_json) => machine_info.cpu_config_json = Some(cpu_config_json),
+                Err(err) => warn!(
+                    error = %err,
+                    "failed to collect guest CPU compatibility configuration; cross-node snapshot placement will fail closed"
+                ),
+            }
+        }
         Self {
             orchestrator,
             identity,
             machine_info,
             host_metrics,
-            pending_cpu_config: Arc::new(Mutex::new(cpu_config_json)),
             cluster_cpu_config: cluster_cpu_arc,
         }
-    }
-
-    pub fn take_cpu_config_json(&self) -> Option<String> {
-        self.pending_cpu_config.lock().unwrap().take()
     }
 
     pub fn store_cluster_cpu_config(&self, config: String) {

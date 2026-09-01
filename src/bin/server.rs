@@ -4,7 +4,7 @@ use agentenv::api::{server, ApiImpl};
 use agentenv::api_key::ApiKey;
 use agentenv::identity::NodeIdentity;
 use agentenv::image::ImageResolver;
-use agentenv::observability::{ObservabilityReporter, ObservabilityService};
+use agentenv::observability::{CpuTemplateDumpConfig, ObservabilityReporter, ObservabilityService};
 use agentenv::orchestrator::Orchestrator;
 use agentenv::overlaybd::OverlaybdP2pRuntime;
 use agentenv::sandbox::{FirecrackerPool, FirecrackerSandboxFactory, UblkDeviceManager};
@@ -108,6 +108,9 @@ async fn main() -> anyhow::Result<()> {
         .then(|| Arc::clone(&p2p_transport));
     let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_p2p_transport)?);
     let cluster_cpu_arc: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    let cpu_template_dump = config.resolved_cpu_template_helper().map(|helper_path| {
+        CpuTemplateDumpConfig::new(helper_path, config.resolved_kernel_image_path())
+    });
     let template_builder = Arc::new(TemplateBuilder::with_cpu_config(Arc::clone(
         &cluster_cpu_arc,
     )));
@@ -120,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
             ObservabilityService::new(
                 identity,
                 Arc::clone(&orchestrator),
-                config.resolved_cpu_template_helper(),
+                cpu_template_dump,
                 cluster_cpu_arc,
             )
             .await,

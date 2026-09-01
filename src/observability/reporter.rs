@@ -100,8 +100,6 @@ impl ObservabilityReporter {
         let heartbeat_join = tokio::spawn(async move {
             let mut backoff = config.interval;
             let mut wait = Duration::from_millis(100);
-            let mut pending_cpu_config_json = service.take_cpu_config_json();
-
             loop {
                 if wait > Duration::ZERO {
                     tokio::select! {
@@ -119,7 +117,6 @@ impl ObservabilityReporter {
                     &config,
                     &service,
                     &scheduler_channel,
-                    &mut pending_cpu_config_json,
                     p2p_endpoint.as_ref(),
                 )
                 .await
@@ -255,14 +252,12 @@ impl ObservabilityReporter {
         config: &ReporterConfig,
         service: &ObservabilityService,
         scheduler_channel: &Channel,
-        cpu_config_json: &mut Option<String>,
         p2p_endpoint: Option<&P2pEndpoint>,
     ) -> Result<()> {
-        let mut snapshot = service
+        let snapshot = service
             .node_snapshot()
             .await
             .context("failed to collect heartbeat snapshot")?;
-        snapshot.machine_info.cpu_config_json = cpu_config_json.clone();
         let node_id = snapshot.node_id.clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let status = if UblkDeviceManager::try_global().is_some_and(UblkDeviceManager::is_available)
@@ -288,8 +283,6 @@ impl ObservabilityReporter {
                 }
             })?
             .into_inner();
-
-        *cpu_config_json = None;
 
         if !response.cpu_config_json.is_empty() {
             service.store_cluster_cpu_config(response.cpu_config_json);
@@ -508,6 +501,7 @@ impl ReporterConfig {
 mod tests {
     use super::*;
     use crate::cfg::{ClusterConfig, ObservabilitySchedulerReportConfig};
+    use crate::observability::{MachineInfo, NodeMetricsSnapshot, NodeSnapshot};
 
     fn make_cluster_config(endpoint: Option<&str>) -> ClusterConfig {
         ClusterConfig {
@@ -591,5 +585,53 @@ mod tests {
             !err.is::<HeartbeatNodeNotConfigured>(),
             "generic errors must not be mistaken for HeartbeatNodeNotConfigured"
         );
+    }
+
+    #[test]
+    fn heartbeat_repeats_static_cpu_compatibility_configuration() {
+        let snapshot = NodeSnapshot {
+            version: "0.1.0".to_string(),
+            commit: "abc123".to_string(),
+            node_id: "node-a".to_string(),
+            service_instance_id: "instance-a".to_string(),
+            cluster_id: uuid::Uuid::nil(),
+            machine_info: MachineInfo {
+                cpu_family: "8".to_string(),
+                cpu_model: "0xd40".to_string(),
+                cpu_model_name: "neoverse-v1".to_string(),
+                cpu_architecture: "aarch64".to_string(),
+                cpu_config_json: Some("{\"reg_modifiers\":[]}".to_string()),
+            },
+            sandbox_count: 0,
+            sandbox_ids: Vec::new(),
+            metrics: NodeMetricsSnapshot {
+                allocated_cpu: 0,
+                allocated_memory_bytes: 0,
+                cpu_percent: 0,
+                cpu_count: 64,
+                memory_used_bytes: 0,
+                memory_total_bytes: 0,
+                disks: Vec::new(),
+                paused_allocated_cpu: 0,
+                paused_allocated_memory_bytes: 0,
+            },
+            create_successes: 0,
+            create_fails: 0,
+            sandbox_starting_count: 0,
+            paused_sandbox_count: 0,
+        };
+
+        for _ in 0..2 {
+            let request = ObservabilityReporter::build_heartbeat_request(
+                snapshot.clone(),
+                0,
+                None,
+                scheduler::NodeStatus::Ready,
+            );
+            assert_eq!(
+                request.machine_info.unwrap().cpu_config_json,
+                "{\"reg_modifiers\":[]}"
+            );
+        }
     }
 }

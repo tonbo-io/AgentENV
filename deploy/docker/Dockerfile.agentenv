@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG AENV_VIRTUALIZATION_MODE=kvm
+ARG AENV_GIT_COMMIT=development
 
 FROM rust:1-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS chef
 
@@ -43,10 +44,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM build-deps AS builder
 
+ARG AENV_GIT_COMMIT
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --release -p agentenv --bin server -p uvm-ublk-daemon --bin uvm-ublk-daemon \
+    test -n "${AENV_GIT_COMMIT}" \
+    && AENV_GIT_COMMIT="${AENV_GIT_COMMIT}" cargo build --release -p agentenv --bin server -p uvm-ublk-daemon --bin uvm-ublk-daemon \
     && cp /build/target/release/server /out-server \
     && cp /build/target/release/uvm-ublk-daemon /out-uvm-ublk-daemon
 
