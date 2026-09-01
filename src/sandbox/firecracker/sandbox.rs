@@ -33,7 +33,8 @@ use crate::sandbox::access::EnvdAccessToken;
 use crate::sandbox::backend::{
     CapturedSandboxSnapshot, PausedSandboxState, RuntimeArtifactSet, SandboxBackend,
     SandboxCaptureError, SandboxCaptureResult, SandboxExecutor, SandboxForkResult, SandboxForkSpec,
-    SandboxRuntimeInfo,
+    SandboxRuntimeInfo, SandboxSnapshotCaptureOutcome, SandboxSnapshotCaptureRequest,
+    SandboxSnapshotSourceDisposition,
 };
 use crate::sandbox::envd::EnvdInstance;
 use crate::sandbox::extra_drive::{
@@ -201,7 +202,7 @@ pub struct FirecrackerSandbox {
 #[derive(Debug)]
 pub struct FirecrackerCapturedSnapshot {
     manifest: FirecrackerSnapshotManifest,
-    _snapshot_root: Arc<PersistentSnapshotRootGuard>,
+    _snapshot_root: Option<Arc<PersistentSnapshotRootGuard>>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,7 +249,7 @@ impl PausedSandboxState for FirecrackerPausedState {
 impl FirecrackerCapturedSnapshot {
     pub(crate) fn new(
         manifest: FirecrackerSnapshotManifest,
-        snapshot_root: Arc<PersistentSnapshotRootGuard>,
+        snapshot_root: Option<Arc<PersistentSnapshotRootGuard>>,
     ) -> Self {
         Self {
             manifest,
@@ -275,43 +276,29 @@ impl SandboxBackend for FirecrackerSandbox {
         FirecrackerSandbox::wait_for_ready(self).await
     }
 
-    /// Pauses the VM and returns the paused state wrapped as a [`PausedSandboxState`].
-    async fn pause(
+    async fn capture_snapshot(
         &mut self,
-        artifact_root: Option<&Path>,
-    ) -> SandboxCaptureResult<Arc<dyn PausedSandboxState>> {
-        let pause_result = match artifact_root {
-            Some(artifact_root) => FirecrackerSandbox::pause_to_dir(self, artifact_root)
-                .await
-                .map(|(snapshot_config, _)| snapshot_config),
-            None => FirecrackerSandbox::pause(self).await,
+        request: SandboxSnapshotCaptureRequest<'_>,
+    ) -> SandboxCaptureResult<SandboxSnapshotCaptureOutcome> {
+        let managed_snapshot_root = if request.artifact_root().is_none() {
+            Some(
+                self.live_snapshot_root()
+                    .await
+                    .map_err(SandboxCaptureError::from)?,
+            )
+        } else {
+            None
         };
-        let snapshot_config = match pause_result {
-            Ok(snapshot_config) => snapshot_config,
-            Err(err) => {
-                let pause_err = SandboxCaptureError::from(err);
-                if pause_err.is_terminal() {
-                    return Err(pause_err);
-                }
-                if let Err(resume_err) = FirecrackerSandbox::resume(self).await {
-                    return Err(SandboxCaptureError::terminal(anyhow::anyhow!(
-                        "pause failed and sandbox could not be resumed: pause error: {pause_err}; resume error: {resume_err:#}"
-                    )));
-                }
-                return Err(pause_err);
-            }
+        let snapshot_dir = match request.artifact_root() {
+            Some(artifact_root) => artifact_root.to_path_buf(),
+            None => managed_snapshot_root
+                .as_ref()
+                .expect("managed snapshot root should exist")
+                .path()
+                .join(Uuid::now_v7().to_string()),
         };
-        Ok(Arc::new(FirecrackerPausedState::new(snapshot_config)))
-    }
 
-    async fn snapshot(&mut self) -> SandboxCaptureResult<CapturedSandboxSnapshot> {
-        let live_snapshot_root = self
-            .live_snapshot_root()
-            .await
-            .map_err(SandboxCaptureError::from)?;
-        let snapshot_dir = live_snapshot_root.path().join(Uuid::now_v7().to_string());
-
-        let (_, manifest) = match self.pause_to_dir(&snapshot_dir).await {
+        let (mut snapshot_config, manifest) = match self.pause_to_dir(&snapshot_dir).await {
             Ok(snapshot) => snapshot,
             Err(err) => {
                 let snapshot_err = SandboxCaptureError::from(err);
@@ -328,13 +315,26 @@ impl SandboxBackend for FirecrackerSandbox {
                 return Err(snapshot_err);
             }
         };
-        FirecrackerSandbox::resume(self)
-            .await
-            .map_err(SandboxCaptureError::terminal)?;
+        snapshot_config.managed_snapshot_root = managed_snapshot_root.clone();
+        let captured_snapshot = CapturedSandboxSnapshot::new(FirecrackerCapturedSnapshot::new(
+            manifest,
+            managed_snapshot_root,
+        ));
 
-        Ok(CapturedSandboxSnapshot::new(
-            FirecrackerCapturedSnapshot::new(manifest, live_snapshot_root),
-        ))
+        match request.source_disposition() {
+            SandboxSnapshotSourceDisposition::Resume => {
+                FirecrackerSandbox::resume(self)
+                    .await
+                    .map_err(SandboxCaptureError::terminal)?;
+                Ok(SandboxSnapshotCaptureOutcome::SourceRunning { captured_snapshot })
+            }
+            SandboxSnapshotSourceDisposition::LeavePaused => {
+                Ok(SandboxSnapshotCaptureOutcome::SourcePaused {
+                    captured_snapshot,
+                    paused_state: Arc::new(FirecrackerPausedState::new(snapshot_config)),
+                })
+            }
+        }
     }
 
     async fn fork(

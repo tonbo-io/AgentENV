@@ -6,7 +6,6 @@
 //! need a real VM.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +18,8 @@ use tokio::time::sleep;
 use super::backend::{
     CapturedSandboxSnapshot, PausedSandboxState, RuntimeArtifactSet, SandboxBackend,
     SandboxBackendFactory, SandboxCaptureResult, SandboxForkResult, SandboxForkSpec,
-    SandboxRuntimeInfo,
+    SandboxRuntimeInfo, SandboxSnapshotCaptureOutcome, SandboxSnapshotCaptureRequest,
+    SandboxSnapshotSourceDisposition,
 };
 use super::{FreshSandboxBuildSpec, SandboxCaptureError, SandboxLaunchConfig};
 use crate::sandbox::CustomExtensionParams;
@@ -48,7 +48,6 @@ pub enum MockOperation {
     Start,
     StartNowait,
     WaitForReady,
-    Pause,
     Resume,
     Snapshot,
     Fork,
@@ -72,6 +71,7 @@ pub struct MockBehavior {
     on_operation: Mutex<HashMap<MockOperation, Arc<dyn Fn() + Send + Sync>>>,
     runtime_info: Mutex<SandboxRuntimeInfo>,
     source_config_paths: Mutex<Vec<std::path::PathBuf>>,
+    snapshot_dispositions: Mutex<Vec<SandboxSnapshotSourceDisposition>>,
     stop_calls: AtomicUsize,
     update_network_calls: AtomicUsize,
 }
@@ -127,6 +127,13 @@ impl MockBehavior {
 
     pub fn update_network_calls(&self) -> usize {
         self.update_network_calls.load(Ordering::Relaxed)
+    }
+
+    pub fn snapshot_dispositions(&self) -> Vec<SandboxSnapshotSourceDisposition> {
+        self.snapshot_dispositions
+            .lock()
+            .expect("snapshot_dispositions mutex poisoned")
+            .clone()
     }
 
     fn pop_action(&self, operation: MockOperation) -> MockAction {
@@ -273,37 +280,50 @@ impl SandboxBackend for MockSandboxBackend {
         self.behavior.apply_async(MockOperation::WaitForReady).await
     }
 
-    async fn pause(
-        &mut self,
-        _artifact_root: Option<&Path>,
-    ) -> SandboxCaptureResult<Arc<dyn PausedSandboxState>> {
-        let pause_result = self
-            .behavior
-            .apply_capture_result(MockOperation::Pause)
-            .await;
-        if let Err(pause_err) = pause_result {
-            if pause_err.is_terminal() {
-                return Err(pause_err);
-            }
-            if let Err(resume_err) = self.behavior.apply_async(MockOperation::Resume).await {
-                return Err(SandboxCaptureError::terminal(anyhow!(
-                    "pause failed and sandbox could not be resumed: pause error: {pause_err}; resume error: {resume_err:#}"
-                )));
-            }
-            return Err(pause_err);
-        }
-        Ok(Arc::new(MockSnapshot))
-    }
-
     async fn resume(&mut self) -> Result<()> {
         self.behavior.apply_async(MockOperation::Resume).await
     }
 
-    async fn snapshot(&mut self) -> SandboxCaptureResult<CapturedSandboxSnapshot> {
+    async fn capture_snapshot(
+        &mut self,
+        request: SandboxSnapshotCaptureRequest<'_>,
+    ) -> SandboxCaptureResult<SandboxSnapshotCaptureOutcome> {
         self.behavior
+            .snapshot_dispositions
+            .lock()
+            .expect("snapshot_dispositions mutex poisoned")
+            .push(request.source_disposition());
+        let capture_result = self
+            .behavior
             .apply_capture_result(MockOperation::Snapshot)
-            .await?;
-        Ok(CapturedSandboxSnapshot::new(MockCapturedSnapshot))
+            .await;
+        if let Err(capture_err) = capture_result {
+            if capture_err.is_terminal() {
+                return Err(capture_err);
+            }
+            if let Err(resume_err) = self.behavior.apply_async(MockOperation::Resume).await {
+                return Err(SandboxCaptureError::terminal(anyhow!(
+                    "snapshot capture failed and sandbox could not be resumed: capture error: {capture_err}; resume error: {resume_err:#}"
+                )));
+            }
+            return Err(capture_err);
+        }
+        let captured_snapshot = CapturedSandboxSnapshot::new(MockCapturedSnapshot);
+        Ok(match request.source_disposition() {
+            SandboxSnapshotSourceDisposition::Resume => {
+                self.behavior
+                    .apply_async(MockOperation::Resume)
+                    .await
+                    .map_err(SandboxCaptureError::terminal)?;
+                SandboxSnapshotCaptureOutcome::SourceRunning { captured_snapshot }
+            }
+            SandboxSnapshotSourceDisposition::LeavePaused => {
+                SandboxSnapshotCaptureOutcome::SourcePaused {
+                    captured_snapshot,
+                    paused_state: Arc::new(MockSnapshot),
+                }
+            }
+        })
     }
 
     async fn fork(

@@ -7,7 +7,8 @@ use crate::common;
 use agentenv::cfg::ConfigManager;
 use agentenv::sandbox::{
     ExtraDrive, FirecrackerSandbox, FirecrackerSandboxConfig, OverlaybdConfig, SandboxBackend,
-    SandboxExecutor, SandboxLaunchConfig,
+    SandboxExecutor, SandboxLaunchConfig, SandboxSnapshotCaptureOutcome,
+    SandboxSnapshotCaptureRequest,
 };
 use agentenv::snapshot::{
     CommittedAttachedDrive, OverlaybdLayerRef, SnapshotAlias, SnapshotId, SnapshotManager,
@@ -159,7 +160,17 @@ async fn publish_sandbox_snapshot_with_attached_drive(
     let setup = sandbox.run_command("sh", &["-lc", setup_cmd]).await?;
     assert_eq!(setup.exit_code, 0);
 
-    let captured = SandboxBackend::snapshot(&mut sandbox).await?;
+    let captured = match SandboxBackend::capture_snapshot(
+        &mut sandbox,
+        SandboxSnapshotCaptureRequest::resume_source(),
+    )
+    .await?
+    {
+        SandboxSnapshotCaptureOutcome::SourceRunning { captured_snapshot } => captured_snapshot,
+        SandboxSnapshotCaptureOutcome::SourcePaused { .. } => {
+            return Err(anyhow!("resume-source capture left sandbox paused"));
+        }
+    };
     let _ = sandbox.stop().await;
 
     let metadata = SnapshotPublishMetadata {

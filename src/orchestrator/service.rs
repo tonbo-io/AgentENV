@@ -18,7 +18,8 @@ use crate::sandbox::{
     CustomExtensionClient, CustomExtensionParams, EnvdAccessToken, FirecrackerSandboxFactory,
     FreshSandboxBuildSpec, PausedSandboxState, RuntimeArtifactSet, SandboxAccessTokenGenerator,
     SandboxBackend, SandboxBackendFactory, SandboxForkSpec, SandboxLaunchConfig,
-    SandboxNetworkPolicy, SandboxRuntimeInfo,
+    SandboxNetworkPolicy, SandboxRuntimeInfo, SandboxSnapshotCaptureOutcome,
+    SandboxSnapshotCaptureRequest, SandboxSnapshotSourceDisposition,
 };
 use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
@@ -1070,7 +1071,7 @@ where
             Ok(_) => {}
             Err(StoreError::StateConflict { actual_state, .. }) => {
                 return match actual_state {
-                    // Another task is already performing the pause.  Wait for
+                    // Another task is already performing the pause. Wait for
                     // it to finish and then report the final outcome.
                     SandboxState::Pausing => self.join_concurrent_pause(sandbox_id).await,
                     SandboxState::Paused => Ok(()),
@@ -1090,180 +1091,12 @@ where
             Err(err) => return Err(OrchestratorError::from(err)),
         }
 
-        // Pin paused runtime artifacts before detaching from the running set.
-        let runtime_artifacts = {
-            let handle = self.sandboxes.read().await.get(&sandbox_id).cloned();
-            match handle {
-                Some(handle) => {
-                    let sandbox = handle.lock().await;
-                    sandbox.runtime_info().runtime_artifacts
-                }
-                None => RuntimeArtifactSet::empty(),
-            }
-        };
-        if let Err(error) = self
-            .protect_image_refs(
-                RuntimeImageOwner::PausedSandbox(sandbox_id),
-                runtime_artifacts,
-                "paused sandbox",
-            )
-            .await
-        {
-            warn!(error = %error, "failed to protect paused runtime artifacts; keeping sandbox Running");
-            let _ = self
-                .store
-                .update_state_if_state(&sandbox_id, SandboxState::Running, &[SandboxState::Pausing])
-                .await;
-            return Err(error);
-        }
-
-        // Allocate persistence space while the running handle and route are
-        // still attached. Allocation does not mutate the backend, so failure
-        // only needs to restore metadata and release the temporary image refs.
-        let artifact_root = match self.persister.allocate_artifact_root(&sandbox_id).await {
-            Ok(artifact_root) => artifact_root,
-            Err(err) => {
-                warn!(error = ?err, "failed to allocate paused sandbox artifact root");
-                self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
-                    .await;
-                let _ = self
-                    .store
-                    .update_state_if_state(
-                        &sandbox_id,
-                        SandboxState::Running,
-                        &[SandboxState::Pausing],
-                    )
-                    .await;
-                return Err(OrchestratorError::from(err));
-            }
-        };
-
-        let (handle, removed_proxy_route) = self.detach_sandbox_handle_and_route(&sandbox_id).await;
-
-        let Some(handle) = handle else {
-            warn!("sandbox handle not found while pausing, removing from store");
-            self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
-                .await;
-            self.store.remove(&sandbox_id).await?;
-            return Err(OrchestratorError::SandboxNotFound(sandbox_id));
-        };
-
-        // Pause the sandbox and capture the paused state for resuming later.
-        let paused_state_result = {
-            let mut sandbox = handle.lock().await;
-            sandbox.pause(artifact_root.as_deref()).await
-        };
-
-        // If pausing failed, attempt to put the sandbox back and return an error.
-        let paused_state = match paused_state_result {
-            Ok(s) => s,
-            Err(err) => {
-                warn!(error = ?err, "failed to pause sandbox");
-                if err.is_terminal() {
-                    // The handle was already detached from `self.sandboxes`
-                    // before `pause()`. Do not reinsert it here: the live
-                    // runtime may have been mutated and is no longer safe to
-                    // keep serving as a running sandbox.
-                    let stop_result = {
-                        let mut sandbox = handle.lock().await;
-                        sandbox.stop().await
-                    };
-                    if let Err(stop_err) = stop_result {
-                        warn!(error = ?stop_err, "failed to stop sandbox after terminal pause failure");
-                    }
-                    self.store.remove(&sandbox_id).await?;
-                } else {
-                    self.sandboxes.write().await.insert(sandbox_id, handle);
-                    self.restore_proxy_route(sandbox_id, removed_proxy_route)
-                        .await;
-                    let _ = self
-                        .store
-                        .update_state_if_state(
-                            &sandbox_id,
-                            SandboxState::Running,
-                            &[SandboxState::Pausing],
-                        )
-                        .await;
-                }
-                self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
-                    .await;
-                return Err(OrchestratorError::SandboxOperationFailed {
-                    sandbox_id,
-                    operation: SandboxOperation::Pause,
-                    source: err.into(),
-                });
-            }
-        };
-
-        let persisted_metadata = {
-            let mut metadata = self
-                .store
-                .get(&sandbox_id)
-                .await?
-                .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?;
-            metadata.state = SandboxState::Paused;
-            metadata.paused_state = Some(paused_state.clone());
-            metadata
-        };
-        if let Err(err) = self
-            .persister
-            .persist_paused(
-                &persisted_metadata,
-                artifact_root.as_deref(),
-                paused_state.as_ref(),
-            )
-            .await
-        {
-            warn!(error = ?err, "failed to persist paused sandbox state");
-            let resume_result = {
-                let mut sandbox = handle.lock().await;
-                sandbox.resume().await
-            };
-            if let Err(resume_err) = resume_result {
-                warn!(error = ?resume_err, "failed to resume sandbox after pause failure");
-                let stop_result = {
-                    let mut sandbox = handle.lock().await;
-                    sandbox.stop().await
-                };
-                if let Err(stop_err) = stop_result {
-                    warn!(error = ?stop_err, "failed to stop sandbox after pause failure");
-                }
-                if let Err(error) = self.store.remove(&sandbox_id).await {
-                    warn!(error = ?error, "failed to remove sandbox after pause failure");
-                }
-            } else {
-                self.sandboxes.write().await.insert(sandbox_id, handle);
-                self.restore_proxy_route(sandbox_id, removed_proxy_route)
-                    .await;
-                let _ = self
-                    .store
-                    .update_state_if_state(
-                        &sandbox_id,
-                        SandboxState::Running,
-                        &[SandboxState::Pausing],
-                    )
-                    .await;
-            }
-            self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
-                .await;
-            return Err(OrchestratorError::InternalError(format!(
-                "failed to persist paused sandbox state: {err:#}"
-            )));
-        }
-        let resources = persisted_metadata.resources;
-        self.store.update(persisted_metadata).await?;
-
-        // Stop the sandbox to free up resources.
-        let stop_result = {
-            let mut sandbox = handle.lock().await;
-            sandbox.stop().await
-        };
-        if let Err(err) = stop_result {
-            warn!(error = ?err, "failed to stop sandbox after pausing");
-        }
-        self.publish_sandbox_event(SandboxLifecycleEventType::Pause, sandbox_id, resources);
-        info!("sandbox paused");
-
+        self.capture_snapshot_leaving_source_paused(
+            sandbox_id,
+            SandboxState::Pausing,
+            SandboxOperation::Pause,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1412,10 +1245,12 @@ where
     pub async fn capture_snapshot(
         self: &Arc<Self>,
         sandbox_id: SandboxId,
+        source_disposition: SandboxSnapshotSourceDisposition,
     ) -> Result<SnapshotCaptureResult> {
         let this = Arc::clone(self);
         self.run_cancellation_safe("snapshot", sandbox_id, async move {
-            this.capture_snapshot_inner(sandbox_id).await
+            this.capture_snapshot_inner(sandbox_id, source_disposition)
+                .await
         })
         .await
     }
@@ -1428,6 +1263,7 @@ where
     async fn capture_snapshot_inner(
         self: Arc<Self>,
         sandbox_id: SandboxId,
+        source_disposition: SandboxSnapshotSourceDisposition,
     ) -> Result<SnapshotCaptureResult> {
         self.ensure_accepting_lifecycle_operations()?;
 
@@ -1454,6 +1290,16 @@ where
             Err(err) => return Err(OrchestratorError::from(err)),
         }
 
+        if source_disposition == SandboxSnapshotSourceDisposition::LeavePaused {
+            return self
+                .capture_snapshot_leaving_source_paused(
+                    sandbox_id,
+                    SandboxState::Snapshotting,
+                    SandboxOperation::Snapshot,
+                )
+                .await;
+        }
+
         // Get the sandbox handle.
         let handle = {
             let sandboxes = self.sandboxes.read().await;
@@ -1469,12 +1315,48 @@ where
         // Call sandbox backend to capture the snapshot.
         let captured_snapshot_result = {
             let mut sandbox = handle.lock().await;
-            sandbox.snapshot().await
+            sandbox
+                .capture_snapshot(SandboxSnapshotCaptureRequest::resume_source())
+                .await
         };
 
         // If snapshot capture failed, attempt to roll back to Running state and return an error.
         let captured_snapshot = match captured_snapshot_result {
-            Ok(captured_snapshot) => captured_snapshot,
+            Ok(SandboxSnapshotCaptureOutcome::SourceRunning { captured_snapshot }) => {
+                captured_snapshot
+            }
+            Ok(SandboxSnapshotCaptureOutcome::SourcePaused { .. }) => {
+                warn!("sandbox backend violated resume-source capture contract");
+                let resume_result = {
+                    let mut sandbox = handle.lock().await;
+                    sandbox.resume().await
+                };
+                if let Err(resume_err) = resume_result {
+                    self.detach_sandbox_handle_and_route(&sandbox_id).await;
+                    let stop_result = {
+                        let mut sandbox = handle.lock().await;
+                        sandbox.stop().await
+                    };
+                    if let Err(stop_err) = stop_result {
+                        warn!(error = ?stop_err, "failed to stop sandbox after capture contract violation");
+                    }
+                    self.store.remove(&sandbox_id).await?;
+                    return Err(OrchestratorError::InternalError(format!(
+                        "sandbox backend left source paused after a resume-source capture and recovery failed: {resume_err:#}"
+                    )));
+                }
+                let _ = self
+                    .store
+                    .update_state_if_state(
+                        &sandbox_id,
+                        SandboxState::Running,
+                        &[SandboxState::Snapshotting],
+                    )
+                    .await;
+                return Err(OrchestratorError::InternalError(
+                    "sandbox backend left source paused after a resume-source capture".to_string(),
+                ));
+            }
             Err(err) => {
                 warn!(error = ?err, "failed to capture sandbox snapshot");
                 if err.is_terminal() {
@@ -1524,6 +1406,205 @@ where
         info!("snapshot captured");
         Ok(SnapshotCaptureResult {
             metadata,
+            captured_snapshot,
+        })
+    }
+
+    async fn capture_snapshot_leaving_source_paused(
+        &self,
+        sandbox_id: SandboxId,
+        transitional_state: SandboxState,
+        operation: SandboxOperation,
+    ) -> Result<SnapshotCaptureResult> {
+        let runtime_artifacts = {
+            let handle = self.sandboxes.read().await.get(&sandbox_id).cloned();
+            match handle {
+                Some(handle) => {
+                    let sandbox = handle.lock().await;
+                    sandbox.runtime_info().runtime_artifacts
+                }
+                None => RuntimeArtifactSet::empty(),
+            }
+        };
+        if let Err(error) = self
+            .protect_image_refs(
+                RuntimeImageOwner::PausedSandbox(sandbox_id),
+                runtime_artifacts,
+                "paused sandbox",
+            )
+            .await
+        {
+            warn!(error = %error, "failed to protect paused runtime artifacts; keeping sandbox Running");
+            let _ = self
+                .store
+                .update_state_if_state(&sandbox_id, SandboxState::Running, &[transitional_state])
+                .await;
+            return Err(error);
+        }
+
+        let artifact_root = match self.persister.allocate_artifact_root(&sandbox_id).await {
+            Ok(artifact_root) => artifact_root,
+            Err(err) => {
+                warn!(error = ?err, "failed to allocate paused sandbox artifact root");
+                self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
+                    .await;
+                let _ = self
+                    .store
+                    .update_state_if_state(
+                        &sandbox_id,
+                        SandboxState::Running,
+                        &[transitional_state],
+                    )
+                    .await;
+                return Err(OrchestratorError::from(err));
+            }
+        };
+
+        let (handle, removed_proxy_route) = self.detach_sandbox_handle_and_route(&sandbox_id).await;
+        let Some(handle) = handle else {
+            warn!("sandbox handle not found while capturing paused source, removing from store");
+            self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
+                .await;
+            self.store.remove(&sandbox_id).await?;
+            return Err(OrchestratorError::SandboxNotFound(sandbox_id));
+        };
+
+        let capture_result = {
+            let mut sandbox = handle.lock().await;
+            sandbox
+                .capture_snapshot(SandboxSnapshotCaptureRequest::leave_source_paused(
+                    artifact_root.as_deref(),
+                ))
+                .await
+        };
+        let (captured_snapshot, paused_state) = match capture_result {
+            Ok(SandboxSnapshotCaptureOutcome::SourcePaused {
+                captured_snapshot,
+                paused_state,
+            }) => (captured_snapshot, paused_state),
+            Ok(SandboxSnapshotCaptureOutcome::SourceRunning { .. }) => {
+                warn!("sandbox backend violated leave-paused capture contract");
+                self.sandboxes.write().await.insert(sandbox_id, handle);
+                self.restore_proxy_route(sandbox_id, removed_proxy_route)
+                    .await;
+                let _ = self
+                    .store
+                    .update_state_if_state(
+                        &sandbox_id,
+                        SandboxState::Running,
+                        &[transitional_state],
+                    )
+                    .await;
+                self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
+                    .await;
+                return Err(OrchestratorError::InternalError(
+                    "sandbox backend resumed source after a leave-paused capture".to_string(),
+                ));
+            }
+            Err(err) => {
+                warn!(error = ?err, "failed to capture sandbox snapshot");
+                if err.is_terminal() {
+                    let stop_result = {
+                        let mut sandbox = handle.lock().await;
+                        sandbox.stop().await
+                    };
+                    if let Err(stop_err) = stop_result {
+                        warn!(error = ?stop_err, "failed to stop sandbox after terminal snapshot failure");
+                    }
+                    self.store.remove(&sandbox_id).await?;
+                } else {
+                    self.sandboxes.write().await.insert(sandbox_id, handle);
+                    self.restore_proxy_route(sandbox_id, removed_proxy_route)
+                        .await;
+                    let _ = self
+                        .store
+                        .update_state_if_state(
+                            &sandbox_id,
+                            SandboxState::Running,
+                            &[transitional_state],
+                        )
+                        .await;
+                }
+                self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
+                    .await;
+                return Err(OrchestratorError::SandboxOperationFailed {
+                    sandbox_id,
+                    operation,
+                    source: err.into(),
+                });
+            }
+        };
+
+        let persisted_metadata = {
+            let mut metadata = self
+                .store
+                .get(&sandbox_id)
+                .await?
+                .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?;
+            metadata.state = SandboxState::Paused;
+            metadata.paused_state = Some(paused_state.clone());
+            metadata
+        };
+        if let Err(err) = self
+            .persister
+            .persist_paused(
+                &persisted_metadata,
+                artifact_root.as_deref(),
+                paused_state.as_ref(),
+            )
+            .await
+        {
+            warn!(error = ?err, "failed to persist paused sandbox state");
+            let resume_result = {
+                let mut sandbox = handle.lock().await;
+                sandbox.resume().await
+            };
+            if let Err(resume_err) = resume_result {
+                warn!(error = ?resume_err, "failed to resume sandbox after persistence failure");
+                let stop_result = {
+                    let mut sandbox = handle.lock().await;
+                    sandbox.stop().await
+                };
+                if let Err(stop_err) = stop_result {
+                    warn!(error = ?stop_err, "failed to stop sandbox after persistence failure");
+                }
+                if let Err(error) = self.store.remove(&sandbox_id).await {
+                    warn!(error = ?error, "failed to remove sandbox after persistence failure");
+                }
+            } else {
+                self.sandboxes.write().await.insert(sandbox_id, handle);
+                self.restore_proxy_route(sandbox_id, removed_proxy_route)
+                    .await;
+                let _ = self
+                    .store
+                    .update_state_if_state(
+                        &sandbox_id,
+                        SandboxState::Running,
+                        &[transitional_state],
+                    )
+                    .await;
+            }
+            self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
+                .await;
+            return Err(OrchestratorError::InternalError(format!(
+                "failed to persist paused sandbox state: {err:#}"
+            )));
+        }
+
+        let resources = persisted_metadata.resources;
+        self.store.update(persisted_metadata.clone()).await?;
+        let stop_result = {
+            let mut sandbox = handle.lock().await;
+            sandbox.stop().await
+        };
+        if let Err(err) = stop_result {
+            warn!(error = ?err, "failed to stop sandbox after snapshot capture");
+        }
+        self.publish_sandbox_event(SandboxLifecycleEventType::Pause, sandbox_id, resources);
+        info!("snapshot captured with source paused");
+
+        Ok(SnapshotCaptureResult {
+            metadata: persisted_metadata,
             captured_snapshot,
         })
     }

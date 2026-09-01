@@ -6,6 +6,7 @@ use agentenv::cfg::{ConfigManager, MemorySnapshotCompressionAlgorithm};
 use agentenv::sandbox::{
     BaseSandboxNetworkPolicy, FirecrackerSandbox, FirecrackerSnapshotConfig, SandboxBackend,
     SandboxExecutor, SandboxNetworkEgressPolicy, SandboxNetworkPolicy,
+    SandboxSnapshotCaptureOutcome, SandboxSnapshotCaptureRequest,
 };
 use anyhow::{bail, Context, Result};
 use overlaybd::backend::local::LocalFile;
@@ -249,7 +250,17 @@ async fn backend_pause_state_round_trips_through_encoded_artifacts() -> Result<(
     write_disk_marker(&mut sandbox).await?;
     let temp = tempfile::tempdir()?;
     let artifact_root = temp.path().join("paused-artifacts");
-    let paused_state = SandboxBackend::pause(&mut sandbox, Some(&artifact_root)).await?;
+    let paused_state = match SandboxBackend::capture_snapshot(
+        &mut sandbox,
+        SandboxSnapshotCaptureRequest::leave_source_paused(Some(&artifact_root)),
+    )
+    .await?
+    {
+        SandboxSnapshotCaptureOutcome::SourcePaused { paused_state, .. } => paused_state,
+        SandboxSnapshotCaptureOutcome::SourceRunning { .. } => {
+            bail!("leave-paused capture resumed its source")
+        }
+    };
     sandbox.stop().await?;
 
     let encoded = paused_state.encode()?;
