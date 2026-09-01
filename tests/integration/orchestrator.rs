@@ -407,10 +407,10 @@ async fn orchestrator_capture_snapshot_can_atomically_leave_source_paused() -> R
             .capture_snapshot(sandbox_id, SandboxSnapshotSourceDisposition::LeavePaused)
             .await?;
         assert_eq!(capture.metadata.state, SandboxState::Paused);
-        assert!(matches!(
+        assert_eq!(
             orchestrator.proxy_lookup_for(&sandbox_id).await?,
-            ProxyLookupResult::Unavailable(SandboxState::Paused)
-        ));
+            ProxyLookupResult::Paused { auto_resume: false }
+        );
 
         let captured = capture
             .captured_snapshot
