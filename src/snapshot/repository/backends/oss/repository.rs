@@ -283,11 +283,22 @@ impl SnapshotRepository for OssSnapshotRepository {
                     })
             };
 
-            let (rootfs_outcome, memory_layers, tools_drive, (), ()) =
-                tokio::try_join!(rootfs, memory, tools, vm_state, firecracker_manifest)?;
-            if let Some(publication) = rootfs_outcome.publication.clone() {
-                disk_publications.push(publication);
+            let (rootfs_result, memory_result, tools_result, vm_state_result, manifest_result) =
+                tokio::join!(rootfs, memory, tools, vm_state, firecracker_manifest);
+            // `join!` deliberately waits for every independent branch rather
+            // than canceling siblings on the first error. If an ACR rootfs
+            // publication already succeeded, its rollback handle must survive
+            // a later OSS failure so the outer cleanup can reverse it.
+            if let Ok(rootfs_outcome) = &rootfs_result {
+                if let Some(publication) = rootfs_outcome.publication.clone() {
+                    disk_publications.push(publication);
+                }
             }
+            let rootfs_outcome = rootfs_result?;
+            let memory_layers = memory_result?;
+            let tools_drive = tools_result?;
+            vm_state_result?;
+            manifest_result?;
             let rootfs_layers = rootfs_outcome.layers;
 
             // 2. Export attached-drive disk images and derive their committed metadata.
