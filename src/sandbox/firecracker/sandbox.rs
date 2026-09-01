@@ -1,13 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use firecracker_client::models::drive::IoEngine;
 use nix::libc;
 use tempfile::TempDir;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 use uvm_ublk_daemon::CreateOverlaybdRuntimeDeviceRequest;
 
@@ -180,11 +181,12 @@ pub struct FirecrackerSandbox {
     rootfs_runtime: Option<OverlaybdRuntimeHandle>,
     mem_ublk_device: Option<SharedMemDevice>,
     /// image.json path the memory device was opened with. Used as the device
-    /// key to release held background downloads once envd is ready.
+    /// key to release held background downloads at the configured restore
+    /// boundary.
     mem_snapshot_image_config_path: Option<PathBuf>,
-    /// image.json path the rootfs device was opened with. Also released at
-    /// envd ready so a rootfs background download (when enabled) never
-    /// waits out the fallback with no notification.
+    /// image.json path the rootfs device was opened with. Also released at the
+    /// configured restore boundary so a rootfs background download (when
+    /// enabled) never waits out the fallback with no notification.
     rootfs_image_config_path: Option<PathBuf>,
     extra_drive_runtimes: Vec<OverlaybdRuntimeHandle>,
     current_rootfs_virtual_size: Option<u64>,
@@ -596,6 +598,7 @@ impl FirecrackerSandbox {
     /// This should be called after `start_nowait()` if you want to interact with the sandbox.
     #[tracing::instrument(skip(self))]
     pub(crate) async fn wait_for_ready(&self) -> Result<()> {
+        let ready_started = Instant::now();
         let Some(envd_instance) = self.envd_instance.as_ref() else {
             return Err(anyhow::anyhow!("envd instance not initialized"));
         };
@@ -605,27 +608,40 @@ impl FirecrackerSandbox {
                 self.runtime_policy.envd_poll_interval,
             )
             .await?;
+        info!(
+            sandbox_id = %self.id,
+            phase = "envd_ready",
+            elapsed_ms = ready_started.elapsed().as_secs_f64() * 1000.0,
+            "sandbox readiness phase completed"
+        );
         if let Some(device_key) = &self.mem_snapshot_image_config_path {
-            // envd is up: release held background downloads for this memory
-            // device. Best-effort — downloads would also start after the
-            // fallback timeout.
+            // Idempotently release downloads here even when the configured
+            // fast path released them before resume.
             UblkDeviceManager::global()
-                .notify_sandbox_ready(device_key)
+                .release_background_downloads(device_key)
                 .await;
         }
         if let Some(device_key) = &self.rootfs_image_config_path {
-            // Same release for the rootfs image's background download.
             UblkDeviceManager::global()
-                .notify_sandbox_ready(device_key)
+                .release_background_downloads(device_key)
                 .await;
         }
+        let init_started = Instant::now();
         envd_instance
             .init(
                 self.launch.common().env_vars.clone(),
                 self.launch.common().default_workdir.clone(),
                 self.launch.common().default_user.clone(),
             )
-            .await
+            .await?;
+        info!(
+            sandbox_id = %self.id,
+            phase = "envd_init",
+            elapsed_ms = init_started.elapsed().as_secs_f64() * 1000.0,
+            total_elapsed_ms = ready_started.elapsed().as_secs_f64() * 1000.0,
+            "sandbox readiness phase completed"
+        );
+        Ok(())
     }
 
     /// Pause the running sandbox and create a snapshot for later resume.
@@ -1375,6 +1391,7 @@ impl FirecrackerSandbox {
 
     #[tracing::instrument(skip(self, config))]
     async fn start_resume(&mut self, config: FirecrackerSnapshotConfig) -> Result<()> {
+        let restore_started = Instant::now();
         // NOTE: The virtio-balloon device is NOT configured here. Balloon state
         // is part of vm_state.bin and is restored automatically by Firecracker.
         // Snapshots taken before balloon support was added will simply not have
@@ -1562,6 +1579,36 @@ impl FirecrackerSandbox {
             Some(config.mem_overlaybd_config.image_config_path.clone());
         self.mem_ublk_device = Some(mem_device);
 
+        info!(
+            sandbox_id = %self.id,
+            phase = "devices_ready",
+            elapsed_ms = restore_started.elapsed().as_secs_f64() * 1000.0,
+            "snapshot restore launch phase completed"
+        );
+
+        if global_config
+            .memory_snapshot
+            .background_download
+            .prefetch_before_resume
+        {
+            if let Some(device_key) = &self.mem_snapshot_image_config_path {
+                UblkDeviceManager::global()
+                    .release_background_downloads(device_key)
+                    .await;
+            }
+            if let Some(device_key) = &self.rootfs_image_config_path {
+                UblkDeviceManager::global()
+                    .release_background_downloads(device_key)
+                    .await;
+            }
+            info!(
+                sandbox_id = %self.id,
+                phase = "prefetch_released",
+                elapsed_ms = restore_started.elapsed().as_secs_f64() * 1000.0,
+                "snapshot restore launch phase completed"
+            );
+        }
+
         if needs_socket_wait {
             self.fc_instance
                 .wait_for_ready(
@@ -1575,6 +1622,7 @@ impl FirecrackerSandbox {
 
         // Override the network interface to use the new tap0 in our namespace
         let network_overrides = [("eth0", "tap0")];
+        let load_started = Instant::now();
         self.fc_instance
             .load_snapshot_file(
                 &vm_state_src,
@@ -1584,6 +1632,13 @@ impl FirecrackerSandbox {
                 config.common.track_dirty_pages,
             )
             .await?;
+        info!(
+            sandbox_id = %self.id,
+            phase = "snapshot_loaded",
+            elapsed_ms = load_started.elapsed().as_secs_f64() * 1000.0,
+            total_elapsed_ms = restore_started.elapsed().as_secs_f64() * 1000.0,
+            "snapshot restore launch phase completed"
+        );
 
         let mmds_metadata = self.mmds_metadata(&config.common);
         self.fc_instance.set_mmds(&mmds_metadata).await?;
@@ -1601,6 +1656,13 @@ impl FirecrackerSandbox {
             .context("reconcile disk rate limiter on snapshot resume")?;
 
         self.fc_instance.resume().await?;
+
+        info!(
+            sandbox_id = %self.id,
+            phase = "vm_resumed",
+            elapsed_ms = restore_started.elapsed().as_secs_f64() * 1000.0,
+            "snapshot restore launch phase completed"
+        );
 
         debug!("sandbox restored from snapshot config");
         Ok(())

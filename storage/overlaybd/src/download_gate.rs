@@ -28,42 +28,44 @@ const BK_FLOOR_INFLIGHT: i64 = 1;
 
 const GATE_BACKOFF: Duration = Duration::from_millis(200);
 
-/// Fallback for the envd-ready wait: if no readiness notification arrives for
-/// a sandbox-bound device key within this window (signal lost, failed sandbox,
+/// Fallback for the explicit release wait: if no signal arrives for a
+/// sandbox-bound device key within this window (signal lost, failed sandbox,
 /// or a non-sandbox consumer), the download starts anyway. Never a deadlock.
-pub const SANDBOX_READY_FALLBACK: Duration = Duration::from_secs(20);
+pub const BACKGROUND_DOWNLOAD_RELEASE_FALLBACK: Duration = Duration::from_secs(20);
 
-struct ReadyRegistry {
-    ready: parking_lot::Mutex<std::collections::HashSet<String>>,
+struct ReleaseRegistry {
+    released: parking_lot::Mutex<std::collections::HashSet<String>>,
     notify: tokio::sync::Notify,
 }
 
-fn ready_registry() -> &'static ReadyRegistry {
-    static READY_REGISTRY: OnceLock<ReadyRegistry> = OnceLock::new();
-    READY_REGISTRY.get_or_init(|| ReadyRegistry {
-        ready: parking_lot::Mutex::new(std::collections::HashSet::new()),
+fn release_registry() -> &'static ReleaseRegistry {
+    static RELEASE_REGISTRY: OnceLock<ReleaseRegistry> = OnceLock::new();
+    RELEASE_REGISTRY.get_or_init(|| ReleaseRegistry {
+        released: parking_lot::Mutex::new(std::collections::HashSet::new()),
         notify: tokio::sync::Notify::new(),
     })
 }
 
-/// Mark a sandbox-bound device as envd-ready, releasing its held background
-/// downloads. Called by the ublk daemon when the owning process reports that
-/// the sandbox finished booting. Public because the daemon process invokes it
-/// through its RPC handler.
-pub fn notify_sandbox_ready(device_key: &str) {
-    let registry = ready_registry();
-    registry.ready.lock().insert(device_key.to_string());
+/// Release held downloads for a sandbox-bound device. Public because the ublk
+/// daemon process invokes it through its RPC handler.
+pub fn release_background_downloads(device_key: &str) {
+    let registry = release_registry();
+    registry.released.lock().insert(device_key.to_string());
     registry.notify.notify_waiters();
 }
 
-/// Wait until `device_key` is reported envd-ready, the fallback elapses, or
+/// Wait until `device_key` is explicitly released, the fallback elapses, or
 /// the download is canceled — whichever comes first. Returns in all three
-/// cases; callers proceed with their (post-ready) delay afterwards.
-pub(crate) async fn wait_sandbox_ready(device_key: &str, fallback: Duration, running: &AtomicBool) {
-    let registry = ready_registry();
+/// cases; callers proceed with their configured delay afterwards.
+pub(crate) async fn wait_background_download_release(
+    device_key: &str,
+    fallback: Duration,
+    running: &AtomicBool,
+) {
+    let registry = release_registry();
     let deadline = tokio::time::Instant::now() + fallback;
     loop {
-        if registry.ready.lock().contains(device_key) {
+        if registry.released.lock().contains(device_key) {
             return;
         }
         if !running.load(Ordering::SeqCst) {
@@ -280,37 +282,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ready_wait_releases_on_notification() {
+    async fn release_wait_releases_on_notification() {
         let running = AtomicBool::new(true);
-        let key = format!("test-ready-notify-{}", std::process::id());
-        let waiter = wait_sandbox_ready(&key, Duration::from_secs(30), &running);
+        let key = format!("test-release-notify-{}", std::process::id());
+        let waiter = wait_background_download_release(&key, Duration::from_secs(30), &running);
         tokio::pin!(waiter);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        notify_sandbox_ready(&key);
+        release_background_downloads(&key);
         tokio::time::timeout(Duration::from_secs(2), waiter)
             .await
             .expect("waiter released on notify");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ready_wait_falls_back_after_timeout() {
+    async fn release_wait_falls_back_after_timeout() {
         let running = AtomicBool::new(true);
-        let key = format!("test-ready-fallback-{}", std::process::id());
+        let key = format!("test-release-fallback-{}", std::process::id());
         let started = std::time::Instant::now();
-        wait_sandbox_ready(&key, Duration::from_millis(250), &running).await;
+        wait_background_download_release(&key, Duration::from_millis(250), &running).await;
         let elapsed = started.elapsed();
         assert!(elapsed >= Duration::from_millis(250));
         assert!(elapsed < Duration::from_secs(2));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ready_wait_returns_early_when_canceled() {
+    async fn release_wait_returns_early_when_canceled() {
         let running = AtomicBool::new(true);
-        let key = format!("test-ready-cancel-{}", std::process::id());
+        let key = format!("test-release-cancel-{}", std::process::id());
         running.store(false, Ordering::SeqCst);
         tokio::time::timeout(
             Duration::from_millis(500),
-            wait_sandbox_ready(&key, Duration::from_secs(30), &running),
+            wait_background_download_release(&key, Duration::from_secs(30), &running),
         )
         .await
         .expect("canceled wait returns promptly");

@@ -49,10 +49,11 @@ pub enum DaemonRequest {
     },
     /// Query daemon capabilities (e.g., dynamic resize support).
     GetFeatures,
-    /// Report that the sandbox owning a memory-snapshot device finished
-    /// booting (envd ready), releasing its held background downloads.
+    /// Release held background downloads for one sandbox-bound device.
+    /// Callers may do this before resume to prefetch a restore working set or
+    /// after envd readiness to preserve the conservative default behavior.
     /// `device_key` is the image.json path the device was opened with.
-    NotifySandboxReady {
+    ReleaseBackgroundDownloads {
         device_key: String,
     },
     /// Acquire a warm overlaybd device from the pool.
@@ -297,6 +298,20 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, DaemonRequest::GetFeatures));
+    }
+
+    #[test]
+    fn request_release_background_downloads_round_trip() {
+        let req = DaemonRequest::ReleaseBackgroundDownloads {
+            device_key: "/runtime/snapshots/memory/image.json".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            DaemonRequest::ReleaseBackgroundDownloads { device_key }
+                if device_key == "/runtime/snapshots/memory/image.json"
+        ));
     }
 
     #[test]

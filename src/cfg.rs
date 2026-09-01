@@ -471,6 +471,10 @@ pub struct MemorySnapshotConfig {
 pub struct MemorySnapshotBackgroundDownloadConfig {
     #[config(default = true)]
     pub enable: bool,
+    /// Start filling the node-local remote memory cache before Firecracker
+    /// resumes. The conservative default waits until envd is ready.
+    #[config(default = false)]
+    pub prefetch_before_resume: bool,
     #[config(default = 0i32)]
     pub delay: i32,
     #[config(default = 1i32)]
@@ -1341,7 +1345,34 @@ mod tests {
     #[test]
     fn bundled_default_config_loads() -> Result<()> {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
-        ConfigManager::new_from_path(&workspace.join("config/default.toml"))?;
+        let config = ConfigManager::new_from_path(&workspace.join("config/default.toml"))?;
+        assert!(
+            !config
+                .config()
+                .memory_snapshot
+                .background_download
+                .prefetch_before_resume
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_prefetch_can_be_enabled_explicitly() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("prefetch.toml");
+        std::fs::write(
+            &path,
+            "[memory_snapshot.background_download]\nprefetch_before_resume = true\n",
+        )?;
+
+        let config = ConfigManager::new_from_path(&path)?;
+        assert!(
+            config
+                .config()
+                .memory_snapshot
+                .background_download
+                .prefetch_before_resume
+        );
         Ok(())
     }
 

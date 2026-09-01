@@ -371,23 +371,24 @@ impl UblkDaemonClient {
         }
     }
 
-    /// Report that the sandbox owning `device_key` (the image.json path its
-    /// memory device was opened with) finished booting, releasing any held
-    /// background downloads. Best-effort: a failed notification only means the
+    /// Release held background downloads for the device opened with
+    /// `device_key`. Best-effort: a failed notification only means the
     /// downloads start after the fallback timeout instead.
-    pub async fn notify_sandbox_ready(&self, device_key: &str) -> Result<()> {
-        let request = DaemonRequest::NotifySandboxReady {
+    pub async fn release_background_downloads(&self, device_key: &str) -> Result<()> {
+        let request = DaemonRequest::ReleaseBackgroundDownloads {
             device_key: device_key.to_string(),
         };
         match self.call(request, DEFAULT_TIMEOUT).await? {
             DaemonResponse::Ok => Ok(()),
             DaemonResponse::TerminalError { message } => {
-                bail!("daemon: notify sandbox ready failed terminally: {message}")
+                bail!("daemon: release background downloads failed terminally: {message}")
             }
             DaemonResponse::Error { message } => {
-                bail!("daemon: notify sandbox ready failed: {message}")
+                bail!("daemon: release background downloads failed: {message}")
             }
-            other => bail!("daemon: unexpected response for notify sandbox ready: {other:?}"),
+            other => {
+                bail!("daemon: unexpected response for release background downloads: {other:?}")
+            }
         }
     }
 

@@ -531,9 +531,11 @@ scheduler capacity allows, with at most `maxConcurrentFiles` layer tasks
 concurrently per file-cache backend (from the generated overlaybd download
 config, default 8)
 and at most `concurrency` chunk reads in parallel per layer, subject to the
-scheduler's `max_inflight_blocks` cap. Downloads of a
-sandbox-bound device start only after envd is ready (plus `delay`), with a 20s
-fallback if the ready signal is lost; while foreground remote reads are in
+scheduler's `max_inflight_blocks` cap. Downloads of a sandbox-bound device
+start after envd is ready by default. Set `prefetch_before_resume = true` to
+release them after the memory device exists but before Firecracker loads and
+resumes the snapshot. A 20s fallback applies if the release signal is lost;
+while foreground remote reads are in
 flight, background block reads yield to a small guaranteed floor instead of
 competing at full speed. The generated memory
 config leaves throttling off (`maxMBps = 0`); image configs that carry a positive
@@ -548,7 +550,8 @@ and are then re-fetched on demand.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enable` | boolean | `true` | Enables background download for remote memory-snapshot layers. |
-| `delay` | integer | `0` | Delay in seconds after envd is ready before background download begins (downloads never start before envd readiness; a 20s fallback applies if the ready signal is lost). |
+| `prefetch_before_resume` | boolean | `false` | Release memory-layer background downloads before Firecracker snapshot load/resume. When false, release them after envd readiness. |
+| `delay` | integer | `0` | Delay in seconds after the background-download release signal; a 20s fallback applies if the signal is lost. |
 | `delay_extra` | integer | `1` | Exclusive upper bound for random extra delay. The default `1` ensures `delay = 0` adds no jitter. |
 | `try_cnt` | integer | `5` | Retry count, with the same semantics as OverlayBD `DownloadConfig.tryCnt`. |
 | `block_size` | integer | `16777216` | Background download chunk size in bytes (16 MiB): one source request fetches a chunk of this size, aligned down to whole cache blocks. The cache keeps its own smaller block size for foreground reads, so background downloads keep large-request throughput while foreground keeps fine-grained on-demand reads. Peak scratch per active layer download is `block_size × concurrency`. |

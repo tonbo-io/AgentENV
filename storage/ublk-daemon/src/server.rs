@@ -551,12 +551,9 @@ async fn handle_connection(
             output_layer_path,
         } => handle_restack_snapshot(&devices, &pool_state, dev_id, &output_layer_path).await,
         DaemonRequest::GetFeatures => handle_get_features(&pool_state),
-        DaemonRequest::NotifySandboxReady { device_key } => {
-            tracing::info!(
-                device_key,
-                "sandbox reported envd-ready; releasing held downloads"
-            );
-            overlaybd::download_gate::notify_sandbox_ready(&device_key);
+        DaemonRequest::ReleaseBackgroundDownloads { device_key } => {
+            tracing::info!(device_key, "releasing held background downloads");
+            overlaybd::download_gate::release_background_downloads(&device_key);
             Ok(DaemonResponse::Ok)
         }
         DaemonRequest::AcquireOverlaybd {

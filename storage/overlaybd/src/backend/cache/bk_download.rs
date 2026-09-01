@@ -278,15 +278,15 @@ impl BkDownloadScheduler {
         Ok(())
     }
 
-    /// Timer phase: wait for sandbox readiness and the configured delay
+    /// Timer phase: wait for an explicit release and the configured delay
     /// without holding any execution resource, then move the task to the
     /// ready queue. On shutdown the task never became ready, so its
     /// registration is removed here.
     async fn wait_then_mark_ready(self: &Arc<Self>, task: Arc<BkDownloadTask>) {
         if let Some(key) = task.device_key.as_deref() {
-            crate::download_gate::wait_sandbox_ready(
+            crate::download_gate::wait_background_download_release(
                 key,
-                crate::download_gate::SANDBOX_READY_FALLBACK,
+                crate::download_gate::BACKGROUND_DOWNLOAD_RELEASE_FALLBACK,
                 &self.running,
             )
             .await;
