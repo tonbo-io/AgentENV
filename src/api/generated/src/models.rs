@@ -6519,6 +6519,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SandboxRefre
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxSnapshotRequest {
+    /// Optional caller-assigned stable snapshot UUID. Repeating the same source, name, and UUID returns the already committed snapshot without capturing it again; reusing the UUID for a different snapshot is rejected.
+    #[serde(rename = "snapshotId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<uuid::Uuid>,
+
     /// Optional name for the snapshot template. If a snapshot template with this name already exists, a new build will be assigned to the existing template instead of creating a new one.
     #[serde(rename = "name")]
     #[validate(custom(function = "check_xss_string"))]
@@ -6535,6 +6540,7 @@ impl SandboxSnapshotRequest {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> SandboxSnapshotRequest {
         SandboxSnapshotRequest {
+            snapshot_id: None,
             name: None,
             pause_after_capture: Some(false),
         }
@@ -6547,6 +6553,7 @@ impl SandboxSnapshotRequest {
 impl std::fmt::Display for SandboxSnapshotRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping snapshotId in query parameter serialization
             self.name
                 .as_ref()
                 .map(|name| ["name".to_string(), name.to_string()].join(",")),
@@ -6580,6 +6587,7 @@ impl std::str::FromStr for SandboxSnapshotRequest {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub snapshot_id: Vec<uuid::Uuid>,
             pub name: Vec<String>,
             pub pause_after_capture: Vec<bool>,
         }
@@ -6604,6 +6612,11 @@ impl std::str::FromStr for SandboxSnapshotRequest {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
+                    "snapshotId" => intermediate_rep.snapshot_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "name" => intermediate_rep.name.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
@@ -6625,6 +6638,7 @@ impl std::str::FromStr for SandboxSnapshotRequest {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxSnapshotRequest {
+            snapshot_id: intermediate_rep.snapshot_id.into_iter().next(),
             name: intermediate_rep.name.into_iter().next(),
             pause_after_capture: intermediate_rep.pause_after_capture.into_iter().next(),
         })

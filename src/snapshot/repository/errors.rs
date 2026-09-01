@@ -13,6 +13,9 @@ pub enum RepositoryError {
     #[error("snapshot not found: {lookup}")]
     SnapshotNotFound { lookup: String },
 
+    #[error("snapshot ID '{id}' is already assigned to a different snapshot")]
+    SnapshotIdConflict { id: SnapshotId },
+
     #[error("snapshot alias not found: {alias}")]
     AliasNotFound { alias: String },
 

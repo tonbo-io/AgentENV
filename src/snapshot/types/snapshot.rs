@@ -383,6 +383,24 @@ impl SnapshotRecord {
         self.committed = Some(committed);
     }
 
+    /// Returns whether a sandbox capture is an idempotent replay of this
+    /// committed record. Snapshot IDs may be caller-assigned, so source and
+    /// alias are part of the durable identity rather than mutable metadata.
+    pub fn matches_committed_sandbox_publication(
+        &self,
+        source_sandbox_id: &str,
+        alias: Option<&SnapshotAlias>,
+    ) -> bool {
+        self.committed.is_some()
+            && self.alias.as_ref() == alias
+            && matches!(
+                &self.source,
+                SnapshotSource::Sandbox {
+                    source_sandbox_id: existing_source,
+                } if existing_source == source_sandbox_id
+            )
+    }
+
     /// Returns the published rootfs OCI image reference, if source-registry
     /// image publication produced one for this snapshot.
     pub(crate) fn published_rootfs_image_ref(&self) -> Option<&str> {

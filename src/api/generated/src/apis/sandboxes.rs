@@ -232,6 +232,8 @@ pub enum SandboxesSandboxIdSnapshotsPostResponse {
     Status401_AuthenticationError(models::Error),
     /// Not found
     Status404_NotFound(models::Error),
+    /// Conflict
+    Status409_Conflict(models::Error),
     /// Server error
     Status500_ServerError(models::Error),
 }

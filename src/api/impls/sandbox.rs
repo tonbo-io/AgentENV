@@ -1161,6 +1161,49 @@ impl Sandboxes<()> for ApiImpl {
             None => None,
         };
 
+        // A caller-assigned id is the durable idempotency key for capture. The
+        // coordinator can retry a timed-out request without creating a second
+        // snapshot or adding a separate alias lookup to the critical path.
+        let requested_snapshot_id = body.snapshot_id.as_ref().map(|id| {
+            SnapshotId::parse(&id.to_string())
+                .expect("the generated request model already validated snapshotId as a UUID")
+        });
+        if let Some(snapshot_id) = requested_snapshot_id.as_ref() {
+            match self.snapshot_manager.get(snapshot_id.to_string()).await {
+                Ok(Some(record))
+                    if record.matches_committed_sandbox_publication(
+                        &sandbox_id.to_string(),
+                        alias.as_ref(),
+                    ) =>
+                {
+                    return Ok(
+                        SandboxesSandboxIdSnapshotsPostResponse::Status201_SnapshotCreatedSuccessfully(
+                            models::SnapshotInfo::from(record),
+                        ),
+                    );
+                }
+                Ok(Some(_)) => {
+                    return Ok(SandboxesSandboxIdSnapshotsPostResponse::Status409_Conflict(
+                        Self::error(
+                            409,
+                            format!(
+                                "snapshot ID '{}' is already assigned to a different snapshot",
+                                snapshot_id
+                            ),
+                        ),
+                    ));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Ok(
+                        SandboxesSandboxIdSnapshotsPostResponse::Status500_ServerError(
+                            Self::snapshot_manager_error(&err),
+                        ),
+                    );
+                }
+            }
+        }
+
         let pause_after_capture = body.pause_after_capture.unwrap_or(false);
         let source_disposition = if pause_after_capture {
             SandboxSnapshotSourceDisposition::LeavePaused
@@ -1203,7 +1246,7 @@ impl Sandboxes<()> for ApiImpl {
                 "publish",
                 self.snapshot_manager.publish_captured(
                     SnapshotPublishMetadata {
-                        id: SnapshotId::generate(),
+                        id: requested_snapshot_id.unwrap_or_else(SnapshotId::generate),
                         alias: alias.clone(),
                         source: SnapshotPublishSource::Sandbox {
                             source_sandbox_id: capture.metadata.id.to_string(),
@@ -1231,6 +1274,14 @@ impl Sandboxes<()> for ApiImpl {
                     {
                         warn!(error = ?resume_err, %sandbox_id, "failed to resume source sandbox after snapshot publication failure");
                     }
+                }
+                if matches!(
+                    err,
+                    crate::snapshot::RepositoryError::SnapshotIdConflict { .. }
+                ) {
+                    return Ok(SandboxesSandboxIdSnapshotsPostResponse::Status409_Conflict(
+                        Self::error(409, err.to_string()),
+                    ));
                 }
                 let error =
                     Self::bad_request_for_repository_build_error(&err).unwrap_or_else(|| {
@@ -1489,12 +1540,16 @@ mod tests {
 
     #[test]
     fn snapshot_request_decodes_pause_after_capture() {
+        let snapshot_id =
+            uuid::Uuid::parse_str("018f6eb1-47d8-7a23-a2e8-641f0a60f744").expect("valid test UUID");
         let request: models::SandboxSnapshotRequest = serde_json::from_value(serde_json::json!({
+            "snapshotId": snapshot_id,
             "name": "runtime-transfer",
             "pauseAfterCapture": true
         }))
         .expect("snapshot request should decode");
 
+        assert_eq!(request.snapshot_id, Some(snapshot_id));
         assert_eq!(request.name.as_deref(), Some("runtime-transfer"));
         assert_eq!(request.pause_after_capture, Some(true));
     }
