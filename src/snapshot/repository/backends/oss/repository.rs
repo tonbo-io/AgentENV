@@ -45,6 +45,7 @@ pub(crate) struct OssSnapshotRepository {
 }
 
 const MAX_ALIAS_BIND_ATTEMPTS: usize = 5;
+const SNAPSHOT_LAYER_UPLOAD_CONCURRENCY: usize = 4;
 
 impl OssSnapshotRepository {
     pub(crate) fn new(
@@ -222,72 +223,79 @@ impl SnapshotRepository for OssSnapshotRepository {
         let publish_result = async {
             validate_publish_manifest_image_configs(&manifest)?;
 
-            // 1. Export rootfs disk image with the effective runtime config.
+            // 1. Publish independent snapshot components concurrently. The
+            // committed record remains the single visibility boundary, so a
+            // partial failure cannot expose an incomplete snapshot.
             let rootfs_config = SnapshotOciConfigInput::new(
                 &metadata.context,
                 metadata.image_configs.rootfs_config(),
             );
-            let rootfs_outcome = self
-                .export_disk_image(
-                    id,
-                    DiskImageSubject::Rootfs,
-                    &manifest.rootfs.image_config_path,
-                    Some(rootfs_config),
-                )
-                .await?;
+            let rootfs = self.export_disk_image(
+                id,
+                DiskImageSubject::Rootfs,
+                &manifest.rootfs.image_config_path,
+                Some(rootfs_config),
+            );
+            let memory =
+                self.derive_and_upload_memory_layers(&manifest.memory.image_config_path);
+            let tools = self.import_managed_layer_by_hash(
+                &manifest.tools_drive.path,
+                OssUploadArtifact::ToolsDrive,
+            );
+
+            let vm_state_local_path = manifest.vm_state.path.as_path();
+            let vm_state_key = layout.artifact_key(SNAPSHOT_ARTIFACT_LAYOUT.vm_state);
+            let vm_state = async {
+                self.client
+                    .put_file(
+                        &vm_state_key,
+                        vm_state_local_path,
+                        OssUploadArtifact::VmState,
+                    )
+                    .await
+                    .map_err(|e| {
+                        RepositoryError::backend(
+                            format!(
+                                "upload artifact '{}' from '{}' for snapshot '{}'",
+                                SNAPSHOT_ARTIFACT_LAYOUT.vm_state,
+                                vm_state_local_path.display(),
+                                id
+                            ),
+                            e,
+                        )
+                    })
+            };
+
+            let persisted_manifest_bytes = serde_json::to_vec_pretty(&manifest)
+                .map_err(|e| RepositoryError::backend("serialize firecracker manifest", e))?;
+            let firecracker_manifest_key =
+                layout.artifact_key(SNAPSHOT_ARTIFACT_LAYOUT.firecracker_manifest);
+            let firecracker_manifest = async {
+                self.client
+                    .put_bytes(
+                        &firecracker_manifest_key,
+                        persisted_manifest_bytes,
+                        OssUploadArtifact::FirecrackerManifest,
+                    )
+                    .await
+                    .map_err(|e| {
+                        RepositoryError::backend("write firecracker manifest to oss", e)
+                    })
+            };
+
+            let (rootfs_outcome, memory_layers, tools_drive, (), ()) =
+                tokio::try_join!(rootfs, memory, tools, vm_state, firecracker_manifest)?;
             if let Some(publication) = rootfs_outcome.publication.clone() {
                 disk_publications.push(publication);
             }
             let rootfs_layers = rootfs_outcome.layers;
 
-            let memory_layers = self
-                .derive_and_upload_memory_layers(&manifest.memory.image_config_path)
-                .await?;
-            let tools_drive = self
-                .import_managed_layer_by_hash(
-                    &manifest.tools_drive.path,
-                    OssUploadArtifact::ToolsDrive,
-                )
-                .await?;
-
-            // 2. Upload per-snapshot fixed artifacts.
-            let vm_state_local_path = manifest.vm_state.path.as_path();
-            self.client
-                .put_file(
-                    &layout.artifact_key(SNAPSHOT_ARTIFACT_LAYOUT.vm_state),
-                    vm_state_local_path,
-                    OssUploadArtifact::VmState,
-                )
-                .await
-                .map_err(|e| {
-                    RepositoryError::backend(
-                        format!(
-                            "upload artifact '{}' from '{}' for snapshot '{}'",
-                            SNAPSHOT_ARTIFACT_LAYOUT.vm_state,
-                            vm_state_local_path.display(),
-                            id
-                        ),
-                        e,
-                    )
-                })?;
-
-            let persisted_manifest_bytes = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| RepositoryError::backend("serialize firecracker manifest", e))?;
-            self.client
-                .put_bytes(
-                    &layout.artifact_key(SNAPSHOT_ARTIFACT_LAYOUT.firecracker_manifest),
-                    persisted_manifest_bytes,
-                    OssUploadArtifact::FirecrackerManifest,
-                )
-                .await
-                .map_err(|e| RepositoryError::backend("write firecracker manifest to oss", e))?;
-
-            // 3. Export attached-drive disk images and derive their committed metadata.
+            // 2. Export attached-drive disk images and derive their committed metadata.
             let attached_drives = self
                 .export_attached_drives(id, &manifest, &mut disk_publications)
                 .await?;
 
-            // 4. Construct committed CommittedSnapshot.
+            // 3. Construct committed CommittedSnapshot.
             let committed = CommittedSnapshot {
                 context: metadata.context.clone(),
                 startup: metadata.startup.clone(),
@@ -302,7 +310,7 @@ impl SnapshotRepository for OssSnapshotRepository {
                 disk_publications: disk_publications.clone(),
             };
 
-            // 5. Bind alias (if present) with conflict detection.
+            // 4. Bind alias (if present) with conflict detection.
             if let Some(ref alias) = metadata.alias {
                 if let Err(e) = self.bind_alias(alias.as_ref(), id).await {
                     // Best-effort rollback. Content-addressed managed layers are intentionally left
@@ -716,61 +724,65 @@ impl OssSnapshotRepository {
             )
         })?;
 
-        let mut layers = Vec::with_capacity(image_config.lowers.len());
-
-        for (index, layer) in image_config.lowers.into_iter().enumerate() {
-            if !layer.file.is_empty() {
-                let layer_path = Path::new(&layer.file);
-                if !layer.digest.is_empty() && layer.size > 0 {
-                    let managed = self
-                        .import_managed_layer_with_descriptor(
+        let repo_blob_url = image_config.repo_blob_url;
+        stream::iter(image_config.lowers.into_iter().enumerate())
+            .map(|(index, layer)| {
+                let repo_blob_url = repo_blob_url.clone();
+                async move {
+                    if !layer.file.is_empty() {
+                        let layer_path = Path::new(&layer.file);
+                        if !layer.digest.is_empty() && layer.size > 0 {
+                            let managed = self
+                                .import_managed_layer_with_descriptor(
+                                    layer_path,
+                                    &layer.digest,
+                                    layer.size,
+                                    artifact,
+                                )
+                                .await?;
+                            return Ok(OverlaybdLayerRef::Managed(managed));
+                        }
+                        if crate::image::local_layer::rootfs_layer_is_runtime_generated_delta(
                             layer_path,
-                            &layer.digest,
-                            layer.size,
-                            artifact,
-                        )
-                        .await?;
-                    layers.push(OverlaybdLayerRef::Managed(managed));
-                    continue;
+                        ) {
+                            let managed = self
+                                .import_descriptorless_rootfs_layer(layer_path, artifact)
+                                .await?;
+                            return Ok(OverlaybdLayerRef::Managed(managed));
+                        }
+                        return Err(RepositoryError::Unsupported {
+                            feature: format!(
+                                "local overlaybd lower layer {index} '{}' missing digest/size",
+                                layer_path.display()
+                            ),
+                        });
+                    }
+                    let effective_repo_blob_url =
+                        layer.effective_repo_blob_url(&repo_blob_url).to_string();
+                    if !effective_repo_blob_url.is_empty() {
+                        let digest = if !layer.digest.is_empty() {
+                            layer.digest
+                        } else if !layer.target_digest.is_empty() {
+                            layer.target_digest
+                        } else {
+                            format!("external:{index}")
+                        };
+                        return Ok(OverlaybdLayerRef::External(ExternalLayer {
+                            digest,
+                            repo_blob_url: effective_repo_blob_url,
+                            size: layer.size,
+                        }));
+                    }
+                    Err(RepositoryError::Unsupported {
+                        feature: format!(
+                            "overlaybd lower layer {index} without local file or repoBlobUrl"
+                        ),
+                    })
                 }
-                if crate::image::local_layer::rootfs_layer_is_runtime_generated_delta(layer_path) {
-                    let managed = self
-                        .import_descriptorless_rootfs_layer(layer_path, artifact)
-                        .await?;
-                    layers.push(OverlaybdLayerRef::Managed(managed));
-                    continue;
-                }
-                return Err(RepositoryError::Unsupported {
-                    feature: format!(
-                        "local overlaybd lower layer {index} '{}' missing digest/size",
-                        layer_path.display()
-                    ),
-                });
-            }
-            let repo_blob_url = layer
-                .effective_repo_blob_url(&image_config.repo_blob_url)
-                .to_string();
-            if !repo_blob_url.is_empty() {
-                let digest = if !layer.digest.is_empty() {
-                    layer.digest
-                } else if !layer.target_digest.is_empty() {
-                    layer.target_digest
-                } else {
-                    format!("external:{index}")
-                };
-                layers.push(OverlaybdLayerRef::External(ExternalLayer {
-                    digest,
-                    repo_blob_url: repo_blob_url.clone(),
-                    size: layer.size,
-                }));
-                continue;
-            }
-            return Err(RepositoryError::Unsupported {
-                feature: format!("overlaybd lower layer {index} without local file or repoBlobUrl"),
-            });
-        }
-
-        Ok(layers)
+            })
+            .buffered(SNAPSHOT_LAYER_UPLOAD_CONCURRENCY)
+            .try_collect()
+            .await
     }
 
     async fn derive_and_upload_memory_layers(
@@ -787,45 +799,46 @@ impl OssSnapshotRepository {
             )
         })?;
 
-        let mut layers = Vec::with_capacity(image_config.lowers.len());
-        for (index, layer) in image_config.lowers.into_iter().enumerate() {
-            if layer.file.is_empty() {
-                let repo_blob_url = layer
-                    .effective_repo_blob_url(&image_config.repo_blob_url)
-                    .to_string();
-                if !repo_blob_url.is_empty() {
-                    layers.push(managed_memory_layer_from_remote_lower(
-                        index,
-                        layer,
-                        &repo_blob_url,
-                        &self.client.managed_layers_repo_blob_url(),
-                    )?);
-                    continue;
+        let repo_blob_url = image_config.repo_blob_url;
+        let managed_layers_repo_blob_url = self.client.managed_layers_repo_blob_url();
+        stream::iter(image_config.lowers.into_iter().enumerate())
+            .map(|(index, layer)| {
+                let managed_layers_repo_blob_url = managed_layers_repo_blob_url.clone();
+                let repo_blob_url = repo_blob_url.clone();
+                async move {
+                    if layer.file.is_empty() {
+                        let effective_repo_blob_url =
+                            layer.effective_repo_blob_url(&repo_blob_url).to_string();
+                        if !effective_repo_blob_url.is_empty() {
+                            return managed_memory_layer_from_remote_lower(
+                                index,
+                                layer,
+                                &effective_repo_blob_url,
+                                &managed_layers_repo_blob_url,
+                            );
+                        }
+                        return Err(RepositoryError::Unsupported {
+                            feature: format!("memory layer {index} without local file path"),
+                        });
+                    }
+                    let layer_path = Path::new(&layer.file);
+                    if !layer.digest.is_empty() && layer.size > 0 {
+                        return self
+                            .import_managed_layer_with_descriptor(
+                                layer_path,
+                                &layer.digest,
+                                layer.size,
+                                OssUploadArtifact::MemoryLayer,
+                            )
+                            .await;
+                    }
+                    self.import_managed_layer_by_hash(layer_path, OssUploadArtifact::MemoryLayer)
+                        .await
                 }
-                return Err(RepositoryError::Unsupported {
-                    feature: format!("memory layer {index} without local file path"),
-                });
-            }
-            let layer_path = Path::new(&layer.file);
-            if !layer.digest.is_empty() && layer.size > 0 {
-                layers.push(
-                    self.import_managed_layer_with_descriptor(
-                        layer_path,
-                        &layer.digest,
-                        layer.size,
-                        OssUploadArtifact::MemoryLayer,
-                    )
-                    .await?,
-                );
-                continue;
-            }
-            layers.push(
-                self.import_managed_layer_by_hash(layer_path, OssUploadArtifact::MemoryLayer)
-                    .await?,
-            );
-        }
-
-        Ok(layers)
+            })
+            .buffered(SNAPSHOT_LAYER_UPLOAD_CONCURRENCY)
+            .try_collect()
+            .await
     }
 
     async fn export_disk_image(
