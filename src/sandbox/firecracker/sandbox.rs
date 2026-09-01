@@ -1454,12 +1454,17 @@ impl FirecrackerSandbox {
         // ── Tools drive: symlink rootfs.ext4 → tools drive (read-only, from snapshot config) ──
         self.link_tools_drive(&config.common, fc_cwd)?;
 
-        // ── User image: restore overlaybd via ublk ──
-        if config.common.ublk_config.is_some() {
-            let user_image_symlink = fc_cwd.join(USER_ROOTFS_DRIVE_PATH);
-            let global_cfg_path = global_config.ublk.overlaybd.global_config_path.clone();
-            let runtime_dir = fc_cwd.join("overlaybd");
-            let runtime_device = UblkDeviceManager::global()
+        // ── User image and memory: restore independent overlaybd devices in parallel ──
+        // Both daemon RPCs may need to restack a pooled device for a new image.
+        // Neither device depends on the other, and Firecracker does not consume
+        // either path until both futures have completed and the snapshot is loaded.
+        let global_cfg_path = global_config.ublk.overlaybd.global_config_path.clone();
+        let runtime_dir = fc_cwd.join("overlaybd");
+        let rootfs_device = async {
+            if config.common.ublk_config.is_none() {
+                return Ok(None);
+            }
+            UblkDeviceManager::global()
                 .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
                     source_image_config: &rootfs_image_config.image_config_path,
                     global_config: &global_cfg_path,
@@ -1471,7 +1476,59 @@ impl FirecrackerSandbox {
                     allow_shrink: false,
                 })
                 .await
-                .context("create user image overlaybd runtime device for resume")?;
+                .map(Some)
+                .context("create user image overlaybd runtime device for resume")
+        };
+        let mem_global_config = global_config
+            .memory_snapshot
+            .overlaybd_global_config_path
+            .clone();
+        let mem_device_spec = UblkCreateSpec::Overlaybd {
+            image_config: config.mem_overlaybd_config.image_config_path.clone(),
+            global_config: mem_global_config,
+        };
+        let memory_device = async {
+            UblkDeviceManager::global()
+                .get_or_create_shared_mem(&mem_device_spec, config.mem_virtual_size)
+                .await
+                .context("create or reuse shared memory ublk device for resume")
+        };
+        let (rootfs_device, memory_device) = tokio::join!(rootfs_device, memory_device);
+        let (runtime_device, mem_device) = match (rootfs_device, memory_device) {
+            (Ok(runtime_device), Ok(mem_device)) => (runtime_device, mem_device),
+            (Err(rootfs_error), Ok(mem_device)) => {
+                if let Err(release_error) = mem_device.release().await {
+                    warn!(
+                        error = %release_error,
+                        "failed to release memory ublk device after rootfs device failure"
+                    );
+                }
+                return Err(rootfs_error);
+            }
+            (Ok(Some(runtime_device)), Err(memory_error)) => {
+                if let Err(release_error) = UblkDeviceManager::global()
+                    .release_device(&runtime_device.device)
+                    .await
+                {
+                    warn!(
+                        error = %release_error,
+                        "failed to release rootfs ublk device after memory device failure"
+                    );
+                }
+                return Err(memory_error);
+            }
+            (Ok(None), Err(memory_error)) => return Err(memory_error),
+            (Err(rootfs_error), Err(memory_error)) => {
+                warn!(
+                    error = %memory_error,
+                    "memory ublk device acquisition also failed during snapshot resume"
+                );
+                return Err(rootfs_error);
+            }
+        };
+
+        if let Some(runtime_device) = runtime_device {
+            let user_image_symlink = fc_cwd.join(USER_ROOTFS_DRIVE_PATH);
             self.rootfs_image_config_path = Some(rootfs_image_config.image_config_path.clone());
             let device_path = runtime_device.device.device_path().to_path_buf();
             let symlink_result = std::os::unix::fs::symlink(&device_path, &user_image_symlink)
@@ -1486,6 +1543,12 @@ impl FirecrackerSandbox {
                         "failed to release resumed user image ublk device after symlink failure"
                     );
                 }
+                if let Err(release_err) = mem_device.release().await {
+                    warn!(
+                        error = %release_err,
+                        "failed to release memory ublk device after rootfs symlink failure"
+                    );
+                }
                 return Err(err);
             }
             self.rootfs_runtime = Some(OverlaybdRuntimeHandle {
@@ -1495,6 +1558,9 @@ impl FirecrackerSandbox {
             });
             self.current_rootfs_virtual_size = Some(runtime_device.actual_virtual_size);
         }
+        self.mem_snapshot_image_config_path =
+            Some(config.mem_overlaybd_config.image_config_path.clone());
+        self.mem_ublk_device = Some(mem_device);
 
         // ── Extra drives ──
         self.prepare_snapshot_backing_drives(&config.common.extra_drives)
@@ -1560,24 +1626,12 @@ impl FirecrackerSandbox {
             config.common.envd_access_token.clone(),
         ));
 
-        let mem_global_config = global_config
-            .memory_snapshot
-            .overlaybd_global_config_path
-            .clone();
-        let mem_device = UblkDeviceManager::global()
-            .get_or_create_shared_mem(
-                &UblkCreateSpec::Overlaybd {
-                    image_config: config.mem_overlaybd_config.image_config_path.clone(),
-                    global_config: mem_global_config,
-                },
-                config.mem_virtual_size,
-            )
-            .await
-            .context("create or reuse shared memory ublk device for resume")?;
-        let mem_device_path = mem_device.device_path().to_path_buf();
-        self.mem_snapshot_image_config_path =
-            Some(config.mem_overlaybd_config.image_config_path.clone());
-        self.mem_ublk_device = Some(mem_device);
+        let mem_device_path = self
+            .mem_ublk_device
+            .as_ref()
+            .context("memory ublk device missing after parallel snapshot resume preparation")?
+            .device_path()
+            .to_path_buf();
 
         info!(
             sandbox_id = %self.id,
