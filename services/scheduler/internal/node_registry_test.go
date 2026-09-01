@@ -333,7 +333,7 @@ func TestHeartbeatReturnsCpuIntersectionForSingleNode(t *testing.T) {
 	}
 }
 
-func TestHeartbeatPreservesIdenticalArmCpuConfig(t *testing.T) {
+func TestHeartbeatUsesNativeTemplateForIdenticalArmCpuConfig(t *testing.T) {
 	armConfig := `{"kvm_capabilities":[],"reg_modifiers":[{"addr":"0x603000000013c020","bitmap":"0b0011"}],"vcpu_features":[]}`
 	registry := NewAtomicNodeRegistry([]Node{
 		{ID: "node-a", Endpoint: "http://node-a"},
@@ -356,6 +356,9 @@ func TestHeartbeatPreservesIdenticalArmCpuConfig(t *testing.T) {
 	}
 	if _, ok := fields["reg_modifiers"]; !ok {
 		t.Fatal("ARM reg_modifiers missing from heartbeat response")
+	}
+	if string(fields["reg_modifiers"]) != "[]" || string(fields["vcpu_features"]) != "[]" {
+		t.Fatalf("ARM fingerprint modifiers must not be replayed as a template: %s", result)
 	}
 	if _, ok := fields["cpuid_modifiers"]; ok {
 		t.Fatal("x86_64 cpuid_modifiers leaked into ARM heartbeat response")
