@@ -260,13 +260,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	} else {
 		hint, err := buildScheduleHint(r)
 		if err != nil {
-			// this only happens it cannot read request body, so the request cannot continue
-			s.logger.Warn("Fatal error when building schedule hint",
+			s.logger.Warn("invalid scheduling request",
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.Error(err),
 			)
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			var bodyLimitError *requestBodyLimitError
+			if errors.As(err, &bodyLimitError) {
+				http.Error(w, bodyLimitError.Error(), http.StatusRequestEntityTooLarge)
+			} else {
+				http.Error(w, "invalid scheduling request", http.StatusBadRequest)
+			}
 			return
 		}
 		rpcStart := time.Now()
@@ -331,6 +335,8 @@ func (s *Server) writeSchedulerError(w http.ResponseWriter, err error) {
 		http.Error(w, st.Message(), http.StatusBadRequest)
 	case codes.NotFound:
 		http.Error(w, st.Message(), http.StatusNotFound)
+	case codes.FailedPrecondition:
+		http.Error(w, st.Message(), http.StatusConflict)
 	case codes.Unavailable:
 		http.Error(w, st.Message(), http.StatusServiceUnavailable)
 	default:

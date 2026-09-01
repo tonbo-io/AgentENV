@@ -24,6 +24,8 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type stubSchedulerClient struct {
@@ -205,6 +207,28 @@ func TestNewServerRejectsEmptyAPIKey(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewServer accepted an empty API key")
+	}
+}
+
+func TestGatewayRejectsOversizedWarmSandboxBodyBeforeScheduling(t *testing.T) {
+	server := newTestServer(t, stubSchedulerClient{}, time.Second, 1024)
+	body := `{"templateID":"snapshot","pad":"` + strings.Repeat("a", maxNewSandboxBodyBytes) + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+	response := httptest.NewRecorder()
+
+	authenticatedTestHandler(server).ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestGatewayMapsMissingPlacementReferenceToConflict(t *testing.T) {
+	response := httptest.NewRecorder()
+	(&Server{}).writeSchedulerError(response, status.Error(codes.FailedPrecondition, "placement reference assignment not found"))
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusConflict)
 	}
 }
 
@@ -2014,6 +2038,12 @@ func TestHandleProxyHTTPForwardingAndRecordAssignment(t *testing.T) {
 			if req.GetHint().GetNewSandbox() == nil {
 				return nil, fmt.Errorf("unexpected schedule hint: %v", req.GetHint())
 			}
+			if got := req.GetHint().GetNewSandbox().GetPlacement().GetDifferentNodeFrom(); len(got) != 1 || got[0] != "sbx-source" {
+				return nil, fmt.Errorf("unexpected different-node constraints: %v", got)
+			}
+			if got := req.GetHint().GetNewSandbox().GetPlacement().GetSnapshotCompatibleWith(); len(got) != 1 || got[0] != "sbx-source" {
+				return nil, fmt.Errorf("unexpected snapshot-compatibility constraints: %v", got)
+			}
 			return &schedulerv1.ScheduleResponse{
 				Node: &schedulerv1.Node{
 					NodeId:   "node-1",
@@ -2030,7 +2060,7 @@ func TestHandleProxyHTTPForwardingAndRecordAssignment(t *testing.T) {
 	gatewayServer := httptest.NewServer(authenticatedTestHandler(server))
 	defer gatewayServer.Close()
 
-	req, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/sandboxes", strings.NewReader(`{"template":"base"}`))
+	req, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/sandboxes", strings.NewReader(`{"templateID":"base","placement":{"differentNodeFrom":["sbx-source"],"snapshotCompatibleWith":["sbx-source"]}}`))
 	if err != nil {
 		t.Fatalf("build request failed: %v", err)
 	}
@@ -2074,8 +2104,8 @@ func TestHandleProxyHTTPForwardingAndRecordAssignment(t *testing.T) {
 	if upstreamReq.contentType != "application/json" {
 		t.Fatalf("upstream content type = %q, want %q", upstreamReq.contentType, "application/json")
 	}
-	if upstreamReq.body != `{"template":"base"}` {
-		t.Fatalf("upstream body = %q, want %q", upstreamReq.body, `{"template":"base"}`)
+	if upstreamReq.body != `{"templateID":"base"}` {
+		t.Fatalf("upstream body = %q", upstreamReq.body)
 	}
 	if upstreamReq.forwardedHost != "gateway.test" {
 		t.Fatalf("X-Forwarded-Host = %q, want %q", upstreamReq.forwardedHost, "gateway.test")

@@ -113,6 +113,11 @@ func (s *Service) Schedule(_ context.Context, req *schedulerv1.ScheduleRequest) 
 	}
 
 	eligible := FilterByResourceLimit(rich, s.resourceLimit)
+	eligible, placementErr := s.filterPlacementCandidates(eligible, req.GetHint(), now)
+	if placementErr != nil {
+		err = placementErr
+		return nil, err
+	}
 
 	node, selectErr := s.strategy.Select(eligible, req.GetHint())
 	if selectErr != nil {
@@ -149,7 +154,12 @@ func summarizeScheduleHint(hint *schedulerv1.ScheduleRequestHint) string {
 		c := k.NewColdSandbox
 		return fmt.Sprintf("new_cold_sandbox cpu=%d memory_mb=%d images=%v", c.GetCpuCount(), c.GetMemoryMb(), c.GetImages())
 	case *schedulerv1.ScheduleRequestHint_NewSandbox:
-		return "new_sandbox"
+		placement := k.NewSandbox.GetPlacement()
+		return fmt.Sprintf(
+			"new_sandbox different_node_from=%v snapshot_compatible_with=%v",
+			placement.GetDifferentNodeFrom(),
+			placement.GetSnapshotCompatibleWith(),
+		)
 	default:
 		return "none"
 	}

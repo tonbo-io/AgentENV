@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 type failingBindingStore struct{}
@@ -28,13 +30,23 @@ func (failingBindingStore) ReconcileNode(Node, []string, time.Time) error {
 }
 
 func registerObservedNodeForTest(t *testing.T, service *Service, nodeID string, serviceInstanceID string) {
+	registerObservedNodeWithRuntimeForTest(t, service, nodeID, serviceInstanceID, "abc123", "{}")
+}
+
+func registerObservedNodeWithRuntimeForTest(t *testing.T, service *Service, nodeID string, serviceInstanceID string, commit string, cpuConfig string) {
 	t.Helper()
 	_, err := service.Heartbeat(context.Background(), &schedulerv1.HeartbeatRequest{
 		NodeId:            nodeID,
 		ClusterId:         "cluster-1",
 		ServiceInstanceId: serviceInstanceID,
 		Version:           "0.1.0",
-		Commit:            "abc123",
+		Commit:            commit,
+		MachineInfo: &schedulerv1.MachineInfo{
+			CpuArchitecture: "aarch64",
+			CpuFamily:       "arm",
+			CpuModel:        "neoverse-v1",
+			CpuConfigJson:   cpuConfig,
+		},
 		Snapshot: &schedulerv1.NodeSnapshot{
 			Status:               schedulerv1.NodeStatus_NODE_STATUS_READY,
 			SandboxCount:         2,
@@ -48,6 +60,230 @@ func registerObservedNodeForTest(t *testing.T, service *Service, nodeID string, 
 	})
 	if err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
+	}
+}
+
+func placementScheduleRequest(referenceSandboxIDs ...string) *schedulerv1.ScheduleRequest {
+	return &schedulerv1.ScheduleRequest{Hint: &schedulerv1.ScheduleRequestHint{
+		Kind: &schedulerv1.ScheduleRequestHint_NewSandbox{NewSandbox: &schedulerv1.NewSandboxHint{
+			Placement: &schedulerv1.SandboxPlacement{DifferentNodeFrom: referenceSandboxIDs},
+		}},
+	}}
+}
+
+func relocationScheduleRequest(referenceSandboxID string) *schedulerv1.ScheduleRequest {
+	return &schedulerv1.ScheduleRequest{Hint: &schedulerv1.ScheduleRequestHint{
+		Kind: &schedulerv1.ScheduleRequestHint_NewSandbox{NewSandbox: &schedulerv1.NewSandboxHint{
+			Placement: &schedulerv1.SandboxPlacement{
+				DifferentNodeFrom:      []string{referenceSandboxID},
+				SnapshotCompatibleWith: []string{referenceSandboxID},
+			},
+		}},
+	}}
+}
+
+func TestSchedulePlacementExcludesReferencedNode(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{
+		{ID: "node-a", Endpoint: "http://node-a"},
+		{ID: "node-b", Endpoint: "http://node-b"},
+	}, defaultObservedReportTTL)
+	store := NewInMemoryBindingStore(defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), store)
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+	registerObservedNodeForTest(t, service, "node-b", "svc-b")
+	if err := store.Record("source-sandbox", Node{ID: "node-a", Endpoint: "http://node-a"}, time.Now()); err != nil {
+		t.Fatalf("record source assignment: %v", err)
+	}
+
+	response, err := service.Schedule(context.Background(), placementScheduleRequest("source-sandbox"))
+	if err != nil {
+		t.Fatalf("schedule with placement constraints: %v", err)
+	}
+	if got := response.GetNode().GetNodeId(); got != "node-b" {
+		t.Fatalf("placement target = %q, want node-b", got)
+	}
+}
+
+func TestSchedulePlacementExcludesEveryReferencedNode(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{
+		{ID: "node-a", Endpoint: "http://node-a"},
+		{ID: "node-b", Endpoint: "http://node-b"},
+		{ID: "node-c", Endpoint: "http://node-c"},
+	}, defaultObservedReportTTL)
+	store := NewInMemoryBindingStore(defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), store)
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+	registerObservedNodeForTest(t, service, "node-b", "svc-b")
+	registerObservedNodeForTest(t, service, "node-c", "svc-c")
+	if err := store.Record("sandbox-a", Node{ID: "node-a", Endpoint: "http://node-a"}, time.Now()); err != nil {
+		t.Fatalf("record sandbox-a assignment: %v", err)
+	}
+	if err := store.Record("sandbox-b", Node{ID: "node-b", Endpoint: "http://node-b"}, time.Now()); err != nil {
+		t.Fatalf("record sandbox-b assignment: %v", err)
+	}
+
+	response, err := service.Schedule(context.Background(), placementScheduleRequest("sandbox-a", "sandbox-b"))
+	if err != nil {
+		t.Fatalf("schedule with multiple placement constraints: %v", err)
+	}
+	if got := response.GetNode().GetNodeId(); got != "node-c" {
+		t.Fatalf("placement target = %q, want node-c", got)
+	}
+}
+
+func TestScheduleDifferentNodeFromDoesNotImplySnapshotCompatibility(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{
+		{ID: "node-a", Endpoint: "http://node-a"},
+		{ID: "node-b", Endpoint: "http://node-b"},
+	}, defaultObservedReportTTL)
+	store := NewInMemoryBindingStore(defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), store)
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+	registerObservedNodeWithRuntimeForTest(t, service, "node-b", "svc-b", "different-commit", `{"cpuid_modifiers":[]}`)
+	if err := store.Record("source-sandbox", Node{ID: "node-a", Endpoint: "http://node-a"}, time.Now()); err != nil {
+		t.Fatalf("record source assignment: %v", err)
+	}
+
+	response, err := service.Schedule(context.Background(), placementScheduleRequest("source-sandbox"))
+	if err != nil {
+		t.Fatalf("schedule anti-affinity-only request: %v", err)
+	}
+	if got := response.GetNode().GetNodeId(); got != "node-b" {
+		t.Fatalf("anti-affinity target = %q, want node-b", got)
+	}
+}
+
+func TestScheduleSnapshotCompatibilityFiltersTargets(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{
+		{ID: "node-a", Endpoint: "http://node-a"},
+		{ID: "node-b", Endpoint: "http://node-b"},
+		{ID: "node-c", Endpoint: "http://node-c"},
+	}, defaultObservedReportTTL)
+	store := NewInMemoryBindingStore(defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), store)
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+	registerObservedNodeWithRuntimeForTest(t, service, "node-b", "svc-b", "different-commit", `{"cpuid_modifiers":[]}`)
+	registerObservedNodeForTest(t, service, "node-c", "svc-c")
+	if err := store.Record("source-sandbox", Node{ID: "node-a", Endpoint: "http://node-a"}, time.Now()); err != nil {
+		t.Fatalf("record source assignment: %v", err)
+	}
+
+	response, err := service.Schedule(context.Background(), relocationScheduleRequest("source-sandbox"))
+	if err != nil {
+		t.Fatalf("schedule snapshot-compatible relocation: %v", err)
+	}
+	if got := response.GetNode().GetNodeId(); got != "node-c" {
+		t.Fatalf("snapshot-compatible target = %q, want node-c", got)
+	}
+}
+
+func TestSchedulePlacementFailsWithoutCompatibleDestination(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{{ID: "node-a", Endpoint: "http://node-a"}}, defaultObservedReportTTL)
+	store := NewInMemoryBindingStore(defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), store)
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+	if err := store.Record("source-sandbox", Node{ID: "node-a", Endpoint: "http://node-a"}, time.Now()); err != nil {
+		t.Fatalf("record source assignment: %v", err)
+	}
+
+	_, err := service.Schedule(context.Background(), placementScheduleRequest("source-sandbox"))
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected unavailable without another node, got %v", err)
+	}
+}
+
+func TestSchedulePlacementFailsWhenReferenceBindingIsMissing(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{{ID: "node-a", Endpoint: "http://node-a"}}, defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), NewInMemoryBindingStore(defaultObservedReportTTL))
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+
+	_, err := service.Schedule(context.Background(), placementScheduleRequest("missing-source"))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected failed precondition for missing source binding, got %v", err)
+	}
+}
+
+func TestSchedulePlacementFailsWhenReferenceNodeIsNotLive(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{
+		{ID: "node-a", Endpoint: "http://node-a"},
+		{ID: "node-b", Endpoint: "http://node-b"},
+	}, defaultObservedReportTTL)
+	store := NewInMemoryBindingStore(defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), store)
+	registerObservedNodeForTest(t, service, "node-b", "svc-b")
+	if err := store.Record("source-sandbox", Node{ID: "node-a", Endpoint: "http://node-a"}, time.Now()); err != nil {
+		t.Fatalf("record source assignment: %v", err)
+	}
+
+	_, err := service.Schedule(context.Background(), placementScheduleRequest("source-sandbox"))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected failed precondition for a stale reference node, got %v", err)
+	}
+}
+
+func TestSchedulePlacementFailsClosedWhenBindingStoreIsUnavailable(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{{ID: "node-a", Endpoint: "http://node-a"}}, defaultObservedReportTTL)
+	heartbeatService := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), NewInMemoryBindingStore(defaultObservedReportTTL))
+	registerObservedNodeForTest(t, heartbeatService, "node-a", "svc-a")
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), failingBindingStore{})
+
+	_, err := service.Schedule(context.Background(), placementScheduleRequest("source-sandbox"))
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected unavailable for a failed reference lookup, got %v", err)
+	}
+}
+
+func TestSchedulePlacementRejectsMalformedReferences(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{{ID: "node-a", Endpoint: "http://node-a"}}, defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), NewInMemoryBindingStore(defaultObservedReportTTL))
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+
+	for name, references := range map[string][]string{
+		"empty":      {""},
+		"whitespace": {" sandbox-a"},
+		"duplicate":  {"sandbox-a", "sandbox-a"},
+		"too_many":   make([]string, maxPlacementReferences+1),
+		"too_long":   {strings.Repeat("a", maxSandboxIDLength+1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := service.Schedule(context.Background(), placementScheduleRequest(references...))
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("expected invalid argument, got %v", err)
+			}
+		})
+	}
+}
+
+func TestSnapshotCompatibilityDomainRequiresSameRuntimeAndCPU(t *testing.T) {
+	base := &schedulerv1.ObservedNode{
+		ClusterId: "cluster-a",
+		Version:   "0.5.15",
+		Commit:    "abc123",
+		MachineInfo: &schedulerv1.MachineInfo{
+			CpuArchitecture: "aarch64",
+			CpuFamily:       "arm",
+			CpuModel:        "neoverse-v1",
+			CpuConfigJson:   "{}",
+		},
+	}
+	matching := proto.Clone(base).(*schedulerv1.ObservedNode)
+	if !sameSnapshotCompatibilityDomain(base, matching) {
+		t.Fatal("identical runtime compatibility facts should match")
+	}
+	mismatched := proto.Clone(base).(*schedulerv1.ObservedNode)
+	mismatched.Commit = "different"
+	if sameSnapshotCompatibilityDomain(base, mismatched) {
+		t.Fatal("different runtime commits must not share a snapshot compatibility domain")
+	}
+	mismatched = proto.Clone(base).(*schedulerv1.ObservedNode)
+	mismatched.MachineInfo.CpuConfigJson = `{"cpuid_modifiers":[]}`
+	if sameSnapshotCompatibilityDomain(base, mismatched) {
+		t.Fatal("different Firecracker CPU configurations must not share a snapshot compatibility domain")
+	}
+	missingIdentity := proto.Clone(base).(*schedulerv1.ObservedNode)
+	missingIdentity.MachineInfo.CpuFamily = ""
+	if sameSnapshotCompatibilityDomain(missingIdentity, matching) {
+		t.Fatal("incomplete CPU identity must not define a snapshot compatibility domain")
 	}
 }
 
