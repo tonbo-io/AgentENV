@@ -88,6 +88,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.agentenv
       args:
         APT_MIRROR_BASE: ${APT_MIRROR_BASE:-}
+        AENV_GIT_COMMIT: ${AENV_GIT_COMMIT:-development}
     container_name: agentenv-a
     environment:
       <<: *agentenv-environment

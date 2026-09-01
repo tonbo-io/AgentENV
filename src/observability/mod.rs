@@ -18,6 +18,7 @@ mod reporter;
 mod service;
 
 pub use host::{DiskMetric, HostMetrics, HostMetricsCollector};
+pub use machine::CpuTemplateDumpConfig;
 pub use model::{MachineInfo, NodeMetricsSnapshot, NodeSnapshot};
 pub use reporter::ObservabilityReporter;
 pub use service::ObservabilityService;
