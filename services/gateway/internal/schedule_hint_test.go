@@ -46,6 +46,66 @@ func TestBuildScheduleHintNewSandbox(t *testing.T) {
 	}
 }
 
+func TestBuildScheduleHintCarriesGeneralPlacementConstraints(t *testing.T) {
+	r := newHintRequest(t, http.MethodPost, "/sandboxes", `{"templateID":"snapshot","placement":{"differentNodeFrom":["sandbox-a","sandbox-b"],"snapshotCompatibleWith":["sandbox-a"]}}`)
+
+	hint, err := buildScheduleHint(r)
+	if err != nil {
+		t.Fatalf("buildScheduleHint returned error: %v", err)
+	}
+	want := []string{"sandbox-a", "sandbox-b"}
+	if got := hint.GetNewSandbox().GetPlacement().GetDifferentNodeFrom(); !equalStrings(got, want) {
+		t.Fatalf("different_node_from = %v, want %v", got, want)
+	}
+	wantCompatible := []string{"sandbox-a"}
+	if got := hint.GetNewSandbox().GetPlacement().GetSnapshotCompatibleWith(); !equalStrings(got, wantCompatible) {
+		t.Fatalf("snapshot_compatible_with = %v, want %v", got, wantCompatible)
+	}
+	forwardBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read consumed placement body: %v", err)
+	}
+	if string(forwardBody) != `{"templateID":"snapshot"}` {
+		t.Fatalf("runtime request retained scheduler-only placement: %s", forwardBody)
+	}
+}
+
+func TestBuildScheduleHintConsumesEmptyPlacementObject(t *testing.T) {
+	r := newHintRequest(t, http.MethodPost, "/sandboxes", `{"templateID":"snapshot","placement":{}}`)
+
+	hint, err := buildScheduleHint(r)
+	if err != nil {
+		t.Fatalf("buildScheduleHint returned error: %v", err)
+	}
+	if hint.GetNewSandbox().GetPlacement() == nil {
+		t.Fatal("explicit placement object was not represented in the scheduling hint")
+	}
+	forwardBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read consumed placement body: %v", err)
+	}
+	if string(forwardBody) != `{"templateID":"snapshot"}` {
+		t.Fatalf("runtime request retained empty scheduler-only placement: %s", forwardBody)
+	}
+}
+
+func TestBuildScheduleHintFailsClosedForUnknownPlacementConstraint(t *testing.T) {
+	r := newHintRequest(t, http.MethodPost, "/sandboxes", `{"templateID":"snapshot","placement":{"sameNodeAs":["sandbox-a"]}}`)
+
+	if _, err := buildScheduleHint(r); err == nil {
+		t.Fatal("unknown hard placement constraint was silently ignored")
+	}
+}
+
+func TestBuildScheduleHintFailsClosedForOversizedSandboxBody(t *testing.T) {
+	reqBody := `{"templateID":"snapshot","pad":"` + strings.Repeat("a", maxNewSandboxBodyBytes) + `","placement":{"differentNodeFrom":["sandbox-a"]}}`
+	r := newHintRequest(t, http.MethodPost, "/sandboxes", reqBody)
+
+	if _, err := buildScheduleHint(r); err == nil {
+		t.Fatal("oversized sandbox body bypassed hard placement inspection")
+	}
+}
+
 func TestBuildScheduleHintNewColdSandbox(t *testing.T) {
 	const reqBody = `{"image":"ubuntu:24.04","cpuCount":4,"memoryMB":2048,"attachedDrives":[{"source":{"image":"data:v1"}},{"source":{"image":"cache:v2"}}]}`
 	r := newHintRequest(t, http.MethodPost, "/sandboxes-cold", reqBody)
@@ -160,12 +220,15 @@ func TestParseNewColdSandboxHint(t *testing.T) {
 
 func TestCaptureRequestBodyNil(t *testing.T) {
 	r := newHintRequest(t, http.MethodPost, "/sandboxes-cold", "")
-	body, err := captureRequestBody(r)
+	body, inspected, err := captureRequestBody(r)
 	if err != nil {
 		t.Fatalf("captureRequestBody returned error: %v", err)
 	}
 	if body != nil {
 		t.Fatalf("expected nil body, got %q", string(body))
+	}
+	if !inspected {
+		t.Fatal("empty body should be fully inspected")
 	}
 }
 

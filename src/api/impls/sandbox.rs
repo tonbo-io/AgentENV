@@ -46,6 +46,10 @@ fn default_sandbox_timeout() -> Duration {
     })
 }
 
+fn has_cluster_placement(placement: Option<&models::SandboxPlacement>) -> bool {
+    placement.is_some()
+}
+
 impl From<OrchestratorError> for models::Error {
     fn from(err: OrchestratorError) -> Self {
         match err {
@@ -621,6 +625,12 @@ impl Sandboxes<()> for ApiImpl {
         _claims: &Self::Claims,
         body: &models::NewSandbox,
     ) -> Result<SandboxesPostResponse, ()> {
+        if has_cluster_placement(body.placement.as_ref()) {
+            return Ok(SandboxesPostResponse::Status400_BadRequest(Self::error(
+                400,
+                "placement constraints require the multi-node gateway".to_string(),
+            )));
+        }
         let timer = SandboxStageTimer::new("create_warm");
         let snapshot = match timer
             .time(
@@ -1456,6 +1466,20 @@ impl Sandboxes<()> for ApiImpl {
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn runtime_node_rejects_every_cluster_placement_object() {
+        let mut placement = models::SandboxPlacement::new();
+        assert!(!has_cluster_placement(None));
+        assert!(has_cluster_placement(Some(&placement)));
+
+        placement.different_node_from = Some(vec!["sandbox-a".to_string()]);
+        assert!(has_cluster_placement(Some(&placement)));
+
+        placement.different_node_from = Some(Vec::new());
+        placement.snapshot_compatible_with = Some(vec!["sandbox-a".to_string()]);
+        assert!(has_cluster_placement(Some(&placement)));
+    }
 
     #[test]
     fn sandbox_response_exposes_the_current_runtime_activation_boundary() {

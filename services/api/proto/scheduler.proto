@@ -51,6 +51,8 @@ message NewColdSandboxHint {
 message NewSandboxHint {
   // Sandbox metadata key/value pairs parsed from the request body.
   map<string, string> metadata = 1;
+  // Hard node-placement constraints supplied by the public sandbox API.
+  SandboxPlacement placement = 2;
 }
 
 message ScheduleRequest {
@@ -269,3 +271,13 @@ message UnregisterNodeRequest {
 }
 
 message UnregisterNodeResponse {}
+
+// SandboxPlacement carries hard, general-purpose node-placement constraints from a
+// sandbox creation request. A referenced sandbox must have a live assignment;
+// otherwise placement fails closed.
+message SandboxPlacement {
+  // Exclude the live node assignment of every referenced sandbox.
+  repeated string different_node_from = 1;
+  // Require snapshot compatibility with every referenced sandbox's live node.
+  repeated string snapshot_compatible_with = 2;
+}
