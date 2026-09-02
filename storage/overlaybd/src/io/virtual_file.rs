@@ -156,6 +156,15 @@ pub trait VirtualFile: Send + Sync {
         Ok(None)
     }
 
+    /// Best-effort hint to make a range locally readable before it is needed.
+    ///
+    /// Implementations without a cache may ignore the hint. A successful
+    /// return does not guarantee residency, so callers must keep the ordinary
+    /// read path as the source of truth.
+    async fn prefetch_range(&self, _offset: u64, _len: u64) -> Result<()> {
+        Ok(())
+    }
+
     /// Discard a file range. Implementations may encode this as hole punching
     /// while preserving logical file size.
     async fn discard(&self, _offset: u64, _len: u64) -> Result<()> {
