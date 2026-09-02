@@ -3,7 +3,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use dashmap::mapref::entry::Entry;
@@ -27,6 +27,23 @@ use crate::protocol::{
     recv_message, send_message, AccessMode, DaemonRequest, DaemonResponse, ResizeToolSpec,
 };
 use crate::runtime;
+
+const UBLK_DAEMON_PHASE_DURATION: &str = "agentenv_ublk_daemon_phase_duration_seconds";
+
+fn record_daemon_phase(
+    phase: &'static str,
+    pool_outcome: &'static str,
+    success: bool,
+    started: Instant,
+) {
+    metrics::histogram!(
+        UBLK_DAEMON_PHASE_DURATION,
+        "phase" => phase,
+        "pool_outcome" => pool_outcome,
+        "status" => if success { "success" } else { "error" },
+    )
+    .record(started.elapsed().as_secs_f64());
+}
 
 // ── Managed device wrapper ──────────────────────────────────────────────────
 
@@ -635,8 +652,9 @@ async fn handle_create_overlaybd_runtime_device(
     image_service_cache: &ImageServiceCache,
     pool_state: &Option<Arc<PoolState>>,
 ) -> Result<DaemonResponse> {
-    let runtime =
-        match runtime::materialize_overlaybd_runtime(runtime::MaterializeOverlaybdRuntimeRequest {
+    let materialize_started = Instant::now();
+    let runtime_result =
+        runtime::materialize_overlaybd_runtime(runtime::MaterializeOverlaybdRuntimeRequest {
             image_service_cache,
             source_image_config: request.source_image_config,
             global_config: request.global_config,
@@ -650,18 +668,24 @@ async fn handle_create_overlaybd_runtime_device(
             resize_permit: request.resize_permit,
             allow_shrink: request.allow_shrink,
         })
-        .await
-        {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "materialize overlaybd runtime in {}",
-                        request.runtime_dir.display()
-                    )
-                });
-            }
-        };
+        .await;
+    record_daemon_phase(
+        "runtime_materialize",
+        "none",
+        runtime_result.is_ok(),
+        materialize_started,
+    );
+    let runtime = match runtime_result {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "materialize overlaybd runtime in {}",
+                    request.runtime_dir.display()
+                )
+            });
+        }
+    };
 
     let created = if pool_state.is_some() {
         match handle_acquire_overlaybd(
@@ -1035,18 +1059,27 @@ async fn handle_acquire_overlaybd(
 
     let image_lock = pool.image_lock(image_config);
     let image = {
+        let lock_started = Instant::now();
         let _image_guard = image_lock.read().await;
-        let image_service = image_service_cache
-            .get_or_create(global_config)
-            .await
-            .context("resolve image service for acquire")?;
+        record_daemon_phase("image_lock_wait", "none", true, lock_started);
 
-        Arc::new(
-            image_service
-                .create_image_file(image_config)
-                .await
-                .with_context(|| format!("open overlaybd image: {}", image_config.display()))?,
-        )
+        let service_started = Instant::now();
+        let image_service = image_service_cache.get_or_create(global_config).await;
+        record_daemon_phase(
+            "image_service_resolve",
+            "none",
+            image_service.is_ok(),
+            service_started,
+        );
+        let image_service = image_service.context("resolve image service for acquire")?;
+
+        let image_open_started = Instant::now();
+        let image = image_service
+            .create_image_file(image_config)
+            .await
+            .with_context(|| format!("open overlaybd image: {}", image_config.display()));
+        record_daemon_phase("image_open", "none", image.is_ok(), image_open_started);
+        Arc::new(image?)
     };
     let actual_virtual_size = image.size_bytes();
     anyhow::ensure!(
@@ -1079,34 +1112,42 @@ async fn prepare_overlaybd_device(
     image: &Arc<ImageFile>,
     mode: &'static str,
 ) -> Result<(UVMUblkDev<OverlaybdTarget>, bool)> {
+    let prepare_started = Instant::now();
     let new_sectors = image.num_lbas();
     if let Some(p) = take_idle_device(pool, new_sectors) {
-        let dev_id = p.dev.dev_id();
-        tracing::debug!(dev_id, mode, "reusing warm device from pool");
+        let prepared = async {
+            let dev_id = p.dev.dev_id();
+            tracing::debug!(dev_id, mode, "reusing warm device from pool");
 
-        let discard_supported = !image.is_read_only().await;
-        p.dev
-            .target()
-            .swap_state(
-                image_config.to_path_buf(),
-                Arc::clone(image),
-                discard_supported,
-            )
-            .with_context(|| format!("swap {mode} target state"))?;
+            let discard_supported = !image.is_read_only().await;
+            p.dev
+                .target()
+                .swap_state(
+                    image_config.to_path_buf(),
+                    Arc::clone(image),
+                    discard_supported,
+                )
+                .with_context(|| format!("swap {mode} target state"))?;
 
-        if pool.supports_update_size() && p.dev_sectors != new_sectors {
-            update_device_size(&p.dev, new_sectors)
-                .await
-                .with_context(|| format!("update {mode} device size for dev_id={dev_id}"))?;
+            if pool.supports_update_size() && p.dev_sectors != new_sectors {
+                update_device_size(&p.dev, new_sectors)
+                    .await
+                    .with_context(|| format!("update {mode} device size for dev_id={dev_id}"))?;
+            }
+
+            Ok((p.dev, true))
         }
-
-        Ok((p.dev, true))
+        .await;
+        record_daemon_phase("device_prepare", "hit", prepared.is_ok(), prepare_started);
+        prepared
     } else {
         tracing::debug!(mode, "pool miss: creating new device");
-        let dev = create_new_device(ctrl_ring.clone(), image_config, image)
+        let prepared = create_new_device(ctrl_ring.clone(), image_config, image)
             .await
-            .with_context(|| format!("create new {mode} ublk device on pool miss"))?;
-        Ok((dev, false))
+            .with_context(|| format!("create new {mode} ublk device on pool miss"))
+            .map(|dev| (dev, false));
+        record_daemon_phase("device_prepare", "miss", prepared.is_ok(), prepare_started);
+        prepared
     }
 }
 

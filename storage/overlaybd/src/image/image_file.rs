@@ -21,6 +21,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -28,6 +29,49 @@ use uuid::Uuid;
 
 const DEFAULT_BLOCK_SIZE: u32 = 512;
 const IO_ENGINE_LIBAIO: u32 = 2;
+const REMOTE_LAYER_EDGE_PREFETCH_BYTES: u64 = 512;
+
+/// Prime the two metadata-bearing edges of a remote layer in parallel.
+///
+/// Cached files turn each hint into a cache-block refill. Other backends may
+/// ignore the hint through `VirtualFile`'s default implementation. Parsing the
+/// tar/zfile/LSMT structures below remains authoritative, so a failed hint is
+/// a performance degradation rather than an image-open failure.
+async fn prefetch_remote_layer_edges(file: &Arc<dyn VirtualFile>, source_size: u64) {
+    if source_size == 0 {
+        return;
+    }
+
+    let edge_len = source_size.min(REMOTE_LAYER_EDGE_PREFETCH_BYTES);
+    let tail_offset = source_size.saturating_sub(edge_len);
+    let started = Instant::now();
+    let (head, tail) = if tail_offset == 0 {
+        (file.prefetch_range(0, edge_len).await, Ok(()))
+    } else {
+        tokio::join!(
+            file.prefetch_range(0, edge_len),
+            file.prefetch_range(tail_offset, edge_len),
+        )
+    };
+    let status = if head.is_ok() && tail.is_ok() {
+        "success"
+    } else {
+        "error"
+    };
+    metrics::histogram!(
+        "agentenv_overlaybd_remote_layer_open_duration_seconds",
+        "phase" => "edge_prefetch",
+        "status" => status,
+    )
+    .record(started.elapsed().as_secs_f64());
+
+    if status == "error" {
+        warn!(
+            error_category = "remote_layer_edge_prefetch_failed",
+            "remote layer edge prefetch failed; continuing with ordinary reads"
+        );
+    }
+}
 
 struct OpenedLowerLayer {
     file: Arc<dyn VirtualFile>,
@@ -692,8 +736,20 @@ impl ImageFile {
                 None,
             )
         };
-        let tar_file = new_tar_file_adaptor(remote_file).await?;
-        let switch_file = new_switch_file(tar_file, false, Some(&url)).await?;
+        prefetch_remote_layer_edges(&remote_file, source_size.unwrap_or(0)).await;
+        let format_open_started = Instant::now();
+        let switch_file_result = async {
+            let tar_file = new_tar_file_adaptor(remote_file).await?;
+            new_switch_file(tar_file, false, Some(&url)).await
+        }
+        .await;
+        metrics::histogram!(
+            "agentenv_overlaybd_remote_layer_open_duration_seconds",
+            "phase" => "format_open",
+            "status" => if switch_file_result.is_ok() { "success" } else { "error" },
+        )
+        .record(format_open_started.elapsed().as_secs_f64());
+        let switch_file = switch_file_result?;
         Ok(OpenedLowerLayer {
             file: switch_file,
             download,
@@ -927,8 +983,75 @@ mod tests {
     use std::sync::Arc;
     use tempfile::{NamedTempFile, TempDir};
     use tokio::net::TcpListener;
-    use tokio::sync::Mutex as AsyncMutex;
+    use tokio::sync::{Barrier, Mutex as AsyncMutex};
     use tokio::time::{sleep, Duration};
+
+    #[derive(Debug)]
+    struct EdgePrefetchProbe {
+        size: u64,
+        barrier: Barrier,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        ranges: std::sync::Mutex<Vec<(u64, u64)>>,
+    }
+
+    #[async_trait]
+    impl VirtualFile for EdgePrefetchProbe {
+        async fn read_at(&self, _offset: u64, _len: usize) -> Result<Bytes> {
+            Ok(Bytes::new())
+        }
+
+        async fn write_at(&self, _offset: u64, _data: &[u8]) -> Result<usize> {
+            Ok(0)
+        }
+
+        async fn size(&self) -> Result<u64> {
+            Ok(self.size)
+        }
+
+        async fn prefetch_range(&self, offset: u64, len: u64) -> Result<()> {
+            self.ranges.lock().expect("ranges lock").push((offset, len));
+            let active = self.active.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+            self.max_active.fetch_max(active, AtomicOrdering::AcqRel);
+            self.barrier.wait().await;
+            self.active.fetch_sub(1, AtomicOrdering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_layer_edges_are_prefetched_concurrently() {
+        let source_size = 1024 * 1024;
+        let probe = Arc::new(EdgePrefetchProbe {
+            size: source_size,
+            barrier: Barrier::new(2),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            ranges: std::sync::Mutex::new(Vec::new()),
+        });
+        let file: Arc<dyn VirtualFile> = probe.clone();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            prefetch_remote_layer_edges(&file, source_size),
+        )
+        .await
+        .expect("edge prefetches must make progress concurrently");
+
+        let mut ranges = probe.ranges.lock().expect("ranges lock").clone();
+        ranges.sort_unstable();
+        assert_eq!(
+            ranges,
+            vec![
+                (0, REMOTE_LAYER_EDGE_PREFETCH_BYTES),
+                (
+                    source_size - REMOTE_LAYER_EDGE_PREFETCH_BYTES,
+                    REMOTE_LAYER_EDGE_PREFETCH_BYTES,
+                ),
+            ]
+        );
+        assert_eq!(probe.max_active.load(AtomicOrdering::Acquire), 2);
+    }
 
     async fn create_sealed_lower(path: &Path, index_path: &Path, payload: &[u8]) -> Result<()> {
         let data_file: Arc<dyn VirtualFile> = Arc::new(LocalFile::new(path)?);

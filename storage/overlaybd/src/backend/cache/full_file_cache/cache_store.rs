@@ -1395,6 +1395,12 @@ impl VirtualFile for CachedFile {
         self.write_at_with_flags(offset, data, 0).await
     }
 
+    async fn prefetch_range(&self, offset: u64, len: u64) -> Result<()> {
+        let count = usize::try_from(len).map_err(|_| anyhow!("prefetch range too large"))?;
+        self.try_refill_range(offset, count).await?;
+        Ok(())
+    }
+
     #[cfg(feature = "io-uring")]
     fn read_at_with_ctx<'a>(
         &'a self,
