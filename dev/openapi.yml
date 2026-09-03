@@ -296,6 +296,71 @@ components:
         absent value and an empty object are equivalent: both mean empty
         params.
 
+    SandboxUsage:
+      description: >
+        Cumulative host resource use of the sandbox's most recent runtime
+        instance on this node. A runtime instance is one Firecracker process:
+        it starts when the sandbox boots or resumes here and ends when that
+        process stops. Every counter is monotonic within an instance and
+        starts from zero for the next one.
+      required:
+        - sandboxID
+        - runtimeInstanceID
+        - running
+        - startedAt
+        - sampledAt
+        - sampleCount
+        - cgroupAccounting
+        - diskAllocatedBytes
+        - diskByteSeconds
+      properties:
+        sandboxID:
+          type: string
+        runtimeInstanceID:
+          type: string
+          format: uuid
+          description: Changes on every boot or resume of the sandbox on this node
+        running:
+          type: boolean
+          description: False once the runtime instance stopped; the counters are then final
+        startedAt:
+          type: string
+          format: date-time
+          description: When the counters for this runtime instance opened
+        sampledAt:
+          type: string
+          format: date-time
+          description: When the counters were last updated
+        sampleCount:
+          type: integer
+          format: uint64
+        cgroupAccounting:
+          type: boolean
+          description: >
+            Whether the Firecracker process runs in a cgroup of its own. When
+            false the CPU and memory counters are absent and only disk is
+            measured.
+        cpuUsageMicros:
+          type: integer
+          format: uint64
+          description: Host CPU time consumed by the Firecracker process, in microseconds
+        memoryCurrentBytes:
+          type: integer
+          format: uint64
+          description: Host memory currently charged to the Firecracker process
+        memoryByteSeconds:
+          type: integer
+          format: uint64
+          description: Integral of memoryCurrentBytes over the instance lifetime
+        diskAllocatedBytes:
+          type: integer
+          format: uint64
+          description: Bytes the runtime work directory currently occupies on local disk
+        diskByteSeconds:
+          type: integer
+          format: uint64
+          description: Integral of diskAllocatedBytes over the instance lifetime
+
     SandboxNetworkConfig:
       type: object
       properties:
@@ -1837,6 +1902,36 @@ paths:
           $ref: "#/components/responses/404"
         "409":
           $ref: "#/components/responses/409"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /sandboxes/{sandboxID}/usage:
+    get:
+      description: >
+        Get the cumulative host resource use of the sandbox's most recent
+        runtime instance on this node. Counters keep their final values for a
+        retention window after the instance stops, and reset with a new
+        runtimeInstanceID when the sandbox boots or resumes again.
+      security:
+        - ApiKeyAuth: []
+        - AuthProviderBearerAuth: []
+          AuthProviderTeamAuth: []
+        - AdminApiKeyAuth: []
+          AdminTeamAuth: []
+      tags: [sandboxes]
+      parameters:
+        - $ref: "#/components/parameters/sandboxID"
+      responses:
+        "200":
+          description: The sandbox runtime usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxUsage"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
         "500":
           $ref: "#/components/responses/500"
 

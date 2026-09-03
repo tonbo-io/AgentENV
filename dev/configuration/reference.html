@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-301c2ef3.js";
+            window.path_to_searchindex_js = "../searchindex-26f21b1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-5437f69c.js"></script>
+        <script src="../toc-c868df7a.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -635,6 +635,21 @@ snapshot publication/runtime resolution as an optional acceleration path.</p>
 <tbody>
 <tr><td><code>url</code></td><td>string</td><td>unset</td><td>HTTP base URL of the custom extension service. When set, AgentENV invokes sandbox lifecycle hooks under <code>POST {url}/sandbox-hook/*</code>.</td></tr>
 <tr><td><code>timeout_ms</code></td><td>integer</td><td><code>5000</code></td><td>Timeout for each custom extension HTTP call, in milliseconds.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="metering"><a class="header" href="#metering"><code>[metering]</code></a></h2>
+<p>Per-sandbox host resource metering exposed by <code>GET /sandboxes/{sandboxID}/usage</code>. See <a href="../concepts/usage-metering.html">Usage Metering</a>.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td>bool</td><td><code>true</code></td><td>Meter each sandbox runtime’s CPU time, resident memory, and allocated disk.</td></tr>
+<tr><td><code>sample_interval_secs</code></td><td>integer</td><td><code>5</code></td><td>Seconds between samples of every running sandbox.</td></tr>
+<tr><td><code>cgroup_root</code></td><td>path</td><td><code>/sys/fs/cgroup</code></td><td>cgroup v2 mount point. The server’s own cgroup under it must be writable; otherwise CPU and memory counters are reported as absent and only disk is measured.</td></tr>
+<tr><td><code>finished_retention_secs</code></td><td>integer</td><td><code>3600</code></td><td>Seconds a stopped runtime instance’s final counters stay readable.</td></tr>
 </tbody>
 </table>
 </div>

@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-301c2ef3.js";
+            window.path_to_searchindex_js = "../searchindex-26f21b1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-5437f69c.js"></script>
+        <script src="../toc-c868df7a.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -213,6 +213,8 @@
 <tr><td><code>AENV_OBSERVABILITY_SCHEDULER_ENDPOINT</code></td><td>unset</td><td>Override scheduler heartbeat reporting endpoint</td></tr>
 <tr><td><code>AENV_OBSERVABILITY_REPORT_INTERVAL_SECS</code></td><td><code>5</code></td><td>Override heartbeat reporting interval in seconds</td></tr>
 <tr><td><code>AENV_CUSTOM_EXTENSION_URL</code></td><td>unset</td><td>Override <code>[custom_extension].url</code>, the HTTP base URL of the custom extension service</td></tr>
+<tr><td><code>AENV_METERING_ENABLED</code></td><td><code>true</code></td><td>Override <code>[metering].enabled</code>, per-sandbox CPU/memory/disk usage metering</td></tr>
+<tr><td><code>AENV_METERING_SAMPLE_INTERVAL_SECS</code></td><td><code>5</code></td><td>Override <code>[metering].sample_interval_secs</code></td></tr>
 <tr><td><code>AENV_SANDBOX_ACCESS_TOKEN_HASH_SEED</code></td><td>auto-generated under <code>$AENV_HOME/secrets</code></td><td>Optional runtime override for the secret used to derive sandbox envd and traffic access tokens. Configure the same value on every runtime node in clustered deployments.</td></tr>
 <tr><td><code>AENV_SANDBOX_PROXY_DOMAINS</code></td><td>from config</td><td>Comma-separated DNS domains that enable server-side host-based sandbox proxy URLs like <code>{port}-{sandboxID}.{domain}</code> and populate the sandbox response <code>domain</code> field. Empty or unset keeps <code>[sandbox_proxy].domains</code>.</td></tr>
 <tr><td><code>AENV_HOME_PATH</code></td><td><code>/var/lib/aenv</code></td><td>Override the base directory from which AgentENV derives local state, caches, logs, generated configs, and downloaded dependencies. Component-specific path settings remain available as advanced overrides.</td></tr>

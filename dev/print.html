@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-301c2ef3.js";
+            window.path_to_searchindex_js = "searchindex-26f21b1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-5437f69c.js"></script>
+        <script src="toc-c868df7a.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1848,6 +1848,21 @@ snapshot publication/runtime resolution as an optional acceleration path.</p>
 </tbody>
 </table>
 </div>
+<h2 id="metering"><a class="header" href="#metering"><code>[metering]</code></a></h2>
+<p>Per-sandbox host resource metering exposed by <code>GET /sandboxes/{sandboxID}/usage</code>. See <a href="#usage-metering">Usage Metering</a>.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td>bool</td><td><code>true</code></td><td>Meter each sandbox runtime’s CPU time, resident memory, and allocated disk.</td></tr>
+<tr><td><code>sample_interval_secs</code></td><td>integer</td><td><code>5</code></td><td>Seconds between samples of every running sandbox.</td></tr>
+<tr><td><code>cgroup_root</code></td><td>path</td><td><code>/sys/fs/cgroup</code></td><td>cgroup v2 mount point. The server’s own cgroup under it must be writable; otherwise CPU and memory counters are reported as absent and only disk is measured.</td></tr>
+<tr><td><code>finished_retention_secs</code></td><td>integer</td><td><code>3600</code></td><td>Seconds a stopped runtime instance’s final counters stay readable.</td></tr>
+</tbody>
+</table>
+</div>
 <h2 id="snapshot"><a class="header" href="#snapshot"><code>[snapshot]</code></a></h2>
 <p>Snapshot storage/build configuration.</p>
 <div class="table-wrapper">
@@ -2098,6 +2113,8 @@ and are then re-fetched on demand.</p>
 <tr><td><code>AENV_OBSERVABILITY_SCHEDULER_ENDPOINT</code></td><td>unset</td><td>Override scheduler heartbeat reporting endpoint</td></tr>
 <tr><td><code>AENV_OBSERVABILITY_REPORT_INTERVAL_SECS</code></td><td><code>5</code></td><td>Override heartbeat reporting interval in seconds</td></tr>
 <tr><td><code>AENV_CUSTOM_EXTENSION_URL</code></td><td>unset</td><td>Override <code>[custom_extension].url</code>, the HTTP base URL of the custom extension service</td></tr>
+<tr><td><code>AENV_METERING_ENABLED</code></td><td><code>true</code></td><td>Override <code>[metering].enabled</code>, per-sandbox CPU/memory/disk usage metering</td></tr>
+<tr><td><code>AENV_METERING_SAMPLE_INTERVAL_SECS</code></td><td><code>5</code></td><td>Override <code>[metering].sample_interval_secs</code></td></tr>
 <tr><td><code>AENV_SANDBOX_ACCESS_TOKEN_HASH_SEED</code></td><td>auto-generated under <code>$AENV_HOME/secrets</code></td><td>Optional runtime override for the secret used to derive sandbox envd and traffic access tokens. Configure the same value on every runtime node in clustered deployments.</td></tr>
 <tr><td><code>AENV_SANDBOX_PROXY_DOMAINS</code></td><td>from config</td><td>Comma-separated DNS domains that enable server-side host-based sandbox proxy URLs like <code>{port}-{sandboxID}.{domain}</code> and populate the sandbox response <code>domain</code> field. Empty or unset keeps <code>[sandbox_proxy].domains</code>.</td></tr>
 <tr><td><code>AENV_HOME_PATH</code></td><td><code>/var/lib/aenv</code></td><td>Override the base directory from which AgentENV derives local state, caches, logs, generated configs, and downloaded dependencies. Component-specific path settings remain available as advanced overrides.</td></tr>
@@ -2935,6 +2952,70 @@ async def stop(req: Request):
 </code></pre>
 <p>Any non-2xx response (or timeout) fails the corresponding sandbox operation, except for <code>stop</code>, which is always tolerated.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="usage-metering"><a class="header" href="#usage-metering">Usage Metering</a></h1>
+<p>Every sandbox runtime on a node is metered for the host resources it actually consumes: CPU time, resident memory, and allocated disk. The counters answer “what did this sandbox use”, independent of the <code>cpuCount</code> / <code>memoryMB</code> / <code>diskSizeMB</code> it was created with, so a control plane can bill or schedule by measured use even when sandboxes are provisioned larger than they use and the node is oversubscribed.</p>
+<hr>
+<h2 id="what-is-measured"><a class="header" href="#what-is-measured">What is measured</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Counter</th><th>Source</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>cpuUsageMicros</code></td><td>cgroup <code>cpu.stat</code> <code>usage_usec</code></td><td>Host CPU time consumed by every thread of the Firecracker process, including its vCPU threads. Divide by 1,000,000 for vCPU-seconds.</td></tr>
+<tr><td><code>memoryCurrentBytes</code></td><td>cgroup <code>memory.current</code></td><td>Host memory charged to the Firecracker process right now: anonymous guest memory it has touched plus page cache it owns. Guest memory that was never touched, or was released by the balloon, is not resident and not counted.</td></tr>
+<tr><td><code>memoryByteSeconds</code></td><td>integral of the above</td><td>Resident memory integrated over the runtime instance’s lifetime.</td></tr>
+<tr><td><code>diskAllocatedBytes</code></td><td><code>st_blocks</code> of the runtime work directory</td><td>Bytes the sandbox’s writable layers occupy on local disk: the overlaybd upper layer of the rootfs, one runtime directory per extra drive, plus logs. Upper layers are sparse, so allocated blocks are counted, not file length.</td></tr>
+<tr><td><code>diskByteSeconds</code></td><td>integral of the above</td><td>Allocated disk integrated over the runtime instance’s lifetime.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Disk is measured from the work directory rather than from the cgroup because the ublk daemon performs the writes on the sandbox’s behalf, so the Firecracker cgroup’s <code>io.stat</code> never sees them.</p>
+<hr>
+<h2 id="runtime-instances"><a class="header" href="#runtime-instances">Runtime instances</a></h2>
+<p>A <strong>runtime instance</strong> is one Firecracker process. It starts when the sandbox boots or resumes on this node and ends when that process stops (pause, delete, timeout, or crash). Each instance has its own <code>runtimeInstanceID</code> and its counters start from zero; they never decrease within an instance.</p>
+<p>After the instance stops, <code>running</code> becomes <code>false</code> and the counters keep their final values for <code>metering.finished_retention_secs</code> (one hour by default), so a control plane that did not itself stop the sandbox can still read the final figures. A sandbox that resumes on another node starts a new instance there; the previous node keeps the old instance’s final counters until retention ends.</p>
+<hr>
+<h2 id="reading-usage"><a class="header" href="#reading-usage">Reading usage</a></h2>
+<pre><code>GET /sandboxes/{sandboxID}/usage
+</code></pre>
+<pre><code class="language-json">{
+  "sandboxID": "0192c5d4-…",
+  "runtimeInstanceID": "0192c5d4-…",
+  "running": true,
+  "startedAt": "2026-09-03T08:00:00Z",
+  "sampledAt": "2026-09-03T08:10:05Z",
+  "sampleCount": 122,
+  "cgroupAccounting": true,
+  "cpuUsageMicros": 184203114,
+  "memoryCurrentBytes": 1610612736,
+  "memoryByteSeconds": 903471263744,
+  "diskAllocatedBytes": 268435456,
+  "diskByteSeconds": 141733920768
+}
+</code></pre>
+<p>The endpoint returns <code>404</code> when the sandbox is unknown to this node, or when no runtime instance has been metered here (for example a paused sandbox restored after a server restart that has not resumed yet).</p>
+<p>Counters are updated every <code>metering.sample_interval_secs</code> (five seconds by default). Byte-seconds charge the gauge that was current at the start of each interval over that interval’s length; a gauge that changed between two samples is charged at its earlier value until the later sample observes it. The final sample is taken when the process stops, so the last partial interval is included.</p>
+<hr>
+<h2 id="how-the-cgroup-tree-is-laid-out"><a class="header" href="#how-the-cgroup-tree-is-laid-out">How the cgroup tree is laid out</a></h2>
+<p>At startup the server takes over the cgroup v2 directory it was started in, moves itself and every process already there into <code>agentenv/</code>, enables the <code>cpu</code> and <code>memory</code> controllers for its children, and keeps one leaf per sandbox under <code>sandboxes/</code>:</p>
+<pre><code class="language-text">&lt;own cgroup&gt;/
+├── agentenv/            the server, the ublk daemon, warm-pool Firecrackers
+└── sandboxes/
+    └── &lt;sandbox id&gt;/    one Firecracker process
+</code></pre>
+<p>Only accounting is used; no limit is written to a sandbox leaf. A warm-pool Firecracker starts in <code>agentenv/</code> and moves into its sandbox leaf when it is claimed, so a leaf charges the process from the moment it belongs to a sandbox. The leaf is removed when the process exits.</p>
+<p>This needs a writable cgroup v2 tree. The privileged runtime container and a root-run server have one; the systemd unit written by <code>scripts/install.sh</code> gets one through <code>Delegate=yes</code>, which hands the unit’s subtree to the service user. Without one, the server logs a warning at startup, <code>cgroupAccounting</code> is <code>false</code>, the CPU and memory counters are absent, and disk is still measured.</p>
+<hr>
+<h2 id="configuration-3"><a class="header" href="#configuration-3">Configuration</a></h2>
+<pre><code class="language-toml">[metering]
+enabled = true
+sample_interval_secs = 5
+cgroup_root = "/sys/fs/cgroup"
+finished_retention_secs = 3600
+</code></pre>
+<p><code>AENV_METERING_ENABLED</code> and <code>AENV_METERING_SAMPLE_INTERVAL_SECS</code> override the first two.</p>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="proxy"><a class="header" href="#proxy">Proxy</a></h1>
 <p>The reverse proxy lets you reach services running inside a sandbox from outside. It supports HTTP requests, SSE streams, and WebSocket connections.</p>
 <h2 id="endpoints"><a class="header" href="#endpoints">Endpoints</a></h2>
@@ -3284,6 +3365,16 @@ PVM currently requires x86_64 and the <code>kvm_pvm</code> host module.</p>
 <ul>
 <li><code>observability.enabled</code>: controls whether the node observability service is constructed at all. When disabled, node/admin observability endpoints degrade rather than trying to synthesize partial snapshots.</li>
 <li><code>observability.scheduler_report.enabled</code>: controls optional scheduler heartbeat reporting. It can be overridden by <code>AENV_OBSERVABILITY_SCHEDULER_REPORT_ENABLED</code>. When enabled, reporting requires <code>[cluster].scheduler_endpoint</code> or <code>AENV_OBSERVABILITY_SCHEDULER_ENDPOINT</code>.</li>
+</ul>
+<h3 id="sandbox-usage-metering"><a class="header" href="#sandbox-usage-metering">Sandbox Usage Metering</a></h3>
+<p>Node observability reports what sandboxes were <em>allocated</em>; <code>src/sandbox/metering/</code> reports what each one <em>consumed</em>, for control planes that bill or schedule by measured use on oversubscribed nodes.</p>
+<ul>
+<li><code>cgroup.rs</code> owns a cgroup v2 subtree under the server’s own cgroup. At startup the server moves itself (and every process already there, such as the ublk daemon) into <code>agentenv/</code>, enables <code>cpu</code> and <code>memory</code> for its children, and creates <code>sandboxes/</code>. <code>FirecrackerSandbox</code> places its Firecracker process into <code>sandboxes/&lt;sandbox id&gt;/</code> right after spawn (fresh boot) or after claiming a warm-pool process (resume), and the leaf is removed once the process has exited. No limits are written; the leaf exists only for accounting.</li>
+<li><code>disk.rs</code> measures allocated blocks (<code>st_blocks * 512</code>, symlinks skipped) under the sandbox work directory, because the ublk daemon writes the overlaybd upper layers on the sandbox’s behalf and the Firecracker cgroup’s <code>io.stat</code> never sees them.</li>
+<li><code>counters.rs</code> folds samples into per-runtime-instance <code>UsageCounters</code>: monotonic <code>cpu_usage_micros</code>, the <code>memory_current_bytes</code> and <code>disk_allocated_bytes</code> gauges, and their byte-second integrals (left Riemann over each sampling interval). Every boot or resume opens a new runtime instance ID with zeroed counters, so a consumer can distinguish a reset from a decrease.</li>
+<li><code>SandboxMeter</code> (<code>mod.rs</code>) is a process-wide side registry keyed by <code>SandboxId</code>, sampled by a background task every <code>metering.sample_interval_secs</code>. Sampling never takes a sandbox’s backend lock, so a long pause or snapshot cannot stall it. Finished instances keep their final counters for <code>metering.finished_retention_secs</code>.</li>
+<li><code>GET /sandboxes/{sandboxID}/usage</code> (<code>src/api/impls/sandbox.rs</code>) exposes the counters. Without a writable cgroup tree the server logs a warning at startup, <code>cgroupAccounting</code> is <code>false</code>, and only disk is measured.</li>
+<li>Because the server now lives one level below its container’s cgroup, <code>src/observability/host.rs</code> reads <code>cpu.max</code> and <code>memory.max</code> from the process’s own cgroup and every ancestor, and applies the tightest limit it finds.</li>
 </ul>
 <h3 id="p2p-artifact-transport"><a class="header" href="#p2p-artifact-transport">P2P Artifact Transport</a></h3>
 <p><code>src/p2p/</code> provides a project-wide artifact transport abstraction for modules that need to exchange validated files between runtime nodes. Consumers depend on the <code>P2pTransport</code> trait, whose main operations are <code>lookup</code>, <code>lookup_with_hints</code>, <code>fetch</code>, <code>publish</code>, <code>unpublish</code>, <code>local_endpoint</code>, and <code>shutdown</code>.</p>

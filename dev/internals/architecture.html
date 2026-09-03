@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-301c2ef3.js";
+            window.path_to_searchindex_js = "../searchindex-26f21b1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-5437f69c.js"></script>
+        <script src="../toc-c868df7a.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -310,6 +310,16 @@ PVM currently requires x86_64 and the <code>kvm_pvm</code> host module.</p>
 <ul>
 <li><code>observability.enabled</code>: controls whether the node observability service is constructed at all. When disabled, node/admin observability endpoints degrade rather than trying to synthesize partial snapshots.</li>
 <li><code>observability.scheduler_report.enabled</code>: controls optional scheduler heartbeat reporting. It can be overridden by <code>AENV_OBSERVABILITY_SCHEDULER_REPORT_ENABLED</code>. When enabled, reporting requires <code>[cluster].scheduler_endpoint</code> or <code>AENV_OBSERVABILITY_SCHEDULER_ENDPOINT</code>.</li>
+</ul>
+<h3 id="sandbox-usage-metering"><a class="header" href="#sandbox-usage-metering">Sandbox Usage Metering</a></h3>
+<p>Node observability reports what sandboxes were <em>allocated</em>; <code>src/sandbox/metering/</code> reports what each one <em>consumed</em>, for control planes that bill or schedule by measured use on oversubscribed nodes.</p>
+<ul>
+<li><code>cgroup.rs</code> owns a cgroup v2 subtree under the server’s own cgroup. At startup the server moves itself (and every process already there, such as the ublk daemon) into <code>agentenv/</code>, enables <code>cpu</code> and <code>memory</code> for its children, and creates <code>sandboxes/</code>. <code>FirecrackerSandbox</code> places its Firecracker process into <code>sandboxes/&lt;sandbox id&gt;/</code> right after spawn (fresh boot) or after claiming a warm-pool process (resume), and the leaf is removed once the process has exited. No limits are written; the leaf exists only for accounting.</li>
+<li><code>disk.rs</code> measures allocated blocks (<code>st_blocks * 512</code>, symlinks skipped) under the sandbox work directory, because the ublk daemon writes the overlaybd upper layers on the sandbox’s behalf and the Firecracker cgroup’s <code>io.stat</code> never sees them.</li>
+<li><code>counters.rs</code> folds samples into per-runtime-instance <code>UsageCounters</code>: monotonic <code>cpu_usage_micros</code>, the <code>memory_current_bytes</code> and <code>disk_allocated_bytes</code> gauges, and their byte-second integrals (left Riemann over each sampling interval). Every boot or resume opens a new runtime instance ID with zeroed counters, so a consumer can distinguish a reset from a decrease.</li>
+<li><code>SandboxMeter</code> (<code>mod.rs</code>) is a process-wide side registry keyed by <code>SandboxId</code>, sampled by a background task every <code>metering.sample_interval_secs</code>. Sampling never takes a sandbox’s backend lock, so a long pause or snapshot cannot stall it. Finished instances keep their final counters for <code>metering.finished_retention_secs</code>.</li>
+<li><code>GET /sandboxes/{sandboxID}/usage</code> (<code>src/api/impls/sandbox.rs</code>) exposes the counters. Without a writable cgroup tree the server logs a warning at startup, <code>cgroupAccounting</code> is <code>false</code>, and only disk is measured.</li>
+<li>Because the server now lives one level below its container’s cgroup, <code>src/observability/host.rs</code> reads <code>cpu.max</code> and <code>memory.max</code> from the process’s own cgroup and every ancestor, and applies the tightest limit it finds.</li>
 </ul>
 <h3 id="p2p-artifact-transport"><a class="header" href="#p2p-artifact-transport">P2P Artifact Transport</a></h3>
 <p><code>src/p2p/</code> provides a project-wide artifact transport abstraction for modules that need to exchange validated files between runtime nodes. Consumers depend on the <code>P2pTransport</code> trait, whose main operations are <code>lookup</code>, <code>lookup_with_hints</code>, <code>fetch</code>, <code>publish</code>, <code>unpublish</code>, <code>local_endpoint</code>, and <code>shutdown</code>.</p>
