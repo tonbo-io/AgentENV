@@ -22,6 +22,7 @@ Deploy AgentENV across a Kubernetes cluster with a gateway, scheduler, and runti
 - Kubernetes worker nodes with **Linux kernel 6.8+**
 - `/dev/kvm` access on every runtime worker
 - Runtime Pods run privileged
+- The runtime server takes over its container's cgroup v2 directory for per-sandbox usage metering and clears `memory.oom.group` there itself, so an OOM kill stays with one Firecracker process instead of the whole container; no lifecycle hook is needed for that
 - Docker
 - `build-essential` (`sudo apt install -y build-essential`)
 - `kubectl` with Kustomize support
