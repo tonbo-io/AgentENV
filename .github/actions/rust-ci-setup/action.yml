@@ -42,8 +42,23 @@ runs:
         cache_version="$(sha256sum "${files[@]}" | sha256sum | cut -d' ' -f1)"
         echo "cache_version=${cache_version}" >> "$GITHUB_OUTPUT"
 
+    - name: Detect a persistent local CI cache
+      # Depot runners also report `self-hosted`, but their VMs are ephemeral:
+      # only a runner that already carries the cache root can use the local
+      # cache path. Everything else uses the GitHub cache API.
+      id: local-cache
+      shell: bash
+      env:
+        CACHE_ROOT: ${{ inputs.cache_root }}
+      run: |
+        if [[ "${{ runner.environment }}" == "self-hosted" && -d "$CACHE_ROOT" ]]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Configure local cache paths (self-hosted)
-      if: ${{ runner.environment == 'self-hosted' }}
+      if: ${{ steps.local-cache.outputs.present == 'true' }}
       shell: bash
       env:
         CACHE_ROOT: ${{ inputs.cache_root }}
@@ -78,12 +93,12 @@ runs:
         components: ${{ inputs.components }}
 
     - name: Restore Rust cache
-      if: ${{ runner.environment != 'self-hosted' }}
+      if: ${{ steps.local-cache.outputs.present != 'true' }}
       uses: Swatinem/rust-cache@v2
 
     - name: Restore CI deps cache (protoc)
       id: ci-deps-cache
-      if: ${{ inputs.install_ci_deps == 'true' && inputs.cache_ci_deps == 'true' && runner.environment != 'self-hosted' }}
+      if: ${{ inputs.install_ci_deps == 'true' && inputs.cache_ci_deps == 'true' && steps.local-cache.outputs.present != 'true' }}
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -92,7 +107,7 @@ runs:
         key: ci-deps-protoc-${{ runner.os }}-${{ steps.ci-deps-cache-version.outputs.cache_version }}
 
     - name: Restore CI deps from local cache (self-hosted)
-      if: ${{ inputs.install_ci_deps == 'true' && runner.environment == 'self-hosted' }}
+      if: ${{ inputs.install_ci_deps == 'true' && steps.local-cache.outputs.present == 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -112,7 +127,7 @@ runs:
       run: make ${{ inputs.ci_deps_target }}
 
     - name: Save CI deps to local cache (self-hosted)
-      if: ${{ inputs.install_ci_deps == 'true' && runner.environment == 'self-hosted' }}
+      if: ${{ inputs.install_ci_deps == 'true' && steps.local-cache.outputs.present == 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -127,7 +142,7 @@ runs:
         fi
 
     - name: Save CI deps cache (protoc)
-      if: ${{ inputs.install_ci_deps == 'true' && inputs.cache_ci_deps == 'true' && runner.environment != 'self-hosted' && steps.ci-deps-cache.outputs.cache-hit != 'true' }}
+      if: ${{ inputs.install_ci_deps == 'true' && inputs.cache_ci_deps == 'true' && steps.local-cache.outputs.present != 'true' && steps.ci-deps-cache.outputs.cache-hit != 'true' }}
       continue-on-error: true
       uses: actions/cache/save@v5
       with:
