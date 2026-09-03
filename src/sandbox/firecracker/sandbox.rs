@@ -42,6 +42,7 @@ use crate::sandbox::extra_drive::{
     prepare_extra_drives, DriveMount, ExtraDrive, ExtraDrivePrepareMode, ROOTFS_DRIVE_ID,
     USER_ROOTFS_DRIVE_ID,
 };
+use crate::sandbox::metering::SandboxMeter;
 use crate::sandbox::network::{NetworkManager, SandboxNetworkPolicy, Slot};
 use crate::sandbox::process::Executor;
 use crate::sandbox::ublk::{
@@ -896,6 +897,7 @@ impl FirecrackerSandbox {
         self.fc_instance
             .stop(self.runtime_policy.socket_timeout)
             .await?;
+        self.detach_meter();
 
         // Clear envd instance
         self.envd_instance = None;
@@ -1157,6 +1159,7 @@ impl Drop for FirecrackerSandbox {
         // Fire the best-effort stop notification (fire-and-forget, never
         // blocking drop) before releasing resources.
         self.custom_extension_hook_guard.take();
+        self.detach_meter();
         // In daemon mode, ublk devices survive sandbox drop. The daemon will
         // clean them up on its own shutdown, or they can be explicitly deleted
         // via the orchestrator's stop() path.
@@ -1177,6 +1180,22 @@ impl Drop for FirecrackerSandbox {
 // ── Private helpers ──────────────────────────────────────────────────────────
 
 impl FirecrackerSandbox {
+    /// Opens usage counters for the Firecracker process now owned by this
+    /// sandbox. Called once per boot or resume, after the process exists.
+    fn attach_meter(&self) {
+        if let Some(meter) = SandboxMeter::global() {
+            meter.attach(self.id, self.fc_instance.pid().ok(), self.work_dir.path());
+        }
+    }
+
+    /// Closes the usage counters once the Firecracker process is gone.
+    /// Idempotent, so both `stop()` and `Drop` may call it.
+    fn detach_meter(&self) {
+        if let Some(meter) = SandboxMeter::global() {
+            meter.detach(self.id);
+        }
+    }
+
     fn build(id: SandboxId, launch: LaunchMode) -> Result<Self> {
         let work_dir =
             create_firecracker_work_dir(launch.common().firecracker_work_base_dir.as_deref())?;
@@ -1366,6 +1385,7 @@ impl FirecrackerSandbox {
                 Some(&netns),
             )
             .await?;
+        self.attach_meter();
 
         let envd_base_url = format!(
             "http://{}:{}",
@@ -1596,6 +1616,9 @@ impl FirecrackerSandbox {
 
             interaction_ip
         };
+        // Both a freshly spawned and a warm-pool Firecracker now belong to
+        // this sandbox; a warm process moves out of the server's cgroup here.
+        self.attach_meter();
         if let Some(slot) = self.network_slot.as_mut() {
             slot.set_egress_policy(config.common.network_policy.as_ref())
                 .context("Failed to configure sandbox egress policy for resume")?;

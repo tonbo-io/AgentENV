@@ -7,7 +7,9 @@ use agentenv::image::ImageResolver;
 use agentenv::observability::{CpuTemplateDumpConfig, ObservabilityReporter, ObservabilityService};
 use agentenv::orchestrator::Orchestrator;
 use agentenv::overlaybd::OverlaybdP2pRuntime;
-use agentenv::sandbox::{FirecrackerPool, FirecrackerSandboxFactory, UblkDeviceManager};
+use agentenv::sandbox::{
+    FirecrackerPool, FirecrackerSandboxFactory, SandboxMeter, UblkDeviceManager,
+};
 use agentenv::snapshot::SnapshotManager;
 use agentenv::template::TemplateBuilder;
 use axum::serve::ListenerExt;
@@ -79,6 +81,10 @@ async fn main() -> anyhow::Result<()> {
 
     agentenv::privileges::require_runtime_capabilities()?;
     agentenv::privileges::clear_ambient_capabilities()?;
+
+    // Before any child process exists: the meter moves this process into a
+    // cgroup leaf of its own, and children inherit that placement.
+    SandboxMeter::init_global(&config.metering)?;
 
     let api_key = ApiKey::resolve(config)?;
 

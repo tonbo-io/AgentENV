@@ -347,6 +347,9 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${INSTALL_DIR}/server
 RuntimeDirectory=aenv
 RuntimeDirectoryMode=0750
+# Hands the unit's cgroup subtree to the service user so the server can give
+# each Firecracker process a cgroup leaf of its own for usage metering.
+Delegate=yes
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
 NoNewPrivileges=true

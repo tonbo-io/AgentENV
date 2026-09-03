@@ -4,6 +4,7 @@ pub(crate) mod custom_extension;
 mod envd;
 mod extra_drive;
 mod firecracker;
+pub mod metering;
 #[cfg(test)]
 pub(crate) mod mock;
 mod network;
@@ -35,6 +36,7 @@ pub use firecracker::{
     FirecrackerRuntimePolicy, FirecrackerSandbox, FirecrackerSandboxConfig,
     FirecrackerSandboxFactory, FirecrackerSnapshotConfig, FirecrackerSnapshotManifest,
 };
+pub use metering::{SandboxMeter, UsageCounters, UsageSample};
 pub(crate) use network::{prepare_runtime as prepare_network_runtime, NetworkManager};
 pub use network::{
     BaseSandboxNetworkPolicy, SandboxNetworkEgressPolicy, SandboxNetworkPolicy,

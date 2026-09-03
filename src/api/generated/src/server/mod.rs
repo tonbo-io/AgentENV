@@ -92,6 +92,10 @@ where
             "/sandboxes/{sandbox_id}/timeout",
             post(sandboxes_sandbox_id_timeout_post::<I, A, E, C>),
         )
+        .route(
+            "/sandboxes/{sandbox_id}/usage",
+            get(sandboxes_sandbox_id_usage_get::<I, A, E, C>),
+        )
         .route("/snapshots", get(snapshots_get::<I, A, E, C>))
         .route(
             "/snapshots/{snapshot_id}",
@@ -3062,6 +3066,155 @@ where
                                                   response.body(Body::from(body_content))
                                                 },
                                                 apis::sandboxes::SandboxesSandboxIdTimeoutPostResponse::Status500_ServerError
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(500);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                            },
+                                            Err(why) => {
+                                                    // Application code returned an error. This should not happen, as the implementation should
+                                                    // return a valid response.
+                                                    return api_impl.as_ref().handle_error(&method, &host, &cookies, why).await;
+                                            },
+                                        };
+
+    resp.map_err(|e| {
+        error!(error = ?e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+#[tracing::instrument(skip_all)]
+fn sandboxes_sandbox_id_usage_get_validation(
+    path_params: models::SandboxesSandboxIdUsageGetPathParams,
+) -> std::result::Result<(models::SandboxesSandboxIdUsageGetPathParams,), ValidationErrors> {
+    path_params.validate()?;
+
+    Ok((path_params,))
+}
+/// SandboxesSandboxIdUsageGet - GET /sandboxes/{sandboxID}/usage
+#[tracing::instrument(skip_all)]
+async fn sandboxes_sandbox_id_usage_get<I, A, E, C>(
+    method: Method,
+    TypedHeader(host): TypedHeader<Host>,
+    cookies: CookieJar,
+    headers: HeaderMap,
+    Path(path_params): Path<models::SandboxesSandboxIdUsageGetPathParams>,
+    State(api_impl): State<I>,
+) -> Result<Response, StatusCode>
+where
+    I: AsRef<A> + Send + Sync,
+    A: apis::sandboxes::Sandboxes<E, Claims = C>
+        + apis::ApiKeyAuthHeader<Claims = C>
+        + apis::ApiAuthBasic<Claims = C>
+        + Send
+        + Sync,
+    E: std::fmt::Debug + Send + Sync + 'static,
+{
+    // Authentication
+    let claims_in_header = api_impl
+        .as_ref()
+        .extract_claims_from_header(&headers, "X-Team-ID")
+        .await;
+    let claims_in_auth_header = api_impl
+        .as_ref()
+        .extract_claims_from_auth_header(apis::BasicAuthKind::Bearer, &headers, "authorization")
+        .await;
+    let claims = None.or(claims_in_header).or(claims_in_auth_header);
+    let Some(claims) = claims else {
+        return response_with_status_code_only(StatusCode::UNAUTHORIZED);
+    };
+
+    #[allow(clippy::redundant_closure)]
+    let validation =
+        tokio::task::spawn_blocking(move || sandboxes_sandbox_id_usage_get_validation(path_params))
+            .await
+            .unwrap();
+
+    let Ok((path_params,)) = validation else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(validation.unwrap_err().to_string()))
+            .map_err(|_| StatusCode::BAD_REQUEST);
+    };
+
+    let result = api_impl
+        .as_ref()
+        .sandboxes_sandbox_id_usage_get(&method, &host, &cookies, &claims, &path_params)
+        .await;
+
+    let mut response = Response::builder();
+
+    let resp = match result {
+                                            Ok(rsp) => match rsp {
+                                                apis::sandboxes::SandboxesSandboxIdUsageGetResponse::Status200_TheSandboxRuntimeUsage
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(200);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::sandboxes::SandboxesSandboxIdUsageGetResponse::Status401_AuthenticationError
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(401);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::sandboxes::SandboxesSandboxIdUsageGetResponse::Status404_NotFound
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(404);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::sandboxes::SandboxesSandboxIdUsageGetResponse::Status500_ServerError
                                                     (body)
                                                 => {
                                                   let mut response = response.status(500);

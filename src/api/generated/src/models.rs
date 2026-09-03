@@ -175,6 +175,12 @@ pub struct SandboxesSandboxIdTimeoutPostPathParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxesSandboxIdUsageGetPathParams {
+    pub sandbox_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct V2SandboxesGetQueryParams {
     /// Metadata query used to filter the sandboxes (e.g. \"user=abc&app=prod\"). Each key and values must be URL encoded.
     #[serde(rename = "metadata")]
@@ -6855,6 +6861,347 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SandboxTimeo
                     }
                     std::result::Result::Err(err) => std::result::Result::Err(format!(
                         r#"Unable to convert header value '{value}' into SandboxTimeoutRequest - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+/// Cumulative host resource use of the sandbox's most recent runtime instance on this node. A runtime instance is one Firecracker process: it starts when the sandbox boots or resumes here and ends when that process stops. Every counter is monotonic within an instance and starts from zero for the next one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxUsage {
+    #[serde(rename = "sandboxID")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub sandbox_id: String,
+
+    /// Changes on every boot or resume of the sandbox on this node
+    #[serde(rename = "runtimeInstanceID")]
+    pub runtime_instance_id: uuid::Uuid,
+
+    /// False once the runtime instance stopped; the counters are then final
+    #[serde(rename = "running")]
+    pub running: bool,
+
+    /// When the counters for this runtime instance opened
+    #[serde(rename = "startedAt")]
+    pub started_at: chrono::DateTime<chrono::Utc>,
+
+    /// When the counters were last updated
+    #[serde(rename = "sampledAt")]
+    pub sampled_at: chrono::DateTime<chrono::Utc>,
+
+    #[serde(rename = "sampleCount")]
+    pub sample_count: u64,
+
+    /// Whether the Firecracker process runs in a cgroup of its own. When false the CPU and memory counters are absent and only disk is measured.
+    #[serde(rename = "cgroupAccounting")]
+    pub cgroup_accounting: bool,
+
+    /// Host CPU time consumed by the Firecracker process, in microseconds
+    #[serde(rename = "cpuUsageMicros")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_micros: Option<u64>,
+
+    /// Host memory currently charged to the Firecracker process
+    #[serde(rename = "memoryCurrentBytes")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_current_bytes: Option<u64>,
+
+    /// Integral of memoryCurrentBytes over the instance lifetime
+    #[serde(rename = "memoryByteSeconds")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_byte_seconds: Option<u64>,
+
+    /// Bytes the runtime work directory currently occupies on local disk
+    #[serde(rename = "diskAllocatedBytes")]
+    pub disk_allocated_bytes: u64,
+
+    /// Integral of diskAllocatedBytes over the instance lifetime
+    #[serde(rename = "diskByteSeconds")]
+    pub disk_byte_seconds: u64,
+}
+
+impl SandboxUsage {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        sandbox_id: String,
+        runtime_instance_id: uuid::Uuid,
+        running: bool,
+        started_at: chrono::DateTime<chrono::Utc>,
+        sampled_at: chrono::DateTime<chrono::Utc>,
+        sample_count: u64,
+        cgroup_accounting: bool,
+        disk_allocated_bytes: u64,
+        disk_byte_seconds: u64,
+    ) -> SandboxUsage {
+        SandboxUsage {
+            sandbox_id,
+            runtime_instance_id,
+            running,
+            started_at,
+            sampled_at,
+            sample_count,
+            cgroup_accounting,
+            cpu_usage_micros: None,
+            memory_current_bytes: None,
+            memory_byte_seconds: None,
+            disk_allocated_bytes,
+            disk_byte_seconds,
+        }
+    }
+}
+
+/// Converts the SandboxUsage value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for SandboxUsage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            Some("sandboxID".to_string()),
+            Some(self.sandbox_id.to_string()),
+            // Skipping runtimeInstanceID in query parameter serialization
+            Some("running".to_string()),
+            Some(self.running.to_string()),
+            // Skipping startedAt in query parameter serialization
+
+            // Skipping sampledAt in query parameter serialization
+            Some("sampleCount".to_string()),
+            Some(self.sample_count.to_string()),
+            Some("cgroupAccounting".to_string()),
+            Some(self.cgroup_accounting.to_string()),
+            self.cpu_usage_micros.as_ref().map(|cpu_usage_micros| {
+                ["cpuUsageMicros".to_string(), cpu_usage_micros.to_string()].join(",")
+            }),
+            self.memory_current_bytes
+                .as_ref()
+                .map(|memory_current_bytes| {
+                    [
+                        "memoryCurrentBytes".to_string(),
+                        memory_current_bytes.to_string(),
+                    ]
+                    .join(",")
+                }),
+            self.memory_byte_seconds
+                .as_ref()
+                .map(|memory_byte_seconds| {
+                    [
+                        "memoryByteSeconds".to_string(),
+                        memory_byte_seconds.to_string(),
+                    ]
+                    .join(",")
+                }),
+            Some("diskAllocatedBytes".to_string()),
+            Some(self.disk_allocated_bytes.to_string()),
+            Some("diskByteSeconds".to_string()),
+            Some(self.disk_byte_seconds.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a SandboxUsage value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for SandboxUsage {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub sandbox_id: Vec<String>,
+            pub runtime_instance_id: Vec<uuid::Uuid>,
+            pub running: Vec<bool>,
+            pub started_at: Vec<chrono::DateTime<chrono::Utc>>,
+            pub sampled_at: Vec<chrono::DateTime<chrono::Utc>>,
+            pub sample_count: Vec<u64>,
+            pub cgroup_accounting: Vec<bool>,
+            pub cpu_usage_micros: Vec<u64>,
+            pub memory_current_bytes: Vec<u64>,
+            pub memory_byte_seconds: Vec<u64>,
+            pub disk_allocated_bytes: Vec<u64>,
+            pub disk_byte_seconds: Vec<u64>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing SandboxUsage".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "sandboxID" => intermediate_rep.sandbox_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "runtimeInstanceID" => intermediate_rep.runtime_instance_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "running" => intermediate_rep.running.push(
+                        <bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "startedAt" => intermediate_rep.started_at.push(
+                        <chrono::DateTime<chrono::Utc> as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "sampledAt" => intermediate_rep.sampled_at.push(
+                        <chrono::DateTime<chrono::Utc> as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "sampleCount" => intermediate_rep.sample_count.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "cgroupAccounting" => intermediate_rep.cgroup_accounting.push(
+                        <bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "cpuUsageMicros" => intermediate_rep.cpu_usage_micros.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "memoryCurrentBytes" => intermediate_rep.memory_current_bytes.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "memoryByteSeconds" => intermediate_rep.memory_byte_seconds.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "diskAllocatedBytes" => intermediate_rep.disk_allocated_bytes.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "diskByteSeconds" => intermediate_rep.disk_byte_seconds.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing SandboxUsage".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(SandboxUsage {
+            sandbox_id: intermediate_rep
+                .sandbox_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sandboxID missing in SandboxUsage".to_string())?,
+            runtime_instance_id: intermediate_rep
+                .runtime_instance_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "runtimeInstanceID missing in SandboxUsage".to_string())?,
+            running: intermediate_rep
+                .running
+                .into_iter()
+                .next()
+                .ok_or_else(|| "running missing in SandboxUsage".to_string())?,
+            started_at: intermediate_rep
+                .started_at
+                .into_iter()
+                .next()
+                .ok_or_else(|| "startedAt missing in SandboxUsage".to_string())?,
+            sampled_at: intermediate_rep
+                .sampled_at
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sampledAt missing in SandboxUsage".to_string())?,
+            sample_count: intermediate_rep
+                .sample_count
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sampleCount missing in SandboxUsage".to_string())?,
+            cgroup_accounting: intermediate_rep
+                .cgroup_accounting
+                .into_iter()
+                .next()
+                .ok_or_else(|| "cgroupAccounting missing in SandboxUsage".to_string())?,
+            cpu_usage_micros: intermediate_rep.cpu_usage_micros.into_iter().next(),
+            memory_current_bytes: intermediate_rep.memory_current_bytes.into_iter().next(),
+            memory_byte_seconds: intermediate_rep.memory_byte_seconds.into_iter().next(),
+            disk_allocated_bytes: intermediate_rep
+                .disk_allocated_bytes
+                .into_iter()
+                .next()
+                .ok_or_else(|| "diskAllocatedBytes missing in SandboxUsage".to_string())?,
+            disk_byte_seconds: intermediate_rep
+                .disk_byte_seconds
+                .into_iter()
+                .next()
+                .ok_or_else(|| "diskByteSeconds missing in SandboxUsage".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<SandboxUsage> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<SandboxUsage>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<SandboxUsage>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for SandboxUsage - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SandboxUsage> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <SandboxUsage as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into SandboxUsage - {err}"#
                     )),
                 }
             }

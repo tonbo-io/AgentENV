@@ -18,8 +18,8 @@ use crate::orchestrator::{
 };
 use crate::sandbox::CustomExtensionParams;
 use crate::sandbox::{
-    BaseSandboxNetworkPolicy, SandboxNetworkEgressPolicy, SandboxNetworkPolicy,
-    SandboxSnapshotSourceDisposition,
+    BaseSandboxNetworkPolicy, SandboxMeter, SandboxNetworkEgressPolicy, SandboxNetworkPolicy,
+    SandboxSnapshotSourceDisposition, UsageCounters,
 };
 use crate::snapshot::{
     CommandContext, SnapshotAlias, SnapshotId, SnapshotPublishMetadata, SnapshotPublishSource,
@@ -35,6 +35,24 @@ use super::ApiImpl;
 
 fn sandbox_not_found(id: impl Into<String>) -> models::Error {
     ApiImpl::error(404, format!("sandbox {} not found", id.into()))
+}
+
+fn usage_model(sandbox_id: SandboxId, counters: UsageCounters) -> models::SandboxUsage {
+    models::SandboxUsage {
+        sandbox_id: sandbox_id.to_string(),
+        runtime_instance_id: counters.runtime_instance_id,
+        running: counters.running,
+        started_at: counters.started_at.into(),
+        sampled_at: counters.sampled_at.into(),
+        sample_count: counters.sample_count,
+        cgroup_accounting: counters.cpu_usage_micros.is_some()
+            || counters.memory_current_bytes.is_some(),
+        cpu_usage_micros: counters.cpu_usage_micros,
+        memory_current_bytes: counters.memory_current_bytes,
+        memory_byte_seconds: counters.memory_byte_seconds,
+        disk_allocated_bytes: counters.disk_allocated_bytes,
+        disk_byte_seconds: counters.disk_byte_seconds,
+    }
 }
 
 fn default_sandbox_timeout() -> Duration {
@@ -1032,6 +1050,52 @@ impl Sandboxes<()> for ApiImpl {
                 SandboxesSandboxIdCustomExtensionParamsGetResponse::Status500_ServerError(err.into()),
             ),
         }
+    }
+
+    async fn sandboxes_sandbox_id_usage_get(
+        &self,
+        _method: &Method,
+        _host: &Host,
+        _cookies: &CookieJar,
+        _claims: &Self::Claims,
+        path_params: &models::SandboxesSandboxIdUsageGetPathParams,
+    ) -> Result<SandboxesSandboxIdUsageGetResponse, ()> {
+        let path_id = &path_params.sandbox_id;
+        let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
+            return Ok(SandboxesSandboxIdUsageGetResponse::Status404_NotFound(
+                sandbox_not_found(path_id),
+            ));
+        };
+        match self.orchestrator.get_sandbox(&sandbox_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Ok(SandboxesSandboxIdUsageGetResponse::Status404_NotFound(
+                    sandbox_not_found(path_id),
+                ));
+            }
+            Err(err) => {
+                return Ok(SandboxesSandboxIdUsageGetResponse::Status500_ServerError(
+                    err.into(),
+                ));
+            }
+        }
+        // A known sandbox without counters never ran on this node since the
+        // meter started: a paused sandbox restored across a server restart,
+        // or one whose finished counters aged out of retention.
+        let Some(counters) = SandboxMeter::global().and_then(|meter| meter.usage(&sandbox_id))
+        else {
+            return Ok(SandboxesSandboxIdUsageGetResponse::Status404_NotFound(
+                ApiImpl::error(
+                    404,
+                    format!("sandbox {sandbox_id} has no metered runtime on this node"),
+                ),
+            ));
+        };
+        Ok(
+            SandboxesSandboxIdUsageGetResponse::Status200_TheSandboxRuntimeUsage(usage_model(
+                sandbox_id, counters,
+            )),
+        )
     }
 
     async fn sandboxes_sandbox_id_custom_extension_params_patch(

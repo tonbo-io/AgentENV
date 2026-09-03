@@ -370,6 +370,17 @@ Custom extension service configuration. When `url` is unset, the integration is 
 | `url` | string | unset | HTTP base URL of the custom extension service. When set, AgentENV invokes sandbox lifecycle hooks under `POST {url}/sandbox-hook/*`. |
 | `timeout_ms` | integer | `5000` | Timeout for each custom extension HTTP call, in milliseconds. |
 
+## `[metering]`
+
+Per-sandbox host resource metering exposed by `GET /sandboxes/{sandboxID}/usage`. See [Usage Metering](../concepts/usage-metering.md).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `true` | Meter each sandbox runtime's CPU time, resident memory, and allocated disk. |
+| `sample_interval_secs` | integer | `5` | Seconds between samples of every running sandbox. |
+| `cgroup_root` | path | `/sys/fs/cgroup` | cgroup v2 mount point. The server's own cgroup under it must be writable; otherwise CPU and memory counters are reported as absent and only disk is measured. |
+| `finished_retention_secs` | integer | `3600` | Seconds a stopped runtime instance's final counters stay readable. |
+
 ## `[snapshot]`
 
 Snapshot storage/build configuration.

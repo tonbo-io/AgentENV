@@ -137,6 +137,8 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[config(nested)]
     pub custom_extension: CustomExtensionConfig,
+    #[config(nested)]
+    pub metering: MeteringConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Config)]
@@ -584,6 +586,25 @@ pub struct CustomExtensionConfig {
     pub timeout_ms: u64,
 }
 
+/// Per-sandbox host resource metering: CPU time and resident memory from a
+/// cgroup v2 leaf per Firecracker process, plus allocated disk of the runtime
+/// work directory. Exposed by `GET /sandboxes/{sandboxID}/usage`.
+#[derive(Debug, Config, Clone)]
+pub struct MeteringConfig {
+    #[config(default = true, env = "AENV_METERING_ENABLED")]
+    pub enabled: bool,
+    /// Seconds between samples of every running sandbox.
+    #[config(default = 5u64, env = "AENV_METERING_SAMPLE_INTERVAL_SECS")]
+    pub sample_interval_secs: u64,
+    /// cgroup v2 mount point. The server's own cgroup under it must be
+    /// writable; otherwise CPU and memory counters are reported as absent.
+    #[config(default = "/sys/fs/cgroup")]
+    pub cgroup_root: PathBuf,
+    /// Seconds a stopped runtime instance's final counters stay readable.
+    #[config(default = 3600u64)]
+    pub finished_retention_secs: u64,
+}
+
 #[derive(Debug, Config, Clone)]
 pub struct P2pConfig {
     #[config(default = false)]
@@ -644,6 +665,7 @@ impl_config_default!(
     OrchestratorConfig,
     P2pConfig,
     CustomExtensionConfig,
+    MeteringConfig,
 );
 
 impl AppConfig {

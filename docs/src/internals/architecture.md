@@ -152,6 +152,17 @@ The observability subsystem has two configuration-controlled scopes:
 - `observability.enabled`: controls whether the node observability service is constructed at all. When disabled, node/admin observability endpoints degrade rather than trying to synthesize partial snapshots.
 - `observability.scheduler_report.enabled`: controls optional scheduler heartbeat reporting. It can be overridden by `AENV_OBSERVABILITY_SCHEDULER_REPORT_ENABLED`. When enabled, reporting requires `[cluster].scheduler_endpoint` or `AENV_OBSERVABILITY_SCHEDULER_ENDPOINT`.
 
+### Sandbox Usage Metering
+
+Node observability reports what sandboxes were *allocated*; `src/sandbox/metering/` reports what each one *consumed*, for control planes that bill or schedule by measured use on oversubscribed nodes.
+
+- `cgroup.rs` owns a cgroup v2 subtree under the server's own cgroup. At startup the server moves itself (and every process already there, such as the ublk daemon) into `agentenv/`, enables `cpu` and `memory` for its children, and creates `sandboxes/`. `FirecrackerSandbox` places its Firecracker process into `sandboxes/<sandbox id>/` right after spawn (fresh boot) or after claiming a warm-pool process (resume), and the leaf is removed once the process has exited. No limits are written; the leaf exists only for accounting.
+- `disk.rs` measures allocated blocks (`st_blocks * 512`, symlinks skipped) under the sandbox work directory, because the ublk daemon writes the overlaybd upper layers on the sandbox's behalf and the Firecracker cgroup's `io.stat` never sees them.
+- `counters.rs` folds samples into per-runtime-instance `UsageCounters`: monotonic `cpu_usage_micros`, the `memory_current_bytes` and `disk_allocated_bytes` gauges, and their byte-second integrals (left Riemann over each sampling interval). Every boot or resume opens a new runtime instance ID with zeroed counters, so a consumer can distinguish a reset from a decrease.
+- `SandboxMeter` (`mod.rs`) is a process-wide side registry keyed by `SandboxId`, sampled by a background task every `metering.sample_interval_secs`. Sampling never takes a sandbox's backend lock, so a long pause or snapshot cannot stall it. Finished instances keep their final counters for `metering.finished_retention_secs`.
+- `GET /sandboxes/{sandboxID}/usage` (`src/api/impls/sandbox.rs`) exposes the counters. Without a writable cgroup tree the server logs a warning at startup, `cgroupAccounting` is `false`, and only disk is measured.
+- Because the server now lives one level below its container's cgroup, `src/observability/host.rs` reads `cpu.max` and `memory.max` from the process's own cgroup and every ancestor, and applies the tightest limit it finds.
+
 ### P2P Artifact Transport
 
 `src/p2p/` provides a project-wide artifact transport abstraction for modules that need to exchange validated files between runtime nodes. Consumers depend on the `P2pTransport` trait, whose main operations are `lookup`, `lookup_with_hints`, `fetch`, `publish`, `unpublish`, `local_endpoint`, and `shutdown`.
