@@ -72,21 +72,6 @@ spec:
               # child processes (whose oom_score_adj we explicitly set to 1000) when
               # the host runs out of memory. Change this value accordingly.
               memory: 8Gi
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/sh
-                  - "-c"
-                  - |
-                    # cgroup v2: disable group OOM kill for this container's cgroup.
-                    # By default Kubernetes sets memory.oom.group=1, which means
-                    # the entire cgroup (including the agentenv server) is killed
-                    # whenever any process inside it is OOM-killed. Setting it to 0
-                    # makes the OOM killer target individual processes, so a
-                    # firecracker child being killed does not take down the server.
-                    CGROUP="$(awk -F: '/^0::/{print $3}' /proc/self/cgroup)"
-                    echo 0 > /sys/fs/cgroup/$CGROUP/memory.oom.group
           securityContext:
             privileged: true
           startupProbe:
