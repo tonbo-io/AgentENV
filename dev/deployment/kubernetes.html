@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-26f21b1f.js";
+            window.path_to_searchindex_js = "../searchindex-7b86345a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c868df7a.js"></script>
@@ -208,6 +208,7 @@
 <li>Kubernetes worker nodes with <strong>Linux kernel 6.8+</strong></li>
 <li><code>/dev/kvm</code> access on every runtime worker</li>
 <li>Runtime Pods run privileged</li>
+<li>The runtime server takes over its container’s cgroup v2 directory for per-sandbox usage metering and clears <code>memory.oom.group</code> there itself, so an OOM kill stays with one Firecracker process instead of the whole container; no lifecycle hook is needed for that</li>
 <li>Docker</li>
 <li><code>build-essential</code> (<code>sudo apt install -y build-essential</code>)</li>
 <li><code>kubectl</code> with Kustomize support</li>
