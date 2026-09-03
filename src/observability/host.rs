@@ -189,9 +189,11 @@ impl HostMetricsCollector {
 
     fn read_cgroup_cpu_limit_count(&self) -> Option<u32> {
         self.cgroup_files
-            .read_first(&self.cgroup_files.cpu_max)
-            .as_deref()
-            .and_then(Self::parse_cgroup_v2_cpu_limit)
+            .cpu_max
+            .iter()
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .filter_map(|content| Self::parse_cgroup_v2_cpu_limit(&content))
+            .min()
     }
 
     fn parse_cgroup_v2_cpu_limit(content: &str) -> Option<u32> {
@@ -216,20 +218,27 @@ impl HostMetricsCollector {
         Some(cmp::max(quota / period, 1).min(u32::MAX as u64) as u32)
     }
 
+    /// The tightest memory limit on the process's cgroup or any ancestor,
+    /// with usage read at that same level. The server moves itself into a
+    /// leaf below its container's cgroup for sandbox metering, so the
+    /// container limit is one level up from where `/proc/self/cgroup` points.
     fn read_cgroup_memory_limit(&self) -> Option<CgroupMemoryLimit> {
         self.cgroup_files
-            .read_first(&self.cgroup_files.memory_max)
-            .as_deref()
-            .and_then(|limit| {
-                Self::parse_cgroup_memory_limit(limit).map(|limit_bytes| CgroupMemoryLimit {
+            .memory_max
+            .iter()
+            .zip(&self.cgroup_files.memory_current)
+            .filter_map(|(limit_path, usage_path)| {
+                let limit = fs::read_to_string(limit_path).ok()?;
+                let limit_bytes = Self::parse_cgroup_memory_limit(&limit)?;
+                Some(CgroupMemoryLimit {
                     limit_bytes,
-                    used_bytes: self
-                        .cgroup_files
-                        .read_first(&self.cgroup_files.memory_current)
+                    used_bytes: fs::read_to_string(usage_path)
+                        .ok()
                         .as_deref()
                         .and_then(Self::parse_cgroup_memory_usage),
                 })
             })
+            .min_by_key(|limit| limit.limit_bytes)
     }
 
     fn parse_cgroup_memory_limit(content: &str) -> Option<u64> {
@@ -307,12 +316,11 @@ impl CgroupFilePaths {
             memory_current: cgroup_file_candidates(content, cgroup_root.as_ref(), "memory.current"),
         }
     }
-
-    fn read_first(&self, paths: &[PathBuf]) -> Option<String> {
-        paths.iter().find_map(|path| fs::read_to_string(path).ok())
-    }
 }
 
+/// `file_name` in the process's own cgroup v2 directory and in each ancestor
+/// up to the root, nearest first. A limit set on a pod or a slice binds every
+/// cgroup below it, so readers consider all of them.
 fn cgroup_file_candidates(
     proc_self_cgroup: &str,
     cgroup_root: &Path,
@@ -326,7 +334,14 @@ fn cgroup_file_candidates(
         let cgroup_path = fields.next().unwrap_or_default();
 
         if controllers.is_empty() {
-            candidates.push(cgroup_path_join(cgroup_root, cgroup_path, file_name));
+            let mut relative = cgroup_path.trim_matches('/');
+            loop {
+                candidates.push(cgroup_path_join(cgroup_root, relative, file_name));
+                if relative.is_empty() {
+                    break;
+                }
+                relative = relative.rfind('/').map_or("", |index| &relative[..index]);
+            }
         }
     }
 
@@ -406,9 +421,12 @@ fn decode_mount_field(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::{Arc, RwLock};
+
     use super::{
         cgroup_file_candidates, cpu_percent_between, decode_mount_field, parse_mounts,
-        CgroupFilePaths, CpuSample, HostMetricsCollector, MountEntry,
+        CgroupFilePaths, CgroupMemoryLimit, CpuSample, HostMetricsCollector, MountEntry,
     };
 
     #[test]
@@ -451,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn cgroup_file_candidates_resolves_v2_path_once() {
+    fn cgroup_file_candidates_lists_own_cgroup_then_ancestors() {
         let paths = cgroup_file_candidates(
             "0::/kubepods.slice/pod123/container456\n",
             std::path::Path::new("/sys/fs/cgroup"),
@@ -459,9 +477,18 @@ mod tests {
         );
         assert_eq!(
             paths,
-            vec![std::path::PathBuf::from(
-                "/sys/fs/cgroup/kubepods.slice/pod123/container456/cpu.max"
-            )]
+            vec![
+                std::path::PathBuf::from(
+                    "/sys/fs/cgroup/kubepods.slice/pod123/container456/cpu.max"
+                ),
+                std::path::PathBuf::from("/sys/fs/cgroup/kubepods.slice/pod123/cpu.max"),
+                std::path::PathBuf::from("/sys/fs/cgroup/kubepods.slice/cpu.max"),
+                std::path::PathBuf::from("/sys/fs/cgroup/cpu.max"),
+            ]
+        );
+        assert_eq!(
+            cgroup_file_candidates("0::/\n", std::path::Path::new("/sys/fs/cgroup"), "cpu.max"),
+            vec![std::path::PathBuf::from("/sys/fs/cgroup/cpu.max")]
         );
     }
 
@@ -473,17 +500,52 @@ mod tests {
         );
 
         assert_eq!(
-            paths.cpu_max,
-            vec![std::path::PathBuf::from(
+            paths.cpu_max.first(),
+            Some(&std::path::PathBuf::from(
                 "/sys/fs/cgroup/kubepods.slice/pod-a/container-a/cpu.max"
-            )]
+            ))
         );
         assert_eq!(
-            paths.memory_current,
-            vec![std::path::PathBuf::from(
+            paths.memory_current.first(),
+            Some(&std::path::PathBuf::from(
                 "/sys/fs/cgroup/kubepods.slice/pod-a/container-a/memory.current"
-            )]
+            ))
         );
+        assert_eq!(paths.memory_max.len(), paths.memory_current.len());
+    }
+
+    #[test]
+    fn tightest_ancestor_limit_wins_with_usage_read_at_that_level() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let container = root.join("pod").join("container").join("agentenv");
+        fs::create_dir_all(&container).unwrap();
+        fs::write(container.join("memory.max"), "max\n").unwrap();
+        fs::write(container.join("memory.current"), "10\n").unwrap();
+        fs::write(root.join("pod/container/memory.max"), "2048\n").unwrap();
+        fs::write(root.join("pod/container/memory.current"), "1500\n").unwrap();
+        fs::write(root.join("pod/memory.max"), "4096\n").unwrap();
+        fs::write(root.join("pod/memory.current"), "3000\n").unwrap();
+        fs::write(container.join("cpu.max"), "max 100000\n").unwrap();
+        fs::write(root.join("pod/container/cpu.max"), "400000 100000\n").unwrap();
+        fs::write(root.join("pod/cpu.max"), "200000 100000\n").unwrap();
+
+        let collector = HostMetricsCollector {
+            previous_cpu: Arc::new(RwLock::new(None)),
+            cgroup_files: Arc::new(CgroupFilePaths::from_proc_self_cgroup(
+                "0::/pod/container/agentenv\n",
+                root,
+            )),
+        };
+
+        assert_eq!(
+            collector.read_cgroup_memory_limit(),
+            Some(CgroupMemoryLimit {
+                limit_bytes: 2048,
+                used_bytes: Some(1500),
+            })
+        );
+        assert_eq!(collector.read_cgroup_cpu_limit_count(), Some(2));
     }
 
     #[test]

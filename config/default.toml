@@ -134,6 +134,18 @@ peer_discovery_refresh_interval_secs = 5
 # Timeout in milliseconds for non-stop extension hook calls.
 # timeout_ms = 5000
 
+[metering]
+# Meter each sandbox runtime's CPU time, resident memory, and allocated disk.
+# CPU and memory need a writable cgroup v2 tree under cgroup_root; without one
+# the usage endpoint reports them as absent and still measures disk.
+enabled = true
+# Seconds between samples of every running sandbox.
+sample_interval_secs = 5
+# cgroup v2 mount point holding the server's own cgroup.
+cgroup_root = "/sys/fs/cgroup"
+# Seconds a stopped runtime instance's final counters stay readable.
+finished_retention_secs = 3600
+
 [cluster]
 # Shared scheduler gRPC endpoint for node reporting and P2P peer discovery.
 # scheduler_endpoint = "http://127.0.0.1:9090"

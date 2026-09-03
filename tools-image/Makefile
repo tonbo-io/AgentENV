@@ -86,9 +86,14 @@ check-publish-image:
 		exit 1; \
 	}
 
+# Extra buildx flags, for example a CI layer cache:
+#   BUILDX_CACHE_ARGS="--cache-from type=gha,scope=tools --cache-to type=gha,scope=tools,mode=max"
+BUILDX_CACHE_ARGS ?=
+
 build: check-buildx check-tools-version
 	mkdir -p "$(OUTPUT_DIR)"
 	"$(DOCKER)" buildx build \
+		$(BUILDX_CACHE_ARGS) \
 		--platform "$(PLATFORM)" \
 		--target artifact \
 		--build-arg "TOOLS_VERSION=$(TOOLS_VERSION)" \

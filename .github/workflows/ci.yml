@@ -39,7 +39,7 @@ on:
 
 jobs:
   guest-init:
-    runs-on: ubuntu-22.04
+    runs-on: depot-ubuntu-22.04-8
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -51,11 +51,13 @@ jobs:
       - name: Verify container supply chain
         run: python3 scripts/tests/verify-container-supply-chain.py
       - uses: docker/setup-buildx-action@v4
+      # Exposes the Actions cache token to a raw `docker buildx build`.
+      - uses: crazy-max/ghaction-github-runtime@v4
       - name: Build tools drive
-        run: make -C tools-image build TOOLS_VERSION=0.0.0-ci ARCH=amd64 OUTPUT_DIR="${{ runner.temp }}/agentenv-tools"
+        run: make -C tools-image build TOOLS_VERSION=0.0.0-ci ARCH=amd64 OUTPUT_DIR="${{ runner.temp }}/agentenv-tools" BUILDX_CACHE_ARGS="--cache-from type=gha,scope=tools-image-amd64 --cache-to type=gha,scope=tools-image-amd64,mode=max,ignore-error=true"
 
   fmt:
-    runs-on: ubuntu-22.04
+    runs-on: depot-ubuntu-22.04-8
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-ci-setup
@@ -66,7 +68,7 @@ jobs:
         run: make fmt
 
   clippy:
-    runs-on: ubuntu-22.04
+    runs-on: depot-ubuntu-22.04-8
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-ci-setup

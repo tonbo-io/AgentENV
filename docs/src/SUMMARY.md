@@ -33,6 +33,7 @@
 - [Sandboxes](./concepts/sandboxes.md)
 - [Snapshots](./concepts/snapshots.md)
 - [Custom Extension](./concepts/custom-extension.md)
+- [Usage Metering](./concepts/usage-metering.md)
 - [Proxy](./concepts/proxy.md)
 
 # API Reference
