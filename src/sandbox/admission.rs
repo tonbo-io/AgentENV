@@ -399,7 +399,12 @@ impl Drop for AdmissionGuard {
 
 fn set_memory(leaf: &Path, bytes: u64) -> Result<()> {
     fs::write(leaf.join("memory.max"), bytes.to_string())?;
-    fs::write(leaf.join("memory.high"), (bytes / 2).to_string())?;
+    // Half-budget usage triggers an early growth attempt, not a kernel
+    // throttle. If growth is denied, the already reserved memory must remain
+    // usable: memory.high at half the budget stalls a 128 GiB guest's kernel
+    // initialization indefinitely even while memory.max has ample room.
+    // The hard limit and group OOM enforce isolation when capacity is exhausted.
+    fs::write(leaf.join("memory.high"), "max")?;
     Ok(())
 }
 
