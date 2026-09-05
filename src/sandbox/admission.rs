@@ -40,7 +40,7 @@ struct Entry {
     leaf: PathBuf,
     disk_path: PathBuf,
     process: Option<ProcessHandle>,
-    watchdog: Option<Watchdog>,
+    watchdog: Option<Arc<Mutex<Watchdog>>>,
     released: bool,
 }
 
@@ -71,6 +71,21 @@ impl NodeAdmission {
         let root = SandboxMeter::global()
             .context("admission requires metering")?
             .cgroup_directory()?;
+        // A server restart must not forget another still-populated runtime's
+        // hard limit. The supervisor must reap it before this node is ready.
+        for leaf in fs::read_dir(&root)? {
+            let leaf = leaf?.path();
+            if leaf.is_dir()
+                && !fs::read_to_string(leaf.join("cgroup.procs"))?
+                    .trim()
+                    .is_empty()
+            {
+                bail!(
+                    "unreaped runtime cgroup {} prevents admission startup",
+                    leaf.display()
+                );
+            }
+        }
         let (capacity, _) = memory_capacity(&root)?;
         let budget = capacity / 100 * config.memory_percent;
         let identities = LocalKvStore::open(&config.state_path, LocalStoreDurability::Sync).await?;
@@ -200,19 +215,24 @@ impl NodeAdmission {
         self.validate_lease(lease)?;
         let owner = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
-            let mut ledger = owner.ledger.lock().unwrap();
-            let entry = ledger
-                .entries
-                .get_mut(&lease.activation_id)
-                .context("activation has no admission")?;
-            if entry.sandbox_id != sandbox || entry.released {
-                bail!("execution lease lost its runtime fence");
-            }
-            entry
-                .watchdog
-                .as_mut()
-                .context("runtime has no execution watchdog")?
-                .renew(lease)
+            let watchdog = {
+                let ledger = owner.ledger.lock().unwrap();
+                let entry = ledger
+                    .entries
+                    .get(&lease.activation_id)
+                    .context("activation has no admission")?;
+                if entry.sandbox_id != sandbox || entry.released {
+                    bail!("execution lease lost its runtime fence");
+                }
+                Arc::clone(
+                    entry
+                        .watchdog
+                        .as_ref()
+                        .context("runtime has no execution watchdog")?,
+                )
+            };
+            let result = watchdog.lock().unwrap().renew(lease);
+            result
         })
         .await?
     }
@@ -278,16 +298,30 @@ impl AdmissionGuard {
         let owner = Arc::clone(&self.owner);
         let id = self.id;
         tokio::task::spawn_blocking(move || {
-            let mut ledger = owner.ledger.lock().unwrap();
-            let entry = ledger
-                .entries
-                .get_mut(&id)
-                .context("admission disappeared before spawn")?;
-            entry.process = Some(process);
-            fs::write(entry.leaf.join("cgroup.procs"), pid.to_string())?;
+            {
+                let mut ledger = owner.ledger.lock().unwrap();
+                let entry = ledger
+                    .entries
+                    .get_mut(&id)
+                    .context("admission disappeared before spawn")?;
+                if entry.released {
+                    bail!("admission was released before spawn");
+                }
+                entry.process = Some(process);
+                fs::write(entry.leaf.join("cgroup.procs"), pid.to_string())?;
+            }
             if let Some(lease) = lease {
                 owner.validate_lease(lease)?;
-                entry.watchdog = Some(Watchdog::start(&std::env::current_exe()?, pid, lease)?);
+                let watchdog = Watchdog::start(&std::env::current_exe()?, pid, lease)?;
+                let mut ledger = owner.ledger.lock().unwrap();
+                let entry = ledger
+                    .entries
+                    .get_mut(&id)
+                    .context("admission disappeared during watchdog start")?;
+                if entry.released {
+                    bail!("admission was released during watchdog start");
+                }
+                entry.watchdog = Some(Arc::new(Mutex::new(watchdog)));
             }
             Ok(())
         })

@@ -332,7 +332,11 @@ where
         self: &Arc<Self>,
         request: CreateSandboxRequest,
     ) -> Result<SandboxMetadata> {
-        let sandbox_id = SandboxId::new();
+        let sandbox_id = request
+            .execution_lease
+            .map_or_else(SandboxId::new, |lease| {
+                SandboxId::from_uuid(lease.activation_id)
+            });
         let this = Arc::clone(self);
         self.run_cancellation_safe("create", sandbox_id, async move {
             this.create_sandbox_inner(sandbox_id, request).await
@@ -578,7 +582,10 @@ where
 
         let children_spec = (0..count)
             .map(|_| {
-                let sandbox_id = SandboxId::new();
+                let sandbox_id = match new_timeout {
+                    NewTimeout::Funded(lease) => SandboxId::from_uuid(lease.activation_id),
+                    _ => SandboxId::new(),
+                };
                 SandboxForkSpec {
                     execution_lease: match new_timeout {
                         NewTimeout::Funded(lease) => Some(lease),
