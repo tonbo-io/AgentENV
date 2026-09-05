@@ -146,4 +146,10 @@ For Firecracker runtime upgrades, update `thirdparty/firecracker-client/firecrac
 - Rust 2021 edition. Keep touched code `rustfmt`-clean and clippy-clean.
 - Use `info` for lifecycle events, `debug` for internal transitions, `warn` for recoverable issues, `error` for unrecoverable failures. Initialize tracing only in binary entrypoints.
 - Conventional Commit prefixes: `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`.
-- Push to a fork repository and open PRs against `https://github.com/kvcache-ai/AgentENV/`. Never push branches to `https://github.com/kvcache-ai/AgentENV/` directly.
+
+## Repository ownership and contribution targets
+
+- [`kvcache-ai/AgentENV`](https://github.com/kvcache-ai/AgentENV) is upstream; [`tonbo-io/AgentENV`](https://github.com/tonbo-io/AgentENV) is Tonbo's maintained fork.
+- By default, push branches, open PRs, and merge changes only in `tonbo-io/AgentENV`. Tonbo-specific product behavior, billing policy, deployment, registry configuration, and integrations belong in the fork. If general applicability is unclear, keep the change in the fork.
+- Submit a feature or fix upstream only when it is clearly general: useful to AgentENV users independently of Tonbo and free of Tonbo-specific dependencies or policy. Explain that applicability in the upstream PR. Build a separate branch from current upstream `main` containing only the relevant portable code, tests, and documentation; do not submit the fork's accumulated history or private publishing configuration.
+- Before opening or merging a PR, verify the target repository, base branch, head branch, commits, and file diff explicitly. For an upstream contribution, push the branch to `tonbo-io/AgentENV` and open the PR against `kvcache-ai/AgentENV`; never push branches directly to upstream.
