@@ -128,6 +128,10 @@ impl NodeAdmission {
         lease: Option<ExecutionLease>,
         disk_path: &Path,
     ) -> Result<AdmissionGuard> {
+        // Warm resume replaces and drops the provisional per-VM TempDir.
+        // Capacity checks must retain the filesystem's stable parent, not
+        // that disposable path, for later growth and checkpoint admission.
+        let disk_path = disk_anchor(disk_path)?;
         let _claim = self.claims.lock().await;
         self.reconcile();
         if self.config.require_execution_lease && lease.is_none() {
@@ -155,7 +159,7 @@ impl NodeAdmission {
         };
         let (_, available) = memory_capacity(&self.root)?;
         let disk_available =
-            disk_available(disk_path)?.saturating_sub(self.config.disk_reserve_bytes);
+            disk_available(&disk_path)?.saturating_sub(self.config.disk_reserve_bytes);
         let leaf = self.root.join(sandbox.to_string());
         {
             let mut ledger = self.ledger.lock().unwrap();
@@ -182,7 +186,7 @@ impl NodeAdmission {
                 Entry {
                     sandbox_id: sandbox,
                     leaf,
-                    disk_path: disk_path.to_path_buf(),
+                    disk_path,
                     writable_disk_bytes: u64::from(resources.disk_size_mib) * 1024 * 1024,
                     process: None,
                     watchdog: None,
@@ -449,4 +453,27 @@ fn disk_available(path: &Path) -> Result<u64> {
     Ok(stats
         .blocks_available()
         .saturating_mul(stats.fragment_size()))
+}
+
+fn disk_anchor(work_directory: &Path) -> Result<PathBuf> {
+    work_directory
+        .parent()
+        .context("runtime work directory has no parent")?
+        .canonicalize()
+        .context("resolve admitted runtime filesystem")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_anchor_survives_warm_resume_workspace_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let provisional = tempfile::tempdir_in(root.path()).unwrap();
+        let anchor = disk_anchor(provisional.path()).unwrap();
+        drop(provisional);
+        assert_eq!(anchor, root.path().canonicalize().unwrap());
+        assert!(disk_available(&anchor).unwrap() > 0);
+    }
 }
