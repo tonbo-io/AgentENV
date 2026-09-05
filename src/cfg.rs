@@ -612,23 +612,26 @@ pub struct MeteringConfig {
 /// clients remain supported only when require_execution_lease is false.
 #[derive(Debug, Config, Clone)]
 pub struct AdmissionConfig {
-    #[config(default = false)]
+    #[config(default = false, env = "AENV_ADMISSION_ENABLED")]
     pub enabled: bool,
-    #[config(default = false)]
+    #[config(default = false, env = "AENV_ADMISSION_REQUIRE_EXECUTION_LEASE")]
     pub require_execution_lease: bool,
-    #[config(default = 85u64)]
+    #[config(default = 85u64, env = "AENV_ADMISSION_MEMORY_PERCENT")]
     pub memory_percent: u64,
-    #[config(default = 4294967296u64)]
+    #[config(default = 4294967296u64, env = "AENV_ADMISSION_INITIAL_MEMORY_BYTES")]
     pub initial_memory_bytes: u64,
-    #[config(default = 536870912u64)]
+    #[config(default = 536870912u64, env = "AENV_ADMISSION_RUNTIME_OVERHEAD_BYTES")]
     pub runtime_overhead_bytes: u64,
-    #[config(default = 2usize)]
+    #[config(default = 2usize, env = "AENV_ADMISSION_MAX_STARTING")]
     pub max_starting: usize,
-    #[config(default = 8589934592u64)]
+    #[config(default = 8589934592u64, env = "AENV_ADMISSION_DISK_RESERVE_BYTES")]
     pub disk_reserve_bytes: u64,
-    #[config(default = 600u64)]
+    #[config(default = 600u64, env = "AENV_ADMISSION_MAXIMUM_FUNDED_SECONDS")]
     pub maximum_funded_seconds: u64,
-    #[config(default = "$AENV_HOME/runtime-admission")]
+    #[config(
+        default = "$AENV_HOME/runtime-admission",
+        env = "AENV_ADMISSION_STATE_PATH"
+    )]
     pub state_path: PathBuf,
 }
 
@@ -946,6 +949,8 @@ impl AppConfig {
         }
 
         self.p2p.store_dir = resolve_path(&self.home_path, config_dir, &self.p2p.store_dir);
+        self.admission.state_path =
+            resolve_path(&self.home_path, config_dir, &self.admission.state_path);
 
         // Dirty-page tracking is a KVM-only default. Disable it before
         // validation so an existing PVM configuration needs no new override.
@@ -1691,6 +1696,7 @@ mod tests {
             snapshot_store: "./snapshot-store".into(),
         });
         config.p2p.store_dir = "./p2p-store".into();
+        config.admission.state_path = "./runtime-admission".into();
         config.ublk.daemon_binary_path = Some("./bin/uvm-ublk-daemon".into());
         config.ublk.daemon_socket_path = "./run/uvm-ublk-daemon.sock".into();
         config.ublk.daemon_log_path = Some("./logs/uvm-ublk-daemon.log".into());
@@ -1726,6 +1732,10 @@ mod tests {
             config_dir.join("snapshot-local-cache")
         );
         assert_eq!(config.p2p.store_dir, config_dir.join("p2p-store"));
+        assert_eq!(
+            config.admission.state_path,
+            config_dir.join("runtime-admission")
+        );
         assert_eq!(
             config.backend.posix_fs.as_ref().unwrap().snapshot_store,
             config_dir.join("snapshot-store")
@@ -1873,6 +1883,10 @@ mod tests {
             home_path.join("snapshot-local-cache")
         );
         assert_eq!(config.p2p.store_dir, home_path.join("p2p").join("store"));
+        assert_eq!(
+            config.admission.state_path,
+            home_path.join("runtime-admission")
+        );
         assert_eq!(
             config.ublk.overlaybd.global_config_path,
             home_path.join("overlaybd").join("overlaybd-global.json")
