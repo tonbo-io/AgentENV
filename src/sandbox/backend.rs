@@ -96,6 +96,8 @@ pub enum SandboxSnapshotSourceDisposition {
 
 #[derive(Clone, Debug)]
 pub struct SandboxForkSpec {
+    pub execution_lease: Option<runtime_policy::ExecutionLease>,
+    pub resources: crate::types::SandboxResources,
     pub sandbox_id: SandboxId,
     pub envd_access_token: Option<EnvdAccessToken>,
 }
@@ -240,6 +242,17 @@ pub enum SandboxSnapshotCaptureOutcome {
 /// `Arc<Mutex<Box<dyn SandboxBackend>>>` handles managed by the Orchestrator.
 #[async_trait]
 pub trait SandboxBackend: Send + 'static {
+    /// Configure node admission before any guest instruction executes.
+    fn configure_execution(
+        &mut self,
+        _resources: crate::types::SandboxResources,
+        lease: Option<runtime_policy::ExecutionLease>,
+    ) -> Result<()> {
+        if lease.is_some() {
+            anyhow::bail!("backend does not enforce funded execution");
+        }
+        Ok(())
+    }
     /// Start the sandbox and block until readiness.
     async fn start(&mut self) -> Result<()>;
 

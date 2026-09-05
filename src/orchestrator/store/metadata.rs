@@ -25,6 +25,7 @@ pub enum NewTimeout {
     Set(Duration),
     EnsureMinimum(Duration),
     None,
+    Funded(runtime_policy::ExecutionLease),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,6 +43,8 @@ pub struct SandboxMetadata {
     pub timeout: Option<Duration>,
     pub timeout_action: SandboxTimeoutAction,
     pub expires_at: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<runtime_policy::ExecutionLease>,
     pub auto_resume: bool,
     /// Virtualization mode used by this sandbox for its entire lifecycle.
     #[serde(default)]
@@ -81,6 +84,7 @@ impl Default for SandboxMetadata {
             timeout: None,
             timeout_action: SandboxTimeoutAction::Pause,
             expires_at: None,
+            execution_lease: None,
             auto_resume: false,
             virtualization_mode: VirtualizationMode::default(),
             runtime_versions: SnapshotRuntimeVersions::new(
@@ -110,6 +114,13 @@ impl SandboxMetadata {
     fn _set_timeout(&mut self, timeout: Option<Duration>, from: SystemTime) {
         self.timeout = timeout;
         self.expires_at = timeout.and_then(|ttl| from.checked_add(ttl));
+        if let Some(lease) = self.execution_lease {
+            let funded = SystemTime::UNIX_EPOCH + Duration::from_millis(lease.expires_at_unix_ms);
+            self.expires_at = Some(
+                self.expires_at
+                    .map_or(funded, |expires| expires.min(funded)),
+            );
+        }
     }
 
     pub fn update_timeout(&mut self, new_timeout: NewTimeout) {
@@ -117,6 +128,9 @@ impl SandboxMetadata {
     }
 
     fn _update_timeout(&mut self, new_timeout: NewTimeout, from: SystemTime) {
+        if let NewTimeout::Funded(lease) = new_timeout {
+            self.execution_lease = Some(lease);
+        }
         let timeout = match new_timeout {
             NewTimeout::UseExisting => self.timeout,
             NewTimeout::Set(timeout) => Some(timeout),
@@ -125,6 +139,7 @@ impl SandboxMetadata {
                 None => Some(minimum),
             },
             NewTimeout::None => None,
+            NewTimeout::Funded(lease) => Some(lease.remaining(from).unwrap_or_default()),
         };
         self._set_timeout(timeout, from);
     }

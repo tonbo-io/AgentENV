@@ -54,8 +54,22 @@ struct ServerCli {
     config: Option<std::path::PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(runtime_policy::watchdog::MODE) {
+        let pid = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("watchdog omitted process identity"))?
+            .parse()?;
+        return runtime_policy::watchdog::run(pid);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(server_main())
+}
+
+async fn server_main() -> anyhow::Result<()> {
     agentenv::logging::init();
     agentenv_observability::init_prometheus_recorder()?;
 
@@ -85,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
     // Before any child process exists: the meter moves this process into a
     // cgroup leaf of its own, and children inherit that placement.
     SandboxMeter::init_global(&config.metering)?;
+    agentenv::sandbox::admission::NodeAdmission::init_global(&config.admission).await?;
 
     let api_key = ApiKey::resolve(config)?;
 

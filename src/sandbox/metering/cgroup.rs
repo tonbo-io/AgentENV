@@ -14,7 +14,7 @@
 //!     └── <sandbox id>/            one Firecracker process
 //! ```
 //!
-//! Only accounting is used; no limit is written. A warm-pool Firecracker
+//! The admission owner writes limits to these leaves when enabled. A warm-pool Firecracker
 //! starts in `agentenv/` and moves into its sandbox leaf when claimed, so the
 //! leaf charges the process from the moment it belongs to a sandbox.
 
@@ -39,7 +39,7 @@ const MOVE_PASSES: usize = 3;
 
 #[derive(Debug)]
 pub(crate) struct CgroupTree {
-    sandboxes_dir: PathBuf,
+    pub(crate) sandboxes_dir: PathBuf,
 }
 
 impl CgroupTree {

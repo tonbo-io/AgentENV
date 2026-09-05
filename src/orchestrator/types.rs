@@ -26,6 +26,7 @@ pub enum SandboxLaunchSource {
 
 #[derive(Clone)]
 pub struct CreateSandboxRequest {
+    pub execution_lease: Option<runtime_policy::ExecutionLease>,
     pub source: SandboxLaunchSource,
     pub timeout: Option<Duration>,
     pub timeout_action: super::SandboxTimeoutAction,

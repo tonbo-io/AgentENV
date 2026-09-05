@@ -78,6 +78,7 @@ async fn orchestrator_lifecycle() -> Result<()> {
         let case_id = Uuid::now_v7().to_string();
 
         let request = CreateSandboxRequest {
+            execution_lease: None,
             source: SandboxLaunchSource::Snapshot(Box::new(runnable)),
             timeout: Some(Duration::from_secs(30)),
             timeout_action: SandboxTimeoutAction::Pause,
@@ -244,6 +245,7 @@ async fn orchestrator_capture_snapshot_can_be_published_and_relaunched() -> Resu
         let orchestrator = Orchestrator::with_in_memory_store().await;
         let created = orchestrator
             .create_sandbox(CreateSandboxRequest {
+                execution_lease: None,
                 source: SandboxLaunchSource::Snapshot(Box::new(runnable)),
                 timeout: Some(Duration::from_secs(30)),
                 timeout_action: SandboxTimeoutAction::Pause,
@@ -340,6 +342,7 @@ async fn orchestrator_capture_snapshot_can_be_published_and_relaunched() -> Resu
         let captured_runnable = snapshot_manager.resolve_runnable(published).await?;
         let relaunched = orchestrator
             .create_sandbox(CreateSandboxRequest {
+                execution_lease: None,
                 source: SandboxLaunchSource::Snapshot(Box::new(captured_runnable)),
                 timeout: Some(Duration::from_secs(30)),
                 timeout_action: SandboxTimeoutAction::Pause,
@@ -390,6 +393,7 @@ async fn orchestrator_capture_snapshot_can_atomically_leave_source_paused() -> R
         let orchestrator = Orchestrator::with_in_memory_store().await;
         let created = orchestrator
             .create_sandbox(CreateSandboxRequest {
+                execution_lease: None,
                 source: SandboxLaunchSource::Snapshot(Box::new(runnable)),
                 timeout: Some(Duration::from_secs(30)),
                 timeout_action: SandboxTimeoutAction::Pause,
@@ -464,6 +468,7 @@ async fn orchestrator_capture_snapshot_can_atomically_leave_source_paused() -> R
             .await?;
         let target = orchestrator
             .create_sandbox(CreateSandboxRequest {
+                execution_lease: None,
                 source: SandboxLaunchSource::Snapshot(Box::new(
                     snapshot_manager.resolve_runnable(published).await?,
                 )),

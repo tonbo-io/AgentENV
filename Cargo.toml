@@ -12,6 +12,7 @@ members = [
     "crates/benchmarks",
     "crates/e2e-tests",
     "crates/linux-cap",
+    "crates/runtime-policy",
     "crates/observability",
     "crates/object-store-operator",
     "crates/test-support",
@@ -101,6 +102,7 @@ uvm-ublk = { path = "storage/ublk" }
 uvm-ublk-daemon = { path = "storage/ublk-daemon" }
 shell-util = { path = "crates/shell-util" }
 linux-cap = { path = "crates/linux-cap" }
+runtime-policy = { path = "crates/runtime-policy" }
 warm-pool = { path = "crates/warm-pool" }
 ublk-sys = { package = "libublk-rs-sys", git = "https://github.com/ublk-org/libublk-rs.git", rev = "c6a3e06" }
 overlaybd = { path = "storage/overlaybd" }

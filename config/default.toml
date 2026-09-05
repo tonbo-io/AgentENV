@@ -373,3 +373,16 @@ node_id = "node-a"
 cluster_id = "00000000-0000-0000-0000-000000000000"
 # Identifier for this service instance.
 service_instance_id = "service-instance-a"
+
+# Opt-in node enforcement. Requires cgroup v2 metering; all physical starts
+# (including local resume and fork) share the same admission budget.
+[admission]
+enabled = false
+require_execution_lease = false
+memory_percent = 85
+initial_memory_bytes = 4294967296
+runtime_overhead_bytes = 536870912
+max_starting = 2
+disk_reserve_bytes = 8589934592
+maximum_funded_seconds = 600
+state_path = "$AENV_HOME/runtime-admission"

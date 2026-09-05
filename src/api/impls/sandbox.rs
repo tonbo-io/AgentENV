@@ -37,6 +37,24 @@ fn sandbox_not_found(id: impl Into<String>) -> models::Error {
     ApiImpl::error(404, format!("sandbox {} not found", id.into()))
 }
 
+fn execution_lease(lease: &models::ExecutionLease) -> runtime_policy::ExecutionLease {
+    runtime_policy::ExecutionLease {
+        activation_id: lease.activation_id,
+        operation_id: lease.operation_id,
+        sequence: lease.sequence,
+        expires_at_unix_ms: lease.expires_at_unix_ms,
+    }
+}
+
+fn execution_lease_model(lease: runtime_policy::ExecutionLease) -> models::ExecutionLease {
+    models::ExecutionLease::new(
+        lease.activation_id,
+        lease.operation_id,
+        lease.sequence,
+        lease.expires_at_unix_ms,
+    )
+}
+
 fn usage_model(sandbox_id: SandboxId, counters: UsageCounters) -> models::SandboxUsage {
     models::SandboxUsage {
         sandbox_id: sandbox_id.to_string(),
@@ -155,6 +173,7 @@ impl From<SandboxMetadata> for models::ListedSandbox {
 impl From<SandboxMetadata> for models::Sandbox {
     fn from(m: SandboxMetadata) -> Self {
         Self {
+            execution_lease: m.execution_lease.map(execution_lease_model),
             template_id: m.snapshot_id,
             sandbox_id: m.id.into(),
             alias: m.snapshot_alias,
@@ -220,6 +239,7 @@ impl From<SandboxMetadata> for models::SandboxDetail {
         ));
 
         Self {
+            execution_lease: m.execution_lease.map(execution_lease_model),
             template_id: m.snapshot_id,
             alias: m.snapshot_alias,
             sandbox_id: m.id.into(),
@@ -543,6 +563,7 @@ impl Sandboxes<()> for ApiImpl {
 
         let base = resolved_rootfs.base_context;
         let request = CreateSandboxRequest {
+            execution_lease: body.execution_lease.as_ref().map(execution_lease),
             source: SandboxLaunchSource::Image {
                 image_ref: resolved_rootfs.image_ref,
                 overlaybd_config_path: resolved_rootfs.overlaybd_config_path,
@@ -698,6 +719,7 @@ impl Sandboxes<()> for ApiImpl {
         }
 
         let request = CreateSandboxRequest {
+            execution_lease: body.execution_lease.as_ref().map(execution_lease),
             source: SandboxLaunchSource::Snapshot(Box::new(snapshot)),
             timeout: duration_from_secs(body.timeout),
             timeout_action: match body.auto_pause {
@@ -769,12 +791,18 @@ impl Sandboxes<()> for ApiImpl {
             | SandboxState::Running
             | SandboxState::Snapshotting
             | SandboxState::Forking => {
-                match self
-                    .orchestrator
-                    .keep_alive_for(sandbox_id, duration_from_secs(Some(body.timeout)), false)
-                    .await
-                {
-                    Ok(_) => {}
+                let updated = if let Some(lease) = &body.execution_lease {
+                    self.orchestrator
+                        .renew_execution(sandbox_id, execution_lease(lease))
+                        .await
+                        .map(Some)
+                } else {
+                    self.orchestrator
+                        .keep_alive_for(sandbox_id, duration_from_secs(Some(body.timeout)), false)
+                        .await
+                };
+                let metadata = match updated {
+                    Ok(updated) => updated.unwrap_or(metadata),
                     Err(OrchestratorError::SandboxNotFound(id)) => {
                         return Ok(SandboxesSandboxIdConnectPostResponse::Status404_NotFound(
                             sandbox_not_found(id),
@@ -792,7 +820,7 @@ impl Sandboxes<()> for ApiImpl {
                             ),
                         );
                     }
-                }
+                };
                 return Ok(
                     SandboxesSandboxIdConnectPostResponse::Status200_TheSandboxWasAlreadyRunning(
                         self.sandbox_model(metadata),
@@ -812,7 +840,10 @@ impl Sandboxes<()> for ApiImpl {
             .orchestrator
             .resume_sandbox(
                 sandbox_id,
-                NewTimeout::Set(Duration::from_secs(body.timeout as u64)),
+                body.execution_lease.as_ref().map(execution_lease).map_or(
+                    NewTimeout::Set(Duration::from_secs(body.timeout as u64)),
+                    NewTimeout::Funded,
+                ),
             )
             .await
         {
@@ -892,6 +923,11 @@ impl Sandboxes<()> for ApiImpl {
             .map_or(NewTimeout::UseExisting, |timeout| {
                 NewTimeout::Set(Duration::from_secs(timeout as u64))
             });
+        let new_timeout = body
+            .as_ref()
+            .and_then(|body| body.execution_lease.as_ref())
+            .map(execution_lease)
+            .map_or(new_timeout, NewTimeout::Funded);
         let timer = SandboxStageTimer::new("fork");
         match timer
             .time(
@@ -1059,6 +1095,7 @@ impl Sandboxes<()> for ApiImpl {
         _cookies: &CookieJar,
         _claims: &Self::Claims,
         path_params: &models::SandboxesSandboxIdUsageGetPathParams,
+        query_params: &models::SandboxesSandboxIdUsageGetQueryParams,
     ) -> Result<SandboxesSandboxIdUsageGetResponse, ()> {
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
@@ -1066,30 +1103,33 @@ impl Sandboxes<()> for ApiImpl {
                 sandbox_not_found(path_id),
             ));
         };
-        match self.orchestrator.get_sandbox(&sandbox_id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
+        // Final usage remains readable after runtime deletion or a later resume.
+        let instance = query_params.runtime_instance_id;
+        let sampled = tokio::task::spawn_blocking(move || match SandboxMeter::global() {
+            Some(meter) => meter.sample_usage(&sandbox_id, instance),
+            None => Ok(None),
+        })
+        .await;
+        let counters = match sampled {
+            Ok(Ok(Some(counters))) => counters,
+            Ok(Ok(None)) => {
                 return Ok(SandboxesSandboxIdUsageGetResponse::Status404_NotFound(
-                    sandbox_not_found(path_id),
-                ));
+                    ApiImpl::error(
+                        404,
+                        format!(
+                            "sandbox {sandbox_id} has no matching metered runtime on this node"
+                        ),
+                    ),
+                ))
             }
-            Err(err) => {
+            other => {
                 return Ok(SandboxesSandboxIdUsageGetResponse::Status500_ServerError(
-                    err.into(),
-                ));
+                    ApiImpl::error(
+                        500,
+                        format!("runtime usage could not be sampled: {other:?}"),
+                    ),
+                ))
             }
-        }
-        // A known sandbox without counters never ran on this node since the
-        // meter started: a paused sandbox restored across a server restart,
-        // or one whose finished counters aged out of retention.
-        let Some(counters) = SandboxMeter::global().and_then(|meter| meter.usage(&sandbox_id))
-        else {
-            return Ok(SandboxesSandboxIdUsageGetResponse::Status404_NotFound(
-                ApiImpl::error(
-                    404,
-                    format!("sandbox {sandbox_id} has no metered runtime on this node"),
-                ),
-            ));
         };
         Ok(
             SandboxesSandboxIdUsageGetResponse::Status200_TheSandboxRuntimeUsage(usage_model(
@@ -1423,8 +1463,13 @@ impl Sandboxes<()> for ApiImpl {
         match timer
             .time(
                 "resume",
-                self.orchestrator
-                    .resume_sandbox(sandbox_id, NewTimeout::Set(timeout)),
+                self.orchestrator.resume_sandbox(
+                    sandbox_id,
+                    body.execution_lease
+                        .as_ref()
+                        .map(execution_lease)
+                        .map_or(NewTimeout::Set(timeout), NewTimeout::Funded),
+                ),
             )
             .await
         {
@@ -1473,11 +1518,18 @@ impl Sandboxes<()> for ApiImpl {
         };
         let timeout = body.as_ref().map(|b| Duration::from_secs(b.timeout as u64));
 
-        match self
-            .orchestrator
-            .keep_alive_for(sandbox_id, timeout, true)
-            .await
-        {
+        let result =
+            if let Some(lease) = body.as_ref().and_then(|body| body.execution_lease.as_ref()) {
+                self.orchestrator
+                    .renew_execution(sandbox_id, execution_lease(lease))
+                    .await
+                    .map(Some)
+            } else {
+                self.orchestrator
+                    .keep_alive_for(sandbox_id, timeout, true)
+                    .await
+            };
+        match result {
             Ok(_) => Ok(
                 SandboxesSandboxIdTimeoutPostResponse::Status204_SuccessfullySetTheSandboxTimeout,
             ),
