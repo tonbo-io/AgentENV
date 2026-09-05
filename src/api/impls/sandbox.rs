@@ -1523,6 +1523,7 @@ impl Sandboxes<()> for ApiImpl {
                 self.orchestrator
                     .renew_execution(sandbox_id, execution_lease(lease))
                     .await
+                    .map(Some)
             } else {
                 self.orchestrator
                     .keep_alive_for(sandbox_id, timeout, true)

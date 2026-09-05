@@ -67,7 +67,20 @@ impl LeaseState {
             }
             return Ok(());
         }
-        *self = Self::new(lease, wall, mono)?;
+        let mut next = Self::new(lease, wall, mono)?;
+        // A later sequence may add only the newly funded absolute time.
+        // Recomputing solely from a rolled-back wall clock would extend it.
+        let previous = self.lease.expires_at_unix_ms;
+        let bounded = if lease.expires_at_unix_ms >= previous {
+            self.monotonic_deadline
+                .checked_add(Duration::from_millis(lease.expires_at_unix_ms - previous))
+        } else {
+            self.monotonic_deadline
+                .checked_sub(Duration::from_millis(previous - lease.expires_at_unix_ms))
+        }
+        .ok_or_else(|| anyhow::anyhow!("renewal deadline overflows monotonic time"))?;
+        next.monotonic_deadline = next.monotonic_deadline.min(bounded);
+        *self = next;
         Ok(())
     }
 }
@@ -143,5 +156,24 @@ mod tests {
         state.renew(next, wall, mono).unwrap();
         assert!(state.renew(first, wall, mono).is_err());
         assert_eq!(state.lease(), next);
+    }
+    #[test]
+    fn a_new_sequence_cannot_rebase_a_rolled_back_clock() {
+        let first = lease();
+        let mono = Instant::now();
+        let mut state = LeaseState::new(first, UNIX_EPOCH + Duration::from_secs(5), mono).unwrap();
+        state
+            .renew(
+                ExecutionLease {
+                    sequence: 1,
+                    expires_at_unix_ms: 12_000,
+                    ..first
+                },
+                UNIX_EPOCH,
+                mono + Duration::from_secs(2),
+            )
+            .unwrap();
+        assert!(!state.expired(UNIX_EPOCH, mono + Duration::from_secs(6)));
+        assert!(state.expired(UNIX_EPOCH, mono + Duration::from_secs(7)));
     }
 }

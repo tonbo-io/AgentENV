@@ -85,5 +85,7 @@ jobs:
       - uses: ./.github/actions/rust-ci-setup
       - name: Configure ublk test host
         run: sudo scripts/tests/setup-ublk-access.sh "$(id -un)" "$(id -gn)"
+      - name: Execution policy and watchdog process tests
+        run: cargo test -p runtime-policy
       - name: Unit tests
         run: make test-unit PROFILE=debug
