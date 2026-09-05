@@ -342,6 +342,10 @@ done
 for sandbox_id in "${created_sandboxes[@]}"; do
   delete_sandbox "${sandbox_id}"
   assert_status "${HTTP_STATUS}" "204" "delete sandbox ${sandbox_id} after metrics validation"
+  api_get "/sandboxes/${sandbox_id}/usage"
+  assert_status "${HTTP_STATUS}" "200" "final usage remains routed after runtime deletion"
+  final_running="$(echo "${HTTP_BODY}" | jq -r '.running')"
+  assert_eq "${final_running}" "false" "deleted runtime usage is final"
 done
 
 if e2e_mode_is_clustered; then

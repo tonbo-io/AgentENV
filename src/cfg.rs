@@ -603,7 +603,7 @@ pub struct MeteringConfig {
     #[config(default = "/sys/fs/cgroup")]
     pub cgroup_root: PathBuf,
     /// Seconds a stopped runtime instance's final counters stay readable.
-    #[config(default = 3600u64)]
+    #[config(default = 3600u64, env = "AENV_METERING_FINISHED_RETENTION_SECS")]
     pub finished_retention_secs: u64,
 }
 

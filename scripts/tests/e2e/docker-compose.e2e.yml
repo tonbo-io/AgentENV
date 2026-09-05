@@ -1,8 +1,12 @@
 services:
   agentenv-a:
+    environment:
+      AENV_METERING_FINISHED_RETENTION_SECS: "30"
     ports:
       - "8001:8000"
 
   agentenv-b:
+    environment:
+      AENV_METERING_FINISHED_RETENTION_SECS: "30"
     ports:
       - "8002:8000"
