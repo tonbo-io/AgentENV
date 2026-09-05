@@ -39,6 +39,7 @@ struct Entry {
     sandbox_id: SandboxId,
     leaf: PathBuf,
     disk_path: PathBuf,
+    writable_disk_bytes: u64,
     process: Option<ProcessHandle>,
     watchdog: Option<Arc<Mutex<Watchdog>>>,
     released: bool,
@@ -182,6 +183,7 @@ impl NodeAdmission {
                     sandbox_id: sandbox,
                     leaf,
                     disk_path: disk_path.to_path_buf(),
+                    writable_disk_bytes: u64::from(resources.disk_size_mib) * 1024 * 1024,
                     process: None,
                     watchdog: None,
                     released: false,
@@ -293,6 +295,38 @@ impl NodeAdmission {
 }
 
 impl AdmissionGuard {
+    pub async fn reserve_checkpoint(&self, dirty_bytes: u64, output: &Path) -> Result<()> {
+        let owner = Arc::clone(&self.owner);
+        let id = self.id;
+        let output = output.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::MetadataExt;
+            let mut ledger = owner.ledger.lock().unwrap();
+            let entry = ledger
+                .entries
+                .get(&id)
+                .context("checkpoint lost admission")?;
+            if entry.released
+                || fs::metadata(&entry.disk_path)?.dev() != fs::metadata(&output)?.dev()
+            {
+                bail!("checkpoint requires its admitted runtime filesystem");
+            }
+            let available =
+                disk_available(&output)?.saturating_sub(owner.config.disk_reserve_bytes);
+            let writable_disk_bytes = entry.writable_disk_bytes;
+            let reservation = ledger.budget.reservations[&id];
+            // Preserve the writable-disk reservation and cover data, indexes,
+            // headers and compression framing before any memory layer is written.
+            let checkpoint = dirty_bytes
+                .saturating_add(dirty_bytes / 8)
+                .saturating_add(16 * 1024 * 1024);
+            let desired =
+                writable_disk_bytes.saturating_add(checkpoint.max(reservation.memory_bytes));
+            ledger.budget.reserve_disk(id, desired, available)
+        })
+        .await?
+    }
+
     pub async fn attach(&self, pid: i32, lease: Option<ExecutionLease>) -> Result<()> {
         let process = ProcessHandle::open(pid)?;
         let owner = Arc::clone(&self.owner);

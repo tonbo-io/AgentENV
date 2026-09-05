@@ -909,6 +909,17 @@ impl FirecrackerSandbox {
         // error aborts this direct snapshot attempt and is propagated to
         // the lifecycle caller for recovery.
         let dirty_ranges = self.fc_instance.get_dirty_memory_ranges().await?;
+        if let Some(admission) = &self.admission {
+            let dirty_bytes = dirty_ranges.ranges.iter().try_fold(0u64, |total, range| {
+                let length = u64::try_from(range.length).context("negative dirty memory range")?;
+                total
+                    .checked_add(length)
+                    .context("dirty memory size overflow")
+            })?;
+            admission
+                .reserve_checkpoint(dirty_bytes, snapshot_dir)
+                .await?;
+        }
         convert_dirty_memory_to_overlaybd(
             firecracker_pid,
             &dirty_ranges,
