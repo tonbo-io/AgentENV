@@ -236,6 +236,16 @@ impl SandboxMeter {
         debug!(sandbox = %sandbox_id, "sandbox runtime metering detached");
     }
 
+    /// Keep gateway routing alive while final usage remains readable.
+    pub fn sandbox_ids(&self) -> Vec<SandboxId> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
+            .copied()
+            .collect()
+    }
+
     /// The latest counters for a sandbox's most recent runtime instance on
     /// this node.
     pub fn usage(&self, sandbox_id: &SandboxId) -> Option<UsageCounters> {
@@ -504,8 +514,10 @@ mod tests {
         meter.attach(id, None, temp.path(), None);
         meter.detach(id);
         assert!(meter.usage(&id).is_some());
+        assert_eq!(meter.sandbox_ids(), vec![id]);
         meter.sample_all();
         assert!(meter.usage(&id).is_none());
+        assert!(meter.sandbox_ids().is_empty());
     }
 
     #[test]

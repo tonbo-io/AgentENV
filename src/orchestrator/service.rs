@@ -740,9 +740,16 @@ where
         Ok(self.store.list().await?)
     }
 
-    /// Lists all sandbox IDs currently tracked by the store.
+    /// Routing roster, including retained final meters after runtime deletion.
+    /// Running/resource counts continue to come from lifecycle metadata.
     pub async fn list_sandbox_ids(&self) -> Result<Vec<SandboxId>> {
-        Ok(self.store.list_ids().await?)
+        let mut ids = self.store.list_ids().await?;
+        if let Some(meter) = crate::sandbox::SandboxMeter::global() {
+            ids.extend(meter.sandbox_ids());
+            ids.sort();
+            ids.dedup();
+        }
+        Ok(ids)
     }
 
     /// Lists sandboxes that match the provided filter criteria:
