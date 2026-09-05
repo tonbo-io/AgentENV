@@ -296,6 +296,26 @@ components:
         absent value and an empty object are equivalent: both mean empty
         params.
 
+    ExecutionLease:
+      type: object
+      additionalProperties: false
+      description: Absolute funded authorization for one physical activation. New activations require sequence zero; renewal increases sequence. Equal sequences must replay identical payloads. An expired activation cannot be renewed or restarted.
+      required: [activationId, operationId, sequence, expiresAtUnixMs]
+      properties:
+        activationId:
+          type: string
+          format: uuid
+        operationId:
+          type: string
+          format: uuid
+        sequence:
+          type: integer
+          format: uint64
+        expiresAtUnixMs:
+          type: integer
+          format: uint64
+          description: Absolute UTC deadline in milliseconds since the Unix epoch.
+
     SandboxUsage:
       description: >
         Cumulative host resource use of the sandbox's most recent runtime
@@ -443,6 +463,8 @@ components:
         - envdVersion
         - runtimeStartedAt
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         templateID:
           type: string
           description: Identifier of the template from which is the sandbox created
@@ -488,6 +510,8 @@ components:
         - state
         - envdVersion
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         templateID:
           type: string
           description: Identifier of the template from which is the sandbox created
@@ -621,6 +645,8 @@ components:
       required:
         - templateID
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         templateID:
           type: string
           description: >
@@ -662,6 +688,8 @@ components:
 
     ResumedSandbox:
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         timeout:
           type: integer
           format: int32
@@ -673,6 +701,8 @@ components:
       required:
         - image
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         image:
           type: string
           description: >
@@ -730,6 +760,8 @@ components:
       required:
         - timeout
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         timeout:
           description: Timeout in seconds from the current time after which the sandbox should expire
           type: integer
@@ -741,6 +773,8 @@ components:
       required:
         - timeout
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         timeout:
           description: Timeout in seconds from the current time after which the sandbox should expire
           type: integer
@@ -774,6 +808,8 @@ components:
     SandboxForkRequest:
       type: object
       properties:
+        executionLease:
+          $ref: "#/components/schemas/ExecutionLease"
         timeout:
           type: integer
           format: int32
@@ -1908,7 +1944,7 @@ paths:
   /sandboxes/{sandboxID}/usage:
     get:
       description: >
-        Get the cumulative host resource use of the sandbox's most recent
+        Sample the current host resource use immediately for the sandbox's most recent
         runtime instance on this node. Counters keep their final values for a
         retention window after the instance stops, and reset with a new
         runtimeInstanceID when the sandbox boots or resumes again.
@@ -1921,6 +1957,13 @@ paths:
       tags: [sandboxes]
       parameters:
         - $ref: "#/components/parameters/sandboxID"
+        - name: runtimeInstanceID
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Read an exact runtime instance, including retained final usage after another instance resumes.
       responses:
         "200":
           description: The sandbox runtime usage
