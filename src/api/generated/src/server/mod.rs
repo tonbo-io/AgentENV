@@ -3100,10 +3100,18 @@ where
 #[tracing::instrument(skip_all)]
 fn sandboxes_sandbox_id_usage_get_validation(
     path_params: models::SandboxesSandboxIdUsageGetPathParams,
-) -> std::result::Result<(models::SandboxesSandboxIdUsageGetPathParams,), ValidationErrors> {
+    query_params: models::SandboxesSandboxIdUsageGetQueryParams,
+) -> std::result::Result<
+    (
+        models::SandboxesSandboxIdUsageGetPathParams,
+        models::SandboxesSandboxIdUsageGetQueryParams,
+    ),
+    ValidationErrors,
+> {
     path_params.validate()?;
+    query_params.validate()?;
 
-    Ok((path_params,))
+    Ok((path_params, query_params))
 }
 /// SandboxesSandboxIdUsageGet - GET /sandboxes/{sandboxID}/usage
 #[tracing::instrument(skip_all)]
@@ -3113,6 +3121,7 @@ async fn sandboxes_sandbox_id_usage_get<I, A, E, C>(
     cookies: CookieJar,
     headers: HeaderMap,
     Path(path_params): Path<models::SandboxesSandboxIdUsageGetPathParams>,
+    QueryExtra(query_params): QueryExtra<models::SandboxesSandboxIdUsageGetQueryParams>,
     State(api_impl): State<I>,
 ) -> Result<Response, StatusCode>
 where
@@ -3139,12 +3148,13 @@ where
     };
 
     #[allow(clippy::redundant_closure)]
-    let validation =
-        tokio::task::spawn_blocking(move || sandboxes_sandbox_id_usage_get_validation(path_params))
-            .await
-            .unwrap();
+    let validation = tokio::task::spawn_blocking(move || {
+        sandboxes_sandbox_id_usage_get_validation(path_params, query_params)
+    })
+    .await
+    .unwrap();
 
-    let Ok((path_params,)) = validation else {
+    let Ok((path_params, query_params)) = validation else {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Body::from(validation.unwrap_err().to_string()))
@@ -3153,7 +3163,14 @@ where
 
     let result = api_impl
         .as_ref()
-        .sandboxes_sandbox_id_usage_get(&method, &host, &cookies, &claims, &path_params)
+        .sandboxes_sandbox_id_usage_get(
+            &method,
+            &host,
+            &cookies,
+            &claims,
+            &path_params,
+            &query_params,
+        )
         .await;
 
     let mut response = Response::builder();

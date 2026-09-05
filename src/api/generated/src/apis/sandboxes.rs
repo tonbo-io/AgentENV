@@ -497,6 +497,7 @@ pub trait Sandboxes<E: std::fmt::Debug + Send + Sync + 'static = ()>:
         cookies: &CookieJar,
         claims: &Self::Claims,
         path_params: &models::SandboxesSandboxIdUsageGetPathParams,
+        query_params: &models::SandboxesSandboxIdUsageGetQueryParams,
     ) -> Result<SandboxesSandboxIdUsageGetResponse, E>;
 
     /// List sandboxes (v2).

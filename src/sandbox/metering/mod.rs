@@ -20,9 +20,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use nix::unistd::Pid;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::cfg::MeteringConfig;
 use crate::types::SandboxId;
@@ -35,6 +36,7 @@ static METER: OnceLock<Option<&'static SandboxMeter>> = OnceLock::new();
 pub struct SandboxMeter {
     cgroups: Option<cgroup::CgroupTree>,
     entries: Mutex<HashMap<SandboxId, MeterEntry>>,
+    finished: Mutex<HashMap<(SandboxId, Uuid), (UsageCounters, Instant)>>,
     finished_retention: Duration,
 }
 
@@ -71,6 +73,12 @@ impl UsageSource {
 }
 
 impl SandboxMeter {
+    pub(crate) fn cgroup_directory(&self) -> Result<PathBuf> {
+        self.cgroups
+            .as_ref()
+            .map(|tree| tree.sandboxes_dir.clone())
+            .ok_or_else(|| anyhow::anyhow!("node admission requires CPU and memory cgroups"))
+    }
     /// Installs the process-wide meter and starts its sampler.
     ///
     /// Without a writable cgroup v2 tree the meter still runs and reports
@@ -99,6 +107,7 @@ impl SandboxMeter {
         let meter: &'static SandboxMeter = Box::leak(Box::new(Self {
             cgroups,
             entries: Mutex::new(HashMap::new()),
+            finished: Mutex::new(HashMap::new()),
             finished_retention: Duration::from_secs(config.finished_retention_secs),
         }));
         if METER.set(Some(meter)).is_err() {
@@ -132,9 +141,14 @@ impl SandboxMeter {
     /// Opens counters for a runtime instance whose Firecracker process is
     /// `pid` and whose runtime files live under `work_dir`.
     ///
-    /// A previous instance of the same sandbox is replaced; its final
-    /// counters are gone, so callers read them before resuming.
-    pub fn attach(&self, sandbox_id: SandboxId, pid: Option<Pid>, work_dir: &Path) {
+    /// A previous finished instance remains readable by instance identity.
+    pub fn attach(
+        &self,
+        sandbox_id: SandboxId,
+        pid: Option<Pid>,
+        work_dir: &Path,
+        instance: Option<Uuid>,
+    ) {
         let cgroup_leaf = match (self.cgroups.as_ref(), pid) {
             (Some(tree), Some(pid)) => match tree.place(sandbox_id, pid) {
                 Ok(leaf) => Some(leaf),
@@ -153,7 +167,10 @@ impl SandboxMeter {
             cgroup_leaf,
             work_dir: work_dir.to_path_buf(),
         };
-        let counters = UsageCounters::start(SystemTime::now(), source.read());
+        let mut counters = UsageCounters::start(SystemTime::now(), source.read());
+        if let Some(instance) = instance {
+            counters.runtime_instance_id = instance;
+        }
         let now = Instant::now();
         let mut entries = self
             .entries
@@ -169,6 +186,18 @@ impl SandboxMeter {
                 finished_at: None,
             },
         ) {
+            if !previous.counters.running {
+                self.finished
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(
+                        (sandbox_id, previous.counters.runtime_instance_id),
+                        (
+                            previous.counters.clone(),
+                            previous.finished_at.unwrap_or(now),
+                        ),
+                    );
+            }
             release_leaf(previous);
         }
         debug!(sandbox = %sandbox_id, "sandbox runtime metering attached");
@@ -217,40 +246,105 @@ impl SandboxMeter {
         entries.get(sandbox_id).map(|entry| entry.counters.clone())
     }
 
+    /// Refresh an exact instance at the request boundary. Slow disk/cgroup
+    /// reads run outside the registry lock and cannot cross a resume fence.
+    pub fn sample_usage(
+        &self,
+        sandbox_id: &SandboxId,
+        instance: Option<Uuid>,
+    ) -> Result<Option<UsageCounters>> {
+        let target = {
+            let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+            entries
+                .get(sandbox_id)
+                .filter(|entry| instance.is_none_or(|id| id == entry.counters.runtime_instance_id))
+                .map(|entry| (entry.counters.runtime_instance_id, entry.source.clone()))
+        };
+        let Some((instance_id, source)) = target else {
+            return Ok(instance.and_then(|instance| {
+                self.finished
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&(*sandbox_id, instance))
+                    .filter(|(_, finished)| finished.elapsed() < self.finished_retention)
+                    .map(|(counters, _)| counters.clone())
+            }));
+        };
+        if let Some(source) = source {
+            let now = Instant::now();
+            let wall = SystemTime::now();
+            let sample = source.read();
+            if source.cgroup_leaf.is_some()
+                && (sample.cpu_usage_micros.is_none() || sample.memory_current_bytes.is_none())
+            {
+                bail!("runtime {instance_id} cgroup sample is incomplete");
+            }
+            self.apply_sample(*sandbox_id, instance_id, now, wall, sample);
+        }
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(entries
+            .get(sandbox_id)
+            .filter(|entry| entry.counters.runtime_instance_id == instance_id)
+            .map(|entry| entry.counters.clone()))
+    }
+
+    fn apply_sample(
+        &self,
+        id: SandboxId,
+        instance: Uuid,
+        now: Instant,
+        wall: SystemTime,
+        sample: UsageSample,
+    ) {
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = entries.get_mut(&id).filter(|entry| {
+            entry.source.is_some()
+                && entry.counters.runtime_instance_id == instance
+                && now >= entry.last_sample
+        }) {
+            entry
+                .counters
+                .advance(now.duration_since(entry.last_sample), wall, sample);
+            entry.last_sample = now;
+        }
+    }
+
     /// One sampling pass over every running instance. Also retries deferred
     /// cgroup removals and forgets finished instances past retention.
     fn sample_all(&self) {
-        let sources: Vec<(SandboxId, UsageSource)> = {
+        let sources: Vec<(SandboxId, Uuid, UsageSource)> = {
             let entries = self
                 .entries
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             entries
                 .iter()
-                .filter_map(|(id, entry)| entry.source.clone().map(|source| (*id, source)))
+                .filter_map(|(id, entry)| {
+                    entry
+                        .source
+                        .clone()
+                        .map(|source| (*id, entry.counters.runtime_instance_id, source))
+                })
                 .collect()
         };
-        let samples: Vec<(SandboxId, UsageSample)> = sources
-            .into_iter()
-            .map(|(id, source)| (id, source.read()))
-            .collect();
+        for (id, instance, source) in sources {
+            let now = Instant::now();
+            let wall = SystemTime::now();
+            let sample = source.read();
+            if source.cgroup_leaf.is_some()
+                && (sample.cpu_usage_micros.is_none() || sample.memory_current_bytes.is_none())
+            {
+                warn!(sandbox = %id, %instance, "runtime cgroup sample is incomplete");
+                continue;
+            }
+            self.apply_sample(id, instance, now, wall, sample);
+        }
 
         let now = Instant::now();
-        let wall = SystemTime::now();
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (id, sample) in samples {
-            // An instance detached while its sample was being read has final
-            // counters already; the stale reading is dropped.
-            if let Some(entry) = entries.get_mut(&id).filter(|entry| entry.source.is_some()) {
-                entry
-                    .counters
-                    .advance(now.duration_since(entry.last_sample), wall, sample);
-                entry.last_sample = now;
-            }
-        }
         entries.retain(|id, entry| {
             if let Some(leaf) = entry.pending_leaf.take() {
                 if let Err(err) = cgroup::remove_leaf(&leaf) {
@@ -268,6 +362,10 @@ impl SandboxMeter {
                 _ => true,
             }
         });
+        self.finished
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, (_, finished)| now.duration_since(*finished) < self.finished_retention);
     }
 }
 
@@ -293,6 +391,7 @@ mod tests {
         SandboxMeter {
             cgroups: None,
             entries: Mutex::new(HashMap::new()),
+            finished: Mutex::new(HashMap::new()),
             finished_retention: Duration::from_secs(60),
         }
     }
@@ -304,7 +403,7 @@ mod tests {
         let meter = meter();
         let id = SandboxId::new();
 
-        meter.attach(id, None, temp.path());
+        meter.attach(id, None, temp.path(), None);
         let opened = meter.usage(&id).unwrap();
         assert!(opened.running);
         assert!(opened.disk_allocated_bytes >= 8192);
@@ -332,15 +431,65 @@ mod tests {
         let meter = meter();
         let id = SandboxId::new();
 
-        meter.attach(id, None, temp.path());
+        meter.attach(id, None, temp.path(), None);
         let first = meter.usage(&id).unwrap();
         meter.detach(id);
-        meter.attach(id, None, temp.path());
+        meter.attach(id, None, temp.path(), None);
         let second = meter.usage(&id).unwrap();
 
         assert_ne!(first.runtime_instance_id, second.runtime_instance_id);
         assert!(second.running);
         assert_eq!(second.sample_count, 1);
+        let previous = meter
+            .sample_usage(&id, Some(first.runtime_instance_id))
+            .unwrap()
+            .unwrap();
+        assert!(!previous.running);
+        assert_eq!(previous.runtime_instance_id, first.runtime_instance_id);
+        meter.apply_sample(
+            id,
+            first.runtime_instance_id,
+            Instant::now(),
+            SystemTime::now(),
+            UsageSample {
+                cpu_usage_micros: Some(999999),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            meter.usage(&id).unwrap(),
+            second,
+            "an in-flight old sample cannot alter a resumed instance"
+        );
+    }
+
+    #[test]
+    fn explicit_read_samples_short_cpu_work_without_a_periodic_tick() {
+        let temp = tempdir().unwrap();
+        let meter = meter();
+        let id = SandboxId::new();
+        meter.attach(id, None, temp.path(), None);
+        fs::write(temp.path().join("cpu.stat"), "usage_usec 12345\n").unwrap();
+        fs::write(temp.path().join("memory.current"), "4096\n").unwrap();
+        meter
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .source
+            .as_mut()
+            .unwrap()
+            .cgroup_leaf = Some(temp.path().to_path_buf());
+        let sampled = meter.sample_usage(&id, None).unwrap().unwrap();
+        assert_eq!(sampled.cpu_usage_micros, Some(12345));
+        fs::remove_file(temp.path().join("cpu.stat")).unwrap();
+        assert!(meter.sample_usage(&id, None).is_err());
+        assert_eq!(
+            meter.usage(&id).unwrap().sampled_at,
+            sampled.sampled_at,
+            "failed accounting cannot refresh an old sample timestamp"
+        );
     }
 
     #[test]
@@ -352,7 +501,7 @@ mod tests {
         };
         let id = SandboxId::new();
 
-        meter.attach(id, None, temp.path());
+        meter.attach(id, None, temp.path(), None);
         meter.detach(id);
         assert!(meter.usage(&id).is_some());
         meter.sample_all();

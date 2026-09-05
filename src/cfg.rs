@@ -139,6 +139,8 @@ pub struct AppConfig {
     pub custom_extension: CustomExtensionConfig,
     #[config(nested)]
     pub metering: MeteringConfig,
+    #[config(nested)]
+    pub admission: AdmissionConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Config)]
@@ -605,6 +607,31 @@ pub struct MeteringConfig {
     pub finished_retention_secs: u64,
 }
 
+/// Node-local limits apply to all Firecracker launches, including resumes
+/// routed through an existing scheduler binding. Unfunded standalone E2B
+/// clients remain supported only when require_execution_lease is false.
+#[derive(Debug, Config, Clone)]
+pub struct AdmissionConfig {
+    #[config(default = false)]
+    pub enabled: bool,
+    #[config(default = false)]
+    pub require_execution_lease: bool,
+    #[config(default = 85u64)]
+    pub memory_percent: u64,
+    #[config(default = 4294967296u64)]
+    pub initial_memory_bytes: u64,
+    #[config(default = 536870912u64)]
+    pub runtime_overhead_bytes: u64,
+    #[config(default = 2usize)]
+    pub max_starting: usize,
+    #[config(default = 8589934592u64)]
+    pub disk_reserve_bytes: u64,
+    #[config(default = 600u64)]
+    pub maximum_funded_seconds: u64,
+    #[config(default = "$AENV_HOME/runtime-admission")]
+    pub state_path: PathBuf,
+}
+
 #[derive(Debug, Config, Clone)]
 pub struct P2pConfig {
     #[config(default = false)]
@@ -666,6 +693,7 @@ impl_config_default!(
     P2pConfig,
     CustomExtensionConfig,
     MeteringConfig,
+    AdmissionConfig,
 );
 
 impl AppConfig {

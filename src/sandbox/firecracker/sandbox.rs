@@ -167,6 +167,9 @@ pub(super) fn managed_snapshot_base() -> PathBuf {
 /// Internal state is managed via the high-level lifecycle methods.
 /// Implements [`SandboxBackend`] for use by the Orchestrator.
 pub struct FirecrackerSandbox {
+    admission_resources: Option<crate::types::SandboxResources>,
+    execution_lease: Option<runtime_policy::ExecutionLease>,
+    admission: Option<crate::sandbox::admission::AdmissionGuard>,
     id: SandboxId,
     launch: LaunchMode,
     work_dir: TempDir,
@@ -267,6 +270,18 @@ impl FirecrackerCapturedSnapshot {
 
 #[async_trait]
 impl SandboxBackend for FirecrackerSandbox {
+    fn configure_execution(
+        &mut self,
+        resources: crate::types::SandboxResources,
+        lease: Option<runtime_policy::ExecutionLease>,
+    ) -> Result<()> {
+        if self.admission.is_some() {
+            bail!("runtime already has an admission");
+        }
+        self.admission_resources = Some(resources);
+        self.execution_lease = lease;
+        Ok(())
+    }
     async fn start(&mut self) -> Result<()> {
         FirecrackerSandbox::start(self).await
     }
@@ -372,7 +387,10 @@ impl SandboxBackend for FirecrackerSandbox {
                     child.sandbox_id,
                     child.envd_access_token.clone(),
                 )
-                .map(|child| Box::new(child) as Box<dyn SandboxBackend>)
+                .and_then(|mut backend| {
+                    backend.configure_execution(child.resources, child.execution_lease)?;
+                    Ok(Box::new(backend) as Box<dyn SandboxBackend>)
+                })
                 .context("build forked sandbox")
             })
             .collect::<Vec<_>>();
@@ -586,7 +604,37 @@ impl FirecrackerSandbox {
     /// This only waits for the Firecracker API socket to be available and
     /// returns immediately after VM start command is issued.
     pub(crate) async fn start_nowait(&mut self) -> Result<()> {
+        if self.admission.is_some() {
+            bail!("runtime already has an admission");
+        }
         self.launch.validate()?;
+        if let Some(owner) = crate::sandbox::admission::NodeAdmission::global() {
+            let resources = self
+                .admission_resources
+                .or_else(|| match &self.launch {
+                    LaunchMode::Fresh(config) => Some(crate::types::SandboxResources {
+                        cpu_count: config.vcpu_count,
+                        memory_mib: config.mem_size_mib,
+                        disk_size_mib: crate::types::bytes_to_mib_ceil(
+                            config.common.rootfs_virtual_size.unwrap_or(0),
+                        ),
+                    }),
+                    LaunchMode::Resume(_) => None,
+                })
+                .context("snapshot launch omitted its node admission resources")?;
+            self.admission = Some(
+                owner
+                    .acquire(
+                        self.id,
+                        resources,
+                        self.execution_lease,
+                        self.work_dir.path(),
+                    )
+                    .await?,
+            );
+        } else if self.execution_lease.is_some() {
+            bail!("this node does not enforce funded execution");
+        }
         trace!("launch config validated");
         match &self.launch {
             LaunchMode::Fresh(config) => self.start_fresh(config.clone()).await,
@@ -642,6 +690,9 @@ impl FirecrackerSandbox {
             total_elapsed_ms = ready_started.elapsed().as_secs_f64() * 1000.0,
             "sandbox readiness phase completed"
         );
+        if let Some(admission) = &self.admission {
+            admission.ready();
+        }
         Ok(())
     }
 
@@ -898,6 +949,8 @@ impl FirecrackerSandbox {
             .stop(self.runtime_policy.socket_timeout)
             .await?;
         self.detach_meter();
+
+        self.admission.take();
 
         // Clear envd instance
         self.envd_instance = None;
@@ -1160,6 +1213,7 @@ impl Drop for FirecrackerSandbox {
         // blocking drop) before releasing resources.
         self.custom_extension_hook_guard.take();
         self.detach_meter();
+        self.admission.take();
         // In daemon mode, ublk devices survive sandbox drop. The daemon will
         // clean them up on its own shutdown, or they can be explicitly deleted
         // via the orchestrator's stop() path.
@@ -1182,10 +1236,21 @@ impl Drop for FirecrackerSandbox {
 impl FirecrackerSandbox {
     /// Opens usage counters for the Firecracker process now owned by this
     /// sandbox. Called once per boot or resume, after the process exists.
-    fn attach_meter(&self) {
-        if let Some(meter) = SandboxMeter::global() {
-            meter.attach(self.id, self.fc_instance.pid().ok(), self.work_dir.path());
+    async fn attach_meter(&self) -> Result<()> {
+        if let Some(admission) = &self.admission {
+            admission
+                .attach(self.fc_instance.pid()?.as_raw(), self.execution_lease)
+                .await?;
         }
+        if let Some(meter) = SandboxMeter::global() {
+            meter.attach(
+                self.id,
+                self.fc_instance.pid().ok(),
+                self.work_dir.path(),
+                self.execution_lease.map(|lease| lease.activation_id),
+            );
+        }
+        Ok(())
     }
 
     /// Closes the usage counters once the Firecracker process is gone.
@@ -1206,6 +1271,9 @@ impl FirecrackerSandbox {
         debug!(work_dir = %work_dir.path().display(), "sandbox work directory prepared");
 
         Ok(Self {
+            admission_resources: None,
+            execution_lease: None,
+            admission: None,
             id,
             runtime_policy,
             current_rootfs_virtual_size: match &launch {
@@ -1385,7 +1453,7 @@ impl FirecrackerSandbox {
                 Some(&netns),
             )
             .await?;
-        self.attach_meter();
+        self.attach_meter().await?;
 
         let envd_base_url = format!(
             "http://{}:{}",
@@ -1618,7 +1686,7 @@ impl FirecrackerSandbox {
         };
         // Both a freshly spawned and a warm-pool Firecracker now belong to
         // this sandbox; a warm process moves out of the server's cgroup here.
-        self.attach_meter();
+        self.attach_meter().await?;
         if let Some(slot) = self.network_slot.as_mut() {
             slot.set_egress_policy(config.common.network_policy.as_ref())
                 .context("Failed to configure sandbox egress policy for resume")?;

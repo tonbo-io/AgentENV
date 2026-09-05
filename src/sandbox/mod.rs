@@ -1,4 +1,5 @@
 mod access;
+pub mod admission;
 mod backend;
 pub(crate) mod custom_extension;
 mod envd;

@@ -181,6 +181,15 @@ pub struct SandboxesSandboxIdUsageGetPathParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxesSandboxIdUsageGetQueryParams {
+    /// Read an exact runtime instance, including retained final usage after another instance resumes.
+    #[serde(rename = "runtimeInstanceID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_instance_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct V2SandboxesGetQueryParams {
     /// Metadata query used to filter the sandboxes (e.g. \"user=abc&app=prod\"). Each key and values must be URL encoded.
     #[serde(rename = "metadata")]
@@ -1022,6 +1031,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<BuildStatusR
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct ConnectSandbox {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Timeout in seconds from the current time after which the sandbox should expire
     #[serde(rename = "timeout")]
     #[validate(range(min = 0u32))]
@@ -1031,7 +1045,10 @@ pub struct ConnectSandbox {
 impl ConnectSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(timeout: u32) -> ConnectSandbox {
-        ConnectSandbox { timeout }
+        ConnectSandbox {
+            execution_lease: None,
+            timeout,
+        }
     }
 }
 
@@ -1040,8 +1057,11 @@ impl ConnectSandbox {
 /// Should be implemented in a serde serializer
 impl std::fmt::Display for ConnectSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let params: Vec<Option<String>> =
-            vec![Some("timeout".to_string()), Some(self.timeout.to_string())];
+        let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
+            Some("timeout".to_string()),
+            Some(self.timeout.to_string()),
+        ];
 
         write!(
             f,
@@ -1062,6 +1082,7 @@ impl std::str::FromStr for ConnectSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
         }
 
@@ -1085,6 +1106,11 @@ impl std::str::FromStr for ConnectSandbox {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "timeout" => intermediate_rep.timeout.push(
                         <u32 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
@@ -1102,6 +1128,7 @@ impl std::str::FromStr for ConnectSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(ConnectSandbox {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep
                 .timeout
                 .into_iter()
@@ -1793,6 +1820,198 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<Error> {
                     r#"Unable to convert header value '{value}' into Error - {err}"#
                 )),
             },
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+/// Absolute funded authorization for one physical activation. New activations require sequence zero; renewal increases sequence. Equal sequences must replay identical payloads. An expired activation cannot be renewed or restarted.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct ExecutionLease {
+    #[serde(rename = "activationId")]
+    pub activation_id: uuid::Uuid,
+
+    #[serde(rename = "operationId")]
+    pub operation_id: uuid::Uuid,
+
+    #[serde(rename = "sequence")]
+    pub sequence: u64,
+
+    /// Absolute UTC deadline in milliseconds since the Unix epoch.
+    #[serde(rename = "expiresAtUnixMs")]
+    pub expires_at_unix_ms: u64,
+}
+
+impl ExecutionLease {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        activation_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+        sequence: u64,
+        expires_at_unix_ms: u64,
+    ) -> ExecutionLease {
+        ExecutionLease {
+            activation_id,
+            operation_id,
+            sequence,
+            expires_at_unix_ms,
+        }
+    }
+}
+
+/// Converts the ExecutionLease value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for ExecutionLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            // Skipping activationId in query parameter serialization
+
+            // Skipping operationId in query parameter serialization
+            Some("sequence".to_string()),
+            Some(self.sequence.to_string()),
+            Some("expiresAtUnixMs".to_string()),
+            Some(self.expires_at_unix_ms.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a ExecutionLease value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for ExecutionLease {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub activation_id: Vec<uuid::Uuid>,
+            pub operation_id: Vec<uuid::Uuid>,
+            pub sequence: Vec<u64>,
+            pub expires_at_unix_ms: Vec<u64>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing ExecutionLease".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "activationId" => intermediate_rep.activation_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "operationId" => intermediate_rep.operation_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "sequence" => intermediate_rep.sequence.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "expiresAtUnixMs" => intermediate_rep.expires_at_unix_ms.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing ExecutionLease".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(ExecutionLease {
+            activation_id: intermediate_rep
+                .activation_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "activationId missing in ExecutionLease".to_string())?,
+            operation_id: intermediate_rep
+                .operation_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "operationId missing in ExecutionLease".to_string())?,
+            sequence: intermediate_rep
+                .sequence
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sequence missing in ExecutionLease".to_string())?,
+            expires_at_unix_ms: intermediate_rep
+                .expires_at_unix_ms
+                .into_iter()
+                .next()
+                .ok_or_else(|| "expiresAtUnixMs missing in ExecutionLease".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<ExecutionLease> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<ExecutionLease>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<ExecutionLease>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for ExecutionLease - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ExecutionLease> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <ExecutionLease as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into ExecutionLease - {err}"#
+                    )),
+                }
+            }
             std::result::Result::Err(e) => std::result::Result::Err(format!(
                 r#"Unable to convert header: {hdr_value:?} to string: {e}"#
             )),
@@ -2529,6 +2748,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<MemoryMb> {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NewColdSandbox {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Explicit external OCI image reference to use as the sandbox rootfs. Cold starts may pull and convert OCI layers on a cache miss and can take tens of seconds.
     #[serde(rename = "image")]
     #[validate(custom(function = "check_xss_string"))]
@@ -2616,6 +2840,7 @@ impl NewColdSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(image: String) -> NewColdSandbox {
         NewColdSandbox {
+            execution_lease: None,
             image,
             timeout: Some(15),
             auto_pause: Some(true),
@@ -2641,6 +2866,7 @@ impl NewColdSandbox {
 impl std::fmt::Display for NewColdSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
             Some("image".to_string()),
             Some(self.image.to_string()),
             self.timeout
@@ -2704,6 +2930,7 @@ impl std::str::FromStr for NewColdSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub image: Vec<String>,
             pub timeout: Vec<u32>,
             pub auto_pause: Vec<bool>,
@@ -2741,6 +2968,11 @@ impl std::str::FromStr for NewColdSandbox {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "image" => intermediate_rep.image.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
@@ -2825,6 +3057,7 @@ impl std::str::FromStr for NewColdSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(NewColdSandbox {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             image: intermediate_rep
                 .image
                 .into_iter()
@@ -2893,6 +3126,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NewColdSandb
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NewSandbox {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Identifier of the required template/snapshot. Use POST /sandboxes-cold to create a sandbox directly from an external OCI image.
     #[serde(rename = "templateID")]
     #[validate(custom(function = "check_xss_string"))]
@@ -2962,6 +3200,7 @@ impl NewSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(template_id: String) -> NewSandbox {
         NewSandbox {
+            execution_lease: None,
             template_id,
             timeout: Some(15),
             auto_pause: Some(true),
@@ -2984,6 +3223,7 @@ impl NewSandbox {
 impl std::fmt::Display for NewSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
             Some("templateID".to_string()),
             Some(self.template_id.to_string()),
             self.timeout
@@ -3039,6 +3279,7 @@ impl std::str::FromStr for NewSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub template_id: Vec<String>,
             pub timeout: Vec<u32>,
             pub auto_pause: Vec<bool>,
@@ -3073,6 +3314,11 @@ impl std::str::FromStr for NewSandbox {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "templateID" => intermediate_rep.template_id.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
@@ -3146,6 +3392,7 @@ impl std::str::FromStr for NewSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(NewSandbox {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             template_id: intermediate_rep
                 .template_id
                 .into_iter()
@@ -4282,6 +4529,11 @@ impl std::str::FromStr for NodeStatus {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct ResumedSandbox {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Time to live for the sandbox in seconds.
     #[serde(rename = "timeout")]
     #[validate(range(min = 0u32))]
@@ -4292,7 +4544,10 @@ pub struct ResumedSandbox {
 impl ResumedSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> ResumedSandbox {
-        ResumedSandbox { timeout: Some(15) }
+        ResumedSandbox {
+            execution_lease: None,
+            timeout: Some(15),
+        }
     }
 }
 
@@ -4302,6 +4557,7 @@ impl ResumedSandbox {
 impl std::fmt::Display for ResumedSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
             self.timeout
                 .as_ref()
                 .map(|timeout| ["timeout".to_string(), timeout.to_string()].join(",")),
@@ -4326,6 +4582,7 @@ impl std::str::FromStr for ResumedSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
         }
 
@@ -4349,6 +4606,11 @@ impl std::str::FromStr for ResumedSandbox {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "timeout" => intermediate_rep.timeout.push(
                         <u32 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
@@ -4366,6 +4628,7 @@ impl std::str::FromStr for ResumedSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(ResumedSandbox {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep.timeout.into_iter().next(),
         })
     }
@@ -4416,6 +4679,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ResumedSandb
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct Sandbox {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Identifier of the template from which is the sandbox created
     #[serde(rename = "templateID")]
     #[validate(custom(function = "check_xss_string"))]
@@ -4477,6 +4745,7 @@ impl Sandbox {
         runtime_started_at: chrono::DateTime<chrono::Utc>,
     ) -> Sandbox {
         Sandbox {
+            execution_lease: None,
             template_id,
             sandbox_id,
             alias: None,
@@ -4496,6 +4765,7 @@ impl Sandbox {
 impl std::fmt::Display for Sandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
             Some("templateID".to_string()),
             Some(self.template_id.to_string()),
             Some("sandboxID".to_string()),
@@ -4552,6 +4822,7 @@ impl std::str::FromStr for Sandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub template_id: Vec<String>,
             pub sandbox_id: Vec<String>,
             pub alias: Vec<String>,
@@ -4582,6 +4853,11 @@ impl std::str::FromStr for Sandbox {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "templateID" => intermediate_rep.template_id.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
@@ -4637,6 +4913,7 @@ impl std::str::FromStr for Sandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(Sandbox {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             template_id: intermediate_rep
                 .template_id
                 .into_iter()
@@ -4889,6 +5166,11 @@ impl std::ops::DerefMut for SandboxAutoResumeEnabled {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxDetail {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Identifier of the template from which is the sandbox created
     #[serde(rename = "templateID")]
     #[validate(custom(function = "check_xss_string"))]
@@ -4998,6 +5280,7 @@ impl SandboxDetail {
         state: models::SandboxState,
     ) -> SandboxDetail {
         SandboxDetail {
+            execution_lease: None,
             template_id,
             alias: None,
             sandbox_id,
@@ -5026,6 +5309,7 @@ impl SandboxDetail {
 impl std::fmt::Display for SandboxDetail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
             Some("templateID".to_string()),
             Some(self.template_id.to_string()),
             self.alias
@@ -5099,6 +5383,7 @@ impl std::str::FromStr for SandboxDetail {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub template_id: Vec<String>,
             pub alias: Vec<String>,
             pub sandbox_id: Vec<String>,
@@ -5138,6 +5423,11 @@ impl std::str::FromStr for SandboxDetail {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "templateID" => intermediate_rep.template_id.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
@@ -5232,6 +5522,7 @@ impl std::str::FromStr for SandboxDetail {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxDetail {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             template_id: intermediate_rep
                 .template_id
                 .into_iter()
@@ -5347,6 +5638,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SandboxDetai
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxForkRequest {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Time to live for the new forked sandboxes in seconds. When omitted, each fork inherits the source sandbox timeout.
     #[serde(rename = "timeout")]
     #[validate(range(min = 0u32))]
@@ -5364,6 +5660,7 @@ impl SandboxForkRequest {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> SandboxForkRequest {
         SandboxForkRequest {
+            execution_lease: None,
             timeout: None,
             count: Some(1),
         }
@@ -5376,6 +5673,7 @@ impl SandboxForkRequest {
 impl std::fmt::Display for SandboxForkRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
             self.timeout
                 .as_ref()
                 .map(|timeout| ["timeout".to_string(), timeout.to_string()].join(",")),
@@ -5403,6 +5701,7 @@ impl std::str::FromStr for SandboxForkRequest {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
             pub count: Vec<u32>,
         }
@@ -5427,6 +5726,11 @@ impl std::str::FromStr for SandboxForkRequest {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "timeout" => intermediate_rep.timeout.push(
                         <u32 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
@@ -5448,6 +5752,7 @@ impl std::str::FromStr for SandboxForkRequest {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxForkRequest {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep.timeout.into_iter().next(),
             count: intermediate_rep.count.into_iter().next(),
         })
@@ -6740,6 +7045,11 @@ impl std::str::FromStr for SandboxState {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxTimeoutRequest {
+    #[serde(rename = "executionLease")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_lease: Option<models::ExecutionLease>,
+
     /// Timeout in seconds from the current time after which the sandbox should expire
     #[serde(rename = "timeout")]
     #[validate(range(min = 0u32))]
@@ -6749,7 +7059,10 @@ pub struct SandboxTimeoutRequest {
 impl SandboxTimeoutRequest {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(timeout: u32) -> SandboxTimeoutRequest {
-        SandboxTimeoutRequest { timeout }
+        SandboxTimeoutRequest {
+            execution_lease: None,
+            timeout,
+        }
     }
 }
 
@@ -6758,8 +7071,11 @@ impl SandboxTimeoutRequest {
 /// Should be implemented in a serde serializer
 impl std::fmt::Display for SandboxTimeoutRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let params: Vec<Option<String>> =
-            vec![Some("timeout".to_string()), Some(self.timeout.to_string())];
+        let params: Vec<Option<String>> = vec![
+            // Skipping executionLease in query parameter serialization
+            Some("timeout".to_string()),
+            Some(self.timeout.to_string()),
+        ];
 
         write!(
             f,
@@ -6780,6 +7096,7 @@ impl std::str::FromStr for SandboxTimeoutRequest {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
         }
 
@@ -6803,6 +7120,11 @@ impl std::str::FromStr for SandboxTimeoutRequest {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
+                    "executionLease" => intermediate_rep.execution_lease.push(
+                        <models::ExecutionLease as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "timeout" => intermediate_rep.timeout.push(
                         <u32 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
@@ -6820,6 +7142,7 @@ impl std::str::FromStr for SandboxTimeoutRequest {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxTimeoutRequest {
+            execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep
                 .timeout
                 .into_iter()

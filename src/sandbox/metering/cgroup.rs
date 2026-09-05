@@ -39,7 +39,7 @@ const MOVE_PASSES: usize = 3;
 
 #[derive(Debug)]
 pub(crate) struct CgroupTree {
-    sandboxes_dir: PathBuf,
+    pub(crate) sandboxes_dir: PathBuf,
 }
 
 impl CgroupTree {

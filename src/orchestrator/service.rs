@@ -356,6 +356,7 @@ where
         }
 
         let CreateSandboxRequest {
+            execution_lease,
             source,
             timeout,
             timeout_action,
@@ -367,6 +368,10 @@ where
             secure,
         } = request;
         let envd_access_token = secure.then(|| self.access_tokens.generate(sandbox_id));
+        let launch_timeout = execution_lease.map_or_else(
+            || NewTimeout::Set(timeout.unwrap_or(self.default_sandbox_timeout)),
+            NewTimeout::Funded,
+        );
         info!(timeout = ?timeout, "creating sandbox");
 
         let result = match source {
@@ -428,7 +433,7 @@ where
                     snapshot,
                     launch_config,
                     transitional_metadata,
-                    NewTimeout::Set(timeout.unwrap_or(self.default_sandbox_timeout)),
+                    launch_timeout,
                 ))
                 .await
             }
@@ -488,7 +493,7 @@ where
                     build_spec,
                     launch_config,
                     transitional_metadata,
-                    NewTimeout::Set(timeout.unwrap_or(self.default_sandbox_timeout)),
+                    launch_timeout,
                 ))
                 .await
             }
@@ -540,6 +545,12 @@ where
         self.ensure_accepting_lifecycle_operations()?;
 
         info!("forking sandboxes");
+        if matches!(new_timeout, NewTimeout::Funded(_)) && count != 1 {
+            return Err(OrchestratorError::InvalidTimeout {
+                sandbox_id: source_sandbox_id,
+                timeout: "funded forks require one unique activation per request".into(),
+            });
+        }
 
         let source_handle = {
             let sandboxes = self.sandboxes.read().await;
@@ -569,6 +580,11 @@ where
             .map(|_| {
                 let sandbox_id = SandboxId::new();
                 SandboxForkSpec {
+                    execution_lease: match new_timeout {
+                        NewTimeout::Funded(lease) => Some(lease),
+                        _ => None,
+                    },
+                    resources: source_metadata.resources,
                     sandbox_id,
                     envd_access_token: source_metadata
                         .secure
@@ -648,6 +664,7 @@ where
             metadata.created_at = now;
             metadata.runtime_started_at = now;
             metadata.paused_state = None;
+            metadata.execution_lease = None;
             metadata.update_timeout(new_timeout);
 
             let proxy_target = match Self::proxy_target_from_sandbox(backend.as_ref()) {
@@ -1851,6 +1868,20 @@ where
         sandbox_id: SandboxId,
         timeout: NewTimeout,
     ) -> Result<SandboxMetadata> {
+        if let NewTimeout::Funded(lease) = timeout {
+            let owner = crate::sandbox::admission::NodeAdmission::global().ok_or_else(|| {
+                OrchestratorError::InvalidTimeout {
+                    sandbox_id,
+                    timeout: "node execution enforcement is disabled".into(),
+                }
+            })?;
+            owner.renew(sandbox_id, lease).await.map_err(|error| {
+                OrchestratorError::InvalidTimeout {
+                    sandbox_id,
+                    timeout: error.to_string(),
+                }
+            })?;
+        }
         let update_result = self
             .store
             .update_if_state(&sandbox_id, &[SandboxState::Running], |metadata| {
@@ -1868,6 +1899,15 @@ where
                 other => OrchestratorError::from(other),
             })?;
         Ok(update_result.current)
+    }
+
+    pub async fn renew_execution(
+        &self,
+        sandbox_id: SandboxId,
+        lease: runtime_policy::ExecutionLease,
+    ) -> Result<SandboxMetadata> {
+        self.maybe_update_running_timeout(sandbox_id, NewTimeout::Funded(lease))
+            .await
     }
 
     /// Joins a concurrent pause already in progress for the same sandbox.
@@ -1943,17 +1983,37 @@ where
             return Ok(Vec::new());
         }
 
-        let expired = self.store.list_expired(SystemTime::now()).await?;
+        let now = SystemTime::now();
+        let admission = crate::sandbox::admission::NodeAdmission::global();
+        let expired = self.store.list().await?.into_iter().filter(|metadata| {
+            metadata.expires_at.is_some_and(|deadline| deadline <= now)
+                || admission
+                    .as_ref()
+                    .is_some_and(|owner| owner.runtime_dead(metadata.id))
+        });
         let mut evicted_ids = Vec::new();
 
         for metadata in expired {
             if metadata.state != SandboxState::Running {
                 continue;
             }
-            if let Err(err) = match metadata.timeout_action {
-                SandboxTimeoutAction::Pause => self.pause_sandbox_inner(metadata.id).await,
-                SandboxTimeoutAction::Delete => self.delete_sandbox_inner(metadata.id).await,
-            } {
+            // A funded deadline or a cgroup OOM may already have stopped the
+            // process independently. It cannot produce a valid pause snapshot.
+            let dead = admission
+                .as_ref()
+                .is_some_and(|owner| owner.runtime_dead(metadata.id));
+            let funded_expired = metadata
+                .execution_lease
+                .is_some_and(|lease| lease.remaining(now).is_err());
+            let result = if dead || funded_expired {
+                self.delete_sandbox_inner(metadata.id).await
+            } else {
+                match metadata.timeout_action {
+                    SandboxTimeoutAction::Pause => self.pause_sandbox_inner(metadata.id).await,
+                    SandboxTimeoutAction::Delete => self.delete_sandbox_inner(metadata.id).await,
+                }
+            };
+            if let Err(err) = result {
                 warn!(
                     sandbox_id = %metadata.id,
                     action = ?metadata.timeout_action,
@@ -2068,6 +2128,19 @@ where
                 return Err(err);
             }
         };
+        let lease = match plan.timeout() {
+            NewTimeout::Funded(lease) => Some(lease),
+            _ => None,
+        };
+        if let Err(source) = sandbox.configure_execution(plan.resources(), lease) {
+            self.rollback_failed_launch_metadata(&plan, transitional_state)
+                .await;
+            return Err(OrchestratorError::SandboxOperationFailed {
+                sandbox_id,
+                operation: SandboxOperation::Start,
+                source,
+            });
+        }
 
         // Protect artifacts before the backend opens them.
         let startup_artifacts = sandbox.startup_artifacts();
@@ -2185,6 +2258,7 @@ where
                     metadata.resources = runtime_resources;
                     metadata.state = SandboxState::Running;
                     metadata.runtime_started_at = runtime_started_at;
+                    metadata.execution_lease = None;
                     metadata.update_timeout(launch_timeout);
                 },
             )

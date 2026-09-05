@@ -1085,6 +1085,7 @@ fn create_request(
     };
 
     CreateSandboxRequest {
+        execution_lease: None,
         source: SandboxLaunchSource::Snapshot(Box::new(RunnableSnapshot::mock())),
         timeout: timeout_secs.map(Duration::from_secs),
         timeout_action: SandboxTimeoutAction::Pause,
@@ -1139,6 +1140,7 @@ async fn create_sandbox_from_image_uses_fresh_launch_metadata() -> Result<()> {
     };
     let created = orchestrator
         .create_sandbox(CreateSandboxRequest {
+            execution_lease: None,
             source: SandboxLaunchSource::Image {
                 image_ref: "ubuntu:24.04".to_string(),
                 overlaybd_config_path: PathBuf::from("/tmp/ubuntu-image.json"),
