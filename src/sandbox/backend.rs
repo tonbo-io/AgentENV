@@ -35,6 +35,13 @@ pub trait PausedSandboxState: Any + fmt::Debug + Send + Sync + 'static {
     /// The orchestrator only carries this value to the image-liveness layer; it
     /// does not interpret the backend-specific artifact identities inside it.
     fn runtime_artifacts(&self) -> RuntimeArtifactSet;
+    /// Capture immutable, independently owned publication artifacts without starting a VM.
+    /// The caller excludes resume/delete until this future completes; returned artifacts
+    /// must remain valid after that exclusion is released and the source is deleted.
+    fn capture_snapshot(&self) -> futures::future::BoxFuture<'_, Result<CapturedSandboxSnapshot>> {
+        Box::pin(async { anyhow::bail!("backend does not support capturing paused state") })
+    }
+
     /// Effective envd control-plane port persisted with the paused runtime, when available.
     fn control_plane_port(&self) -> Option<u16> {
         None

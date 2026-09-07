@@ -825,7 +825,7 @@ components:
         pauseAfterCapture:
           type: boolean
           default: false
-          description: Keep the source sandbox paused before publishing and returning the committed snapshot. If publication fails, AgentENV attempts to resume the source so the request can be retried.
+          description: Keep the source sandbox paused before publishing and returning the committed snapshot. An already paused sandbox is captured without starting a VM. Publication failure leaves the source paused and permits retry with the same snapshotId; only an explicit resume wakes it.
 
     SandboxForkRequest:
       type: object

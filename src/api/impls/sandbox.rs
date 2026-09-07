@@ -1370,15 +1370,9 @@ impl Sandboxes<()> for ApiImpl {
         {
             Ok(snapshot) => snapshot,
             Err(err) => {
-                if pause_after_capture {
-                    if let Err(resume_err) = self
-                        .orchestrator
-                        .resume_sandbox(sandbox_id, NewTimeout::UseExisting)
-                        .await
-                    {
-                        warn!(error = ?resume_err, %sandbox_id, "failed to resume source sandbox after snapshot publication failure");
-                    }
-                }
+                // LeavePaused is also a no-execution guarantee on publication
+                // failure. The caller can retry the same snapshot ID directly
+                // from persisted paused state; only an explicit resume may wake it.
                 if matches!(
                     err,
                     crate::snapshot::RepositoryError::SnapshotIdConflict { .. }

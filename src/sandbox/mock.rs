@@ -29,6 +29,10 @@ use crate::snapshot::RunnableSnapshot;
 pub struct MockSnapshot;
 
 impl PausedSandboxState for MockSnapshot {
+    fn capture_snapshot(&self) -> futures::future::BoxFuture<'_, Result<CapturedSandboxSnapshot>> {
+        Box::pin(async { Ok(CapturedSandboxSnapshot::new(MockCapturedSnapshot)) })
+    }
+
     fn encode(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }

@@ -332,6 +332,46 @@ async fn rewrite_live_runtime_config_for_restack(
     Ok(())
 }
 
+/// Adopt every local immutable layer into a capture-owned directory. Unlike a
+/// live pause, this cannot seal an upper: paused configs must already be sealed.
+/// Remote lowers retain their content-addressed repository references.
+pub(super) async fn stage_paused_overlaybd_image(source: &Path, output: &Path) -> Result<PathBuf> {
+    let mut config = overlaybd::config::load_image_config(source)?;
+    ensure!(
+        config.upper == Default::default(),
+        "paused image still has a writable upper"
+    );
+    tokio::fs::create_dir_all(output).await?;
+    for (index, layer) in config.lowers.iter_mut().enumerate() {
+        // Publication supports immutable local files and repository digests.
+        // Reject alternate mutable/download layouts rather than retaining paths
+        // owned by the source sandbox after the capture exclusion is released.
+        ensure!(
+            layer.target_file.is_empty() && layer.dir.is_empty() && layer.gzip_index.is_empty(),
+            "paused image has unsupported local layer indirection"
+        );
+        if !layer.file.is_empty() {
+            let source = Path::new(&layer.file);
+            let destination = output.join(format!("{index:04}")).join(
+                source
+                    .file_name()
+                    .context("paused layer has no file name")?,
+            );
+            link_or_copy_runtime_layer(source, &destination).await?;
+            layer.file = destination.display().to_string();
+        }
+    }
+    config.result_file = output.join("result.txt").display().to_string();
+    config.record_trace_path.clear();
+    let path = output.join("image.json");
+    write_bytes_atomically(
+        &path,
+        &serde_json::to_vec_pretty(&config)?,
+        "paused image config",
+    )?;
+    Ok(path)
+}
+
 pub(super) async fn stage_overlaybd_snapshot_from_live_runtime(
     live_runtime_image_config_path: &Path,
     output_dir: &Path,
@@ -798,6 +838,42 @@ mod tests {
     use bytes::Bytes;
     use firecracker_client::models::DirtyMemoryRange;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn paused_capture_owns_local_layers_after_source_deletion() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        let layer = source.path().join("managed-base.commit");
+        fs::write(&layer, b"immutable machine disk")?;
+        let config = ImageConfig {
+            lowers: vec![local_layer_config(&layer)],
+            ..Default::default()
+        };
+        let config_path = source.path().join("image.json");
+        fs::write(&config_path, serde_json::to_vec(&config)?)?;
+        let copied = stage_paused_overlaybd_image(&config_path, target.path()).await?;
+        source.close()?;
+        let copied = overlaybd::config::load_image_config(copied)?;
+        assert_eq!(fs::read(&copied.lowers[0].file)?, b"immutable machine disk");
+        assert!(Path::new(&copied.lowers[0].file).starts_with(target.path()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn paused_capture_rejects_an_unsealed_writable_upper() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        let mut config = ImageConfig::default();
+        config.upper.data = source.path().join("upper.data").display().to_string();
+        config.upper.index = source.path().join("upper.index").display().to_string();
+        let path = source.path().join("image.json");
+        fs::write(&path, serde_json::to_vec(&config)?)?;
+        let error = stage_paused_overlaybd_image(&path, target.path())
+            .await
+            .expect_err("must not discard writable upper");
+        assert!(error.to_string().contains("writable upper"));
+        Ok(())
+    }
 
     #[test]
     fn dirty_ranges_to_segment_mappings_splits_large_ranges() {

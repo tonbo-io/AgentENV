@@ -6847,7 +6847,7 @@ pub struct SandboxSnapshotRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Keep the source sandbox paused before publishing and returning the committed snapshot. If publication fails, AgentENV attempts to resume the source so the request can be retried.
+    /// Keep the source sandbox paused before publishing and returning the committed snapshot. An already paused sandbox is captured without starting a VM. Publication failure leaves the source paused and permits retry with the same snapshotId; only an explicit resume wakes it.
     #[serde(rename = "pauseAfterCapture")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pause_after_capture: Option<bool>,

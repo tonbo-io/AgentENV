@@ -2143,6 +2143,82 @@ async fn capture_snapshot_without_runtime_handle_removes_sandbox_and_releases_me
 }
 
 #[tokio::test]
+async fn capture_paused_snapshot_does_not_wake_or_rebill_source() -> Result<()> {
+    setup();
+    let behavior = Arc::new(MockBehavior::new());
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior.clone())).await;
+    let created = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    orchestrator.pause_sandbox(created.id).await?;
+    let stopped = behavior.stop_calls();
+    for operation in [
+        MockOperation::Build,
+        MockOperation::BuildFromSnapshot,
+        MockOperation::Start,
+        MockOperation::Resume,
+        MockOperation::Snapshot,
+    ] {
+        behavior.set_on_operation(
+            operation,
+            Arc::new(|| panic!("paused capture started a runtime operation")),
+        );
+    }
+    for _ in 0..2 {
+        let capture = orchestrator
+            .capture_snapshot(created.id, SandboxSnapshotSourceDisposition::LeavePaused)
+            .await?;
+        assert_eq!(capture.metadata.state, SandboxState::Paused);
+        assert!(capture
+            .captured_snapshot
+            .downcast_ref::<crate::sandbox::mock::MockCapturedSnapshot>()
+            .is_some());
+        assert_proxy_paused(&orchestrator, &created.id).await?;
+        assert_eq!(behavior.stop_calls(), stopped);
+        assert_metrics_values(&orchestrator, 1, 0, 0, 0, 0, 0).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_paused_capture_keeps_source_paused_and_retryable() -> Result<()> {
+    #[derive(Debug)]
+    struct UnsupportedPausedCapture;
+    impl PausedSandboxState for UnsupportedPausedCapture {
+        fn encode(&self) -> anyhow::Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn runtime_artifacts(&self) -> RuntimeArtifactSet {
+            RuntimeArtifactSet::empty()
+        }
+    }
+    setup();
+    let orchestrator = make_orchestrator().await;
+    let created = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    orchestrator.pause_sandbox(created.id).await?;
+    let mut metadata = orchestrator.store.get(&created.id).await?.unwrap();
+    let original = metadata.paused_state.clone();
+    metadata.paused_state = Some(Arc::new(UnsupportedPausedCapture));
+    orchestrator.store.update(metadata).await?;
+    orchestrator
+        .capture_snapshot(created.id, SandboxSnapshotSourceDisposition::LeavePaused)
+        .await
+        .expect_err("unsupported backend must fail closed");
+    let mut metadata = orchestrator.store.get(&created.id).await?.unwrap();
+    assert_eq!(metadata.state, SandboxState::Paused);
+    metadata.paused_state = original;
+    orchestrator.store.update(metadata).await?;
+    orchestrator
+        .capture_snapshot(created.id, SandboxSnapshotSourceDisposition::LeavePaused)
+        .await?;
+    assert_proxy_paused(&orchestrator, &created.id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn capture_snapshot_rejects_non_running_states() -> Result<()> {
     setup();
     let orchestrator = make_orchestrator().await;

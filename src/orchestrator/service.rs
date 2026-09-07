@@ -1311,6 +1311,11 @@ where
             Ok(_) => {}
             Err(StoreError::StateConflict { actual_state, .. }) => {
                 return match actual_state {
+                    SandboxState::Paused
+                        if source_disposition == SandboxSnapshotSourceDisposition::LeavePaused =>
+                    {
+                        self.capture_already_paused_snapshot(sandbox_id).await
+                    }
                     SandboxState::Killing => Err(OrchestratorError::SandboxNotFound(sandbox_id)),
                     _ => Err(OrchestratorError::InvalidSandboxState {
                         sandbox_id,
@@ -1439,6 +1444,57 @@ where
             metadata,
             captured_snapshot,
         })
+    }
+
+    async fn capture_already_paused_snapshot(
+        &self,
+        sandbox_id: SandboxId,
+    ) -> Result<SnapshotCaptureResult> {
+        // Exclude resume and delete while the backend adopts immutable files.
+        // Publication may outlive this exclusion: the returned capture owns all
+        // local artifacts independently of the paused sandbox's persistence root.
+        self.store
+            .update_state_if_state(
+                &sandbox_id,
+                SandboxState::Snapshotting,
+                &[SandboxState::Paused],
+            )
+            .await?;
+        let capture = async {
+            let mut metadata = self
+                .store
+                .get(&sandbox_id)
+                .await?
+                .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?;
+            let paused = metadata.paused_state.as_ref().ok_or_else(|| {
+                OrchestratorError::InternalError(
+                    "paused sandbox has no persisted backend state".to_string(),
+                )
+            })?;
+            let captured_snapshot = paused.capture_snapshot().await.map_err(|source| {
+                OrchestratorError::SandboxOperationFailed {
+                    sandbox_id,
+                    operation: SandboxOperation::Snapshot,
+                    source,
+                }
+            })?;
+            metadata.state = SandboxState::Paused;
+            Ok(SnapshotCaptureResult {
+                metadata,
+                captured_snapshot,
+            })
+        }
+        .await;
+        // A failed copy must leave the source paused and retryable. No VM,
+        // execution lease, routing entry, or lifecycle usage event is created.
+        self.store
+            .update_state_if_state(
+                &sandbox_id,
+                SandboxState::Paused,
+                &[SandboxState::Snapshotting],
+            )
+            .await?;
+        capture
     }
 
     async fn capture_snapshot_leaving_source_paused(

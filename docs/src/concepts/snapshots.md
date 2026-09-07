@@ -27,6 +27,12 @@ Recoverable failures leave the sandbox running and surface the error to the
 caller. Terminal failures — where the runtime was mutated past safe resume —
 tear down the sandbox.
 
+## Capture Without Waking a Paused Sandbox
+
+Send `POST /sandboxes/{id}/snapshots` with `pauseAfterCapture: true` to capture either a running or an already paused sandbox and leave it paused. An already paused source transitions through `Paused → Snapshotting → Paused`; capture copies or adopts its immutable artifacts without starting a VM, renewing an execution lease, or producing a new running interval. Resume and deletion wait until the capture owns its local artifacts independently of the source.
+
+If repository publication fails, the source remains paused. Retry with the same caller-assigned `snapshotId`; a committed publication is returned idempotently, and an uncommitted one can be captured again from paused state. Waking the source requires an explicit resume. Requests with `pauseAfterCapture` omitted or false still require a running source.
+
 ## OverlayBD Image Publication
 
 When the snapshot repository backend is `oss` and `[snapshot.image_publish]` is

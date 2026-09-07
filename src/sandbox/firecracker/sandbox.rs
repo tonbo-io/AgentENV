@@ -22,6 +22,7 @@ use super::mmds::MmdsMetadata;
 use super::overlaybd_snapshot::{
     build_mem_snapshot_image_config, convert_dirty_memory_to_overlaybd,
     restack_snapshot_overlaybd_device, restack_snapshot_overlaybd_rootfs,
+    stage_paused_overlaybd_image,
 };
 use super::pool::{warm_stderr_path, warm_stdout_path, FirecrackerPool};
 use super::FirecrackerInstance;
@@ -236,6 +237,65 @@ impl FirecrackerPausedState {
 }
 
 impl PausedSandboxState for FirecrackerPausedState {
+    fn capture_snapshot(&self) -> futures::future::BoxFuture<'_, Result<CapturedSandboxSnapshot>> {
+        Box::pin(async move {
+            let config = &self.snapshot_config;
+            let rootfs = config
+                .common
+                .rootfs_image_config
+                .as_ref()
+                .context("paused capture requires an overlaybd rootfs")?;
+            let root = Arc::new(PersistentSnapshotRootGuard::new(
+                managed_snapshot_base()
+                    .join("paused-captures")
+                    .join(Uuid::now_v7().to_string()),
+            ));
+            root.prepare().await?;
+            let vm_state = root.path().join(VM_STATE_FILE_NAME);
+            copy_cow(&config.vm_state_path, &vm_state).await?;
+            let memory = stage_paused_overlaybd_image(
+                &config.mem_overlaybd_config.image_config_path,
+                &root.path().join("memory"),
+            )
+            .await?;
+            let rootfs = stage_paused_overlaybd_image(
+                &rootfs.image_config_path,
+                &root.path().join("rootfs"),
+            )
+            .await?;
+            let tools = root.path().join("tools.ext4");
+            copy_cow(
+                &config
+                    .common
+                    .resolved_tools_drive_path(ConfigManager::global_config())?,
+                &tools,
+            )
+            .await?;
+            let mut manifest = FirecrackerSnapshotManifest::new(
+                vm_state,
+                memory,
+                config.mem_virtual_size,
+                rootfs,
+                config
+                    .common
+                    .rootfs_virtual_size
+                    .context("paused capture requires rootfs size")?,
+                tools,
+                &config.common.extra_drives,
+            )?;
+            for (index, drive) in manifest.attached_drives.iter_mut().enumerate() {
+                drive.image_config_path = stage_paused_overlaybd_image(
+                    &drive.image_config_path,
+                    &root.path().join(format!("drive-{index}")),
+                )
+                .await?;
+            }
+            Ok(CapturedSandboxSnapshot::new(
+                FirecrackerCapturedSnapshot::new(manifest, Some(root)),
+            ))
+        })
+    }
+
     fn control_plane_port(&self) -> Option<u16> {
         let port = self.snapshot_config.common.control_plane_port;
         (port != 0).then_some(port)
