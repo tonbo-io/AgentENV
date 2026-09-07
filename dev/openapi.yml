@@ -1343,7 +1343,7 @@ components:
     NodeDrainObservation:
       type: object
       description: Durable admission closure and current node observations. This is not authorization to terminate a host or proof of physical cleanup.
-      required: [nodeID, serviceInstanceID, drainID, admissionClosed, inFlightStarts, inFlightOperations, interruptedOperations, sandboxCount, pausedSandboxCount, sandboxStartingCount]
+      required: [nodeID, serviceInstanceID, drainID, admissionClosed, inFlightStarts, inFlightOperations, interruptedOperations, sandboxCount, pausedSandboxCount, sandboxStartingCount, sandboxIDs]
       properties:
         nodeID:
           type: string
@@ -1353,6 +1353,11 @@ components:
           type: string
         admissionClosed:
           type: boolean
+        sandboxIDs:
+          type: array
+          description: Complete local metadata inventory, including paused and cleanup-pending sandboxes. Not proof of physical cleanup.
+          items:
+            type: string
         inFlightStarts:
           type: integer
           format: int64
