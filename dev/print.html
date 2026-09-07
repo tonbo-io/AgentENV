@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-84d6289e.js";
+            window.path_to_searchindex_js = "searchindex-4675bc62.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c868df7a.js"></script>
@@ -3507,6 +3507,9 @@ services/                       # distributed control plane (Go)
 ├── api/proto/                  # protobuf contracts
 └── shared/                     # config, logging
 </code></pre>
+<h3 id="pooled-device-allocation-identity"><a class="header" href="#pooled-device-allocation-identity">Pooled device allocation identity</a></h3>
+<p>Every daemon-side pooled acquisition returns a fresh <code>allocation_id</code> in addition to the reusable device number. A shared device tracks a set of acquisition identities; release must present its own identity, and only removal of the last distinct identity returns the device to the pool. Old, unknown and repeated identities are rejected before changing an active allocation. The daemon client, runtime handles and protocol share this contract; raw non-pooled runtime devices carry no pooled allocation identity. Update the runtime and its bundled daemon together.</p>
+<p>This fencing does not turn an uncertain release into confirmed cleanup. A lost release response remains unresolved: callers must not interpret an unknown allocation as success or retry a numeric device ID without its identity. Durable cleanup receipts, device reconciliation and node-wide physical cleanup evidence remain separate requirements before safe host termination.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="sandbox-network-architecture"><a class="header" href="#sandbox-network-architecture">Sandbox Network Architecture</a></h1>
 <p>This document describes the network data plane for one AgentENV node. It covers the Linux network namespaces used by Firecracker sandboxes, host and namespace iptables, runtime egress policy updates, and the namespace-local egress proxy.</p>
