@@ -1754,10 +1754,18 @@ where
 #[tracing::instrument(skip_all)]
 fn sandboxes_sandbox_id_delete_validation(
     path_params: models::SandboxesSandboxIdDeletePathParams,
-) -> std::result::Result<(models::SandboxesSandboxIdDeletePathParams,), ValidationErrors> {
+    query_params: models::SandboxesSandboxIdDeleteQueryParams,
+) -> std::result::Result<
+    (
+        models::SandboxesSandboxIdDeletePathParams,
+        models::SandboxesSandboxIdDeleteQueryParams,
+    ),
+    ValidationErrors,
+> {
     path_params.validate()?;
+    query_params.validate()?;
 
-    Ok((path_params,))
+    Ok((path_params, query_params))
 }
 /// SandboxesSandboxIdDelete - DELETE /sandboxes/{sandboxID}
 #[tracing::instrument(skip_all)]
@@ -1767,6 +1775,7 @@ async fn sandboxes_sandbox_id_delete<I, A, E, C>(
     cookies: CookieJar,
     headers: HeaderMap,
     Path(path_params): Path<models::SandboxesSandboxIdDeletePathParams>,
+    QueryExtra(query_params): QueryExtra<models::SandboxesSandboxIdDeleteQueryParams>,
     State(api_impl): State<I>,
 ) -> Result<Response, StatusCode>
 where
@@ -1793,12 +1802,13 @@ where
     };
 
     #[allow(clippy::redundant_closure)]
-    let validation =
-        tokio::task::spawn_blocking(move || sandboxes_sandbox_id_delete_validation(path_params))
-            .await
-            .unwrap();
+    let validation = tokio::task::spawn_blocking(move || {
+        sandboxes_sandbox_id_delete_validation(path_params, query_params)
+    })
+    .await
+    .unwrap();
 
-    let Ok((path_params,)) = validation else {
+    let Ok((path_params, query_params)) = validation else {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Body::from(validation.unwrap_err().to_string()))
@@ -1807,7 +1817,14 @@ where
 
     let result = api_impl
         .as_ref()
-        .sandboxes_sandbox_id_delete(&method, &host, &cookies, &claims, &path_params)
+        .sandboxes_sandbox_id_delete(
+            &method,
+            &host,
+            &cookies,
+            &claims,
+            &path_params,
+            &query_params,
+        )
         .await;
 
     let mut response = Response::builder();
@@ -1818,6 +1835,24 @@ where
                                                 => {
                                                   let mut response = response.status(204);
                                                   response.body(Body::empty())
+                                                },
+                                                apis::sandboxes::SandboxesSandboxIdDeleteResponse::Status409_Conflict
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(409);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
                                                 },
                                                 apis::sandboxes::SandboxesSandboxIdDeleteResponse::Status404_NotFound
                                                     (body)
@@ -2434,10 +2469,18 @@ where
 #[tracing::instrument(skip_all)]
 fn sandboxes_sandbox_id_pause_post_validation(
     path_params: models::SandboxesSandboxIdPausePostPathParams,
-) -> std::result::Result<(models::SandboxesSandboxIdPausePostPathParams,), ValidationErrors> {
+    query_params: models::SandboxesSandboxIdPausePostQueryParams,
+) -> std::result::Result<
+    (
+        models::SandboxesSandboxIdPausePostPathParams,
+        models::SandboxesSandboxIdPausePostQueryParams,
+    ),
+    ValidationErrors,
+> {
     path_params.validate()?;
+    query_params.validate()?;
 
-    Ok((path_params,))
+    Ok((path_params, query_params))
 }
 /// SandboxesSandboxIdPausePost - POST /sandboxes/{sandboxID}/pause
 #[tracing::instrument(skip_all)]
@@ -2447,6 +2490,7 @@ async fn sandboxes_sandbox_id_pause_post<I, A, E, C>(
     cookies: CookieJar,
     headers: HeaderMap,
     Path(path_params): Path<models::SandboxesSandboxIdPausePostPathParams>,
+    QueryExtra(query_params): QueryExtra<models::SandboxesSandboxIdPausePostQueryParams>,
     State(api_impl): State<I>,
 ) -> Result<Response, StatusCode>
 where
@@ -2474,12 +2518,12 @@ where
 
     #[allow(clippy::redundant_closure)]
     let validation = tokio::task::spawn_blocking(move || {
-        sandboxes_sandbox_id_pause_post_validation(path_params)
+        sandboxes_sandbox_id_pause_post_validation(path_params, query_params)
     })
     .await
     .unwrap();
 
-    let Ok((path_params,)) = validation else {
+    let Ok((path_params, query_params)) = validation else {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Body::from(validation.unwrap_err().to_string()))
@@ -2488,7 +2532,14 @@ where
 
     let result = api_impl
         .as_ref()
-        .sandboxes_sandbox_id_pause_post(&method, &host, &cookies, &claims, &path_params)
+        .sandboxes_sandbox_id_pause_post(
+            &method,
+            &host,
+            &cookies,
+            &claims,
+            &path_params,
+            &query_params,
+        )
         .await;
 
     let mut response = Response::builder();

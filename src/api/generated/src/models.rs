@@ -133,6 +133,15 @@ pub struct SandboxesSandboxIdDeletePathParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxesSandboxIdDeleteQueryParams {
+    /// Expected funded activation identity. A mismatch returns conflict without modifying the sandbox. Omission temporarily retains ID-only callers during lifecycle authority migration.
+    #[serde(rename = "expectedActivationID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_activation_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxesSandboxIdForkPostPathParams {
     pub sandbox_id: String,
 }
@@ -153,6 +162,15 @@ pub struct SandboxesSandboxIdNetworkPutPathParams {
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxesSandboxIdPausePostPathParams {
     pub sandbox_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxesSandboxIdPausePostQueryParams {
+    /// Expected funded activation identity. A mismatch returns conflict without modifying the sandbox. Omission temporarily retains ID-only callers during lifecycle authority migration.
+    #[serde(rename = "expectedActivationID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_activation_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]

@@ -116,6 +116,8 @@ pub enum SandboxesSandboxIdCustomExtensionParamsPatchResponse {
 pub enum SandboxesSandboxIdDeleteResponse {
     /// The sandbox was killed successfully
     Status204_TheSandboxWasKilledSuccessfully,
+    /// Conflict
+    Status409_Conflict(models::Error),
     /// Not found
     Status404_NotFound(models::Error),
     /// Authentication error
@@ -376,6 +378,7 @@ pub trait Sandboxes<E: std::fmt::Debug + Send + Sync + 'static = ()>:
         cookies: &CookieJar,
         claims: &Self::Claims,
         path_params: &models::SandboxesSandboxIdDeletePathParams,
+        query_params: &models::SandboxesSandboxIdDeleteQueryParams,
     ) -> Result<SandboxesSandboxIdDeleteResponse, E>;
 
     /// Fork sandbox.
@@ -430,6 +433,7 @@ pub trait Sandboxes<E: std::fmt::Debug + Send + Sync + 'static = ()>:
         cookies: &CookieJar,
         claims: &Self::Claims,
         path_params: &models::SandboxesSandboxIdPausePostPathParams,
+        query_params: &models::SandboxesSandboxIdPausePostQueryParams,
     ) -> Result<SandboxesSandboxIdPausePostResponse, E>;
 
     /// Refresh sandbox.

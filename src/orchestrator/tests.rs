@@ -1476,7 +1476,7 @@ async fn join_concurrent_pause_maps_killing_to_not_found() {
     ));
 
     let err = orchestrator
-        .join_concurrent_pause(sandbox_id)
+        .join_concurrent_pause(sandbox_id, None)
         .await
         .expect_err("killing after joined pause should map to not found");
     assert!(matches!(err, OrchestratorError::SandboxNotFound(_)));
@@ -5207,17 +5207,13 @@ async fn stale_lifecycle_activation_preserves_current_runtime() -> Result<()> {
             orchestrator
                 .delete_sandbox_for_activation(id, expected)
                 .await,
-            Err(OrchestratorError::StoreOperationFailed(
-                StoreError::ActivationConflict { .. }
-            ))
+            Err(OrchestratorError::ActivationConflict(_))
         ));
         assert!(matches!(
             orchestrator
                 .pause_sandbox_for_activation(id, expected)
                 .await,
-            Err(OrchestratorError::StoreOperationFailed(
-                StoreError::ActivationConflict { .. }
-            ))
+            Err(OrchestratorError::ActivationConflict(_))
         ));
         assert_eq!(
             orchestrator.store.get(&id).await?.unwrap().state,

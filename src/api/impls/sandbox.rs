@@ -880,6 +880,7 @@ impl Sandboxes<()> for ApiImpl {
         _cookies: &CookieJar,
         _claims: &Self::Claims,
         path_params: &models::SandboxesSandboxIdDeletePathParams,
+        query_params: &models::SandboxesSandboxIdDeleteQueryParams,
     ) -> Result<SandboxesSandboxIdDeleteResponse, ()> {
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
@@ -887,13 +888,26 @@ impl Sandboxes<()> for ApiImpl {
                 sandbox_not_found(path_id),
             ));
         };
-        match self.orchestrator.delete_sandbox(sandbox_id).await {
+        let result = match query_params.expected_activation_id {
+            Some(activation) => {
+                self.orchestrator
+                    .delete_sandbox_for_activation(sandbox_id, Some(activation))
+                    .await
+            }
+            None => self.orchestrator.delete_sandbox(sandbox_id).await,
+        };
+        match result {
             Ok(_) => {
                 Ok(SandboxesSandboxIdDeleteResponse::Status204_TheSandboxWasKilledSuccessfully)
             }
             Err(OrchestratorError::SandboxNotFound(id)) => Ok(
                 SandboxesSandboxIdDeleteResponse::Status404_NotFound(sandbox_not_found(id)),
             ),
+            Err(OrchestratorError::ActivationConflict(_)) => {
+                Ok(SandboxesSandboxIdDeleteResponse::Status409_Conflict(
+                    Self::error(409, "sandbox activation changed"),
+                ))
+            }
             Err(err) => Ok(SandboxesSandboxIdDeleteResponse::Status500_ServerError(
                 err.into(),
             )),
@@ -1202,6 +1216,7 @@ impl Sandboxes<()> for ApiImpl {
         _cookies: &CookieJar,
         _claims: &Self::Claims,
         path_params: &models::SandboxesSandboxIdPausePostPathParams,
+        query_params: &models::SandboxesSandboxIdPausePostQueryParams,
     ) -> Result<SandboxesSandboxIdPausePostResponse, ()> {
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
@@ -1211,7 +1226,12 @@ impl Sandboxes<()> for ApiImpl {
         };
         let timer = SandboxStageTimer::new("pause");
         match timer
-            .time("pause", self.orchestrator.pause_sandbox(sandbox_id))
+            .time("pause", async {
+                match query_params.expected_activation_id {
+                    Some(activation) => self.orchestrator.pause_sandbox_for_activation(sandbox_id, Some(activation)).await,
+                    None => self.orchestrator.pause_sandbox(sandbox_id).await,
+                }
+            })
             .await
         {
             Ok(_) => Ok(
@@ -1227,6 +1247,8 @@ impl Sandboxes<()> for ApiImpl {
                     Self::error(409, format!("sandbox cannot be paused from {} state", state)),
                 ),
             ),
+            Err(OrchestratorError::ActivationConflict(_)) =>
+                Ok(SandboxesSandboxIdPausePostResponse::Status409_Conflict(Self::error(409, "sandbox activation changed"))),
             Err(err) => Ok(SandboxesSandboxIdPausePostResponse::Status500_ServerError(
                 err.into(),
             )),

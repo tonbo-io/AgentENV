@@ -46,6 +46,14 @@ components:
       required: true
       schema:
         type: string
+    expectedActivationID:
+      name: expectedActivationID
+      in: query
+      required: false
+      description: Expected funded activation identity. A mismatch returns conflict without modifying the sandbox. Omission temporarily retains ID-only callers during lifecycle authority migration.
+      schema:
+        type: string
+        format: uuid
     sandboxID:
       name: sandboxID
       in: path
@@ -1741,9 +1749,12 @@ paths:
           AdminTeamAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
+        - $ref: "#/components/parameters/expectedActivationID"
       responses:
         "204":
           description: The sandbox was killed successfully
+        "409":
+          $ref: "#/components/responses/409"
         "404":
           $ref: "#/components/responses/404"
         "401":
@@ -1765,6 +1776,7 @@ paths:
           AdminTeamAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
+        - $ref: "#/components/parameters/expectedActivationID"
       responses:
         "204":
           description: The sandbox was paused successfully and can be resumed
