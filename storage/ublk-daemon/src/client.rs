@@ -47,6 +47,7 @@ pub struct RestackSnapshotTerminalFailure {
 
 #[derive(Debug, Clone)]
 pub struct OverlaybdRuntimeDevice {
+    pub allocation_id: Option<uuid::Uuid>,
     pub dev_id: u32,
     pub device_path: PathBuf,
     pub actual_virtual_size: u64,
@@ -415,11 +416,13 @@ impl UblkDaemonClient {
             .await?
         {
             DaemonResponse::OverlaybdRuntimeDeviceCreated {
+                allocation_id,
                 dev_id,
                 device_path,
                 actual_virtual_size,
                 runtime_image_config_path,
             } => Ok(OverlaybdRuntimeDevice {
+                allocation_id,
                 dev_id,
                 device_path,
                 actual_virtual_size,
@@ -517,14 +520,14 @@ impl UblkDaemonClient {
 
     /// Acquire a warm overlaybd device from the pool.
     ///
-    /// Returns `(dev_id, device_path)`.
+    /// Returns `(dev_id, device_path, allocation_id)`.
     pub async fn acquire_overlaybd(
         &self,
         image_config: &Path,
         global_config: &Path,
         virtual_size: u64,
         access_mode: AccessMode,
-    ) -> Result<(u32, PathBuf)> {
+    ) -> Result<(u32, PathBuf, uuid::Uuid)> {
         let request = DaemonRequest::AcquireOverlaybd {
             image_config: image_config.to_path_buf(),
             global_config: global_config.to_path_buf(),
@@ -533,9 +536,10 @@ impl UblkDaemonClient {
         };
         match self.call(request, DEFAULT_TIMEOUT).await? {
             DaemonResponse::DeviceAcquired {
+                allocation_id,
                 dev_id,
                 device_path,
-            } => Ok((dev_id, device_path)),
+            } => Ok((dev_id, device_path, allocation_id)),
             DaemonResponse::TerminalError { message } => {
                 bail!("daemon: acquire overlaybd failed terminally: {message}")
             }
@@ -547,8 +551,11 @@ impl UblkDaemonClient {
     }
 
     /// Release an overlaybd device back to the pool.
-    pub async fn release_overlaybd(&self, dev_id: u32) -> Result<()> {
-        let request = DaemonRequest::ReleaseOverlaybd { dev_id };
+    pub async fn release_overlaybd(&self, dev_id: u32, allocation_id: uuid::Uuid) -> Result<()> {
+        let request = DaemonRequest::ReleaseOverlaybd {
+            dev_id,
+            allocation_id,
+        };
         match self.call(request, DEFAULT_TIMEOUT).await? {
             DaemonResponse::Released => Ok(()),
             DaemonResponse::TerminalError { message } => {

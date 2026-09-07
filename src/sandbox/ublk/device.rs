@@ -307,7 +307,12 @@ impl UblkDeviceManager {
 
         let mut metric = MetricGuard::operation(UBLK_OPERATION_DURATION, "release");
         let result = client
-            .release_overlaybd(dev_id)
+            .release_overlaybd(
+                dev_id,
+                device
+                    .allocation_id
+                    .context("pooled device has no allocation identity")?,
+            )
             .await
             .context("release overlaybd device via daemon");
         metric.finish(&result);
@@ -345,6 +350,7 @@ impl UblkDeviceManager {
         debug!(dev_id, path = %device_path.display(), "ublk device ready");
 
         Ok(UblkDevice {
+            allocation_id: None,
             dev_id,
             device_path,
         })
@@ -366,6 +372,7 @@ impl UblkDeviceManager {
 
         Ok(OverlaybdRuntimeDevice {
             device: UblkDevice {
+                allocation_id: created.allocation_id,
                 dev_id: created.dev_id,
                 device_path: created.device_path,
             },
@@ -517,9 +524,10 @@ impl UblkDeviceManager {
                 .await
                 .context("acquire shared memory ublk device");
             metric.finish(&acquired);
-            let (dev_id, device_path) = acquired?;
+            let (dev_id, device_path, allocation_id) = acquired?;
 
             UblkDevice {
+                allocation_id: Some(allocation_id),
                 dev_id,
                 device_path,
             }
@@ -593,6 +601,7 @@ impl Drop for SharedMemDeviceInner {
         let key = self.image_config_key.clone();
         let device_path = self.device.device_path.clone();
         let device = UblkDevice {
+            allocation_id: self.device.allocation_id,
             dev_id,
             device_path,
         };
@@ -694,6 +703,7 @@ impl SharedMemDevice {
 /// snapshot) go through [`UblkDeviceManager`].
 #[derive(Clone, Debug)]
 pub(crate) struct UblkDevice {
+    allocation_id: Option<uuid::Uuid>,
     dev_id: u32,
     device_path: PathBuf,
 }

@@ -14,6 +14,7 @@ linux-cap = { path = "../../crates/linux-cap" }
 anyhow = "1.0"
 clap = { version = "4.5.38", features = ["derive"] }
 dashmap = "6.1.0"
+uuid = { version = "1", features = ["serde", "v7"] }
 io-uring = "0.7.9"
 libc = "0.2.174"
 metrics = "0.24"
