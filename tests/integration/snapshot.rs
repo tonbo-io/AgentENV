@@ -445,6 +445,47 @@ async fn persistent_snapshot_lifecycle_preserves_original_pause_resume_state() -
 }
 
 #[tokio::test]
+async fn paused_capture_survives_source_artifact_deletion_before_publication() -> Result<()> {
+    use agentenv::sandbox::{FirecrackerPausedState, PausedSandboxState};
+    common::setup().await;
+    let store = tempdir()?;
+    let (_, snapshot_manager, _) = common::snapshot_test_parts(store.path());
+    let mut config = common::default_sandbox_config()?;
+    config.vcpu_count = 1;
+    config.mem_size_mib = 128;
+    let mut original = FirecrackerSandbox::new(config)?;
+    original.start().await?;
+    write_guest_file(&original, "/opt/machine-marker", "retained rootfs").await?;
+    let paused = FirecrackerPausedState::new(original.pause().await?);
+    original.stop().await?;
+    let captured = paused.capture_snapshot().await?;
+    // Dropping both owners removes the source's managed snapshot root before
+    // the publisher consumes the captured files. Publication must still work.
+    drop(original);
+    drop(paused);
+    let alias = unique_alias_for_test("paused_source_deleted");
+    let record =
+        publish_captured_snapshot_for_test(&snapshot_manager, &alias, SandboxId::new(), captured)
+            .await?;
+    let runnable = snapshot_manager.resolve_runnable(record).await?;
+    let launch = SandboxLaunchConfig {
+        sandbox_id: SandboxId::new(),
+        snapshot_id: runnable.record().id.to_string(),
+        env_vars: None,
+        network: None,
+        extra_mmds: serde_json::Map::new(),
+        custom_extension_params: None,
+        envd_access_token: None,
+    };
+    let mut restored = FirecrackerSandbox::from_snapshot(&runnable, &launch)?;
+    restored.start().await?;
+    let verification = assert_guest_file(&restored, "/opt/machine-marker", "retained rootfs").await;
+    restored.stop().await?;
+    snapshot_manager.delete(&alias).await?;
+    verification
+}
+
+#[tokio::test]
 async fn randomized_snapshot_lifecycle_operations_preserve_artifact_ownership() -> Result<()> {
     common::setup().await;
     let store = tempdir()?;
