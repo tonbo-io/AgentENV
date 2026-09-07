@@ -25,6 +25,7 @@ use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
 
 use super::admission::{AdmissionStatus, NodeAdmission};
+use super::creation_claims::CreationClaims;
 use super::launch_plan::{CreateLaunchSource, LaunchPlan};
 use super::metrics::{
     aggregate_resource_metrics, OrchestratorCounters, OrchestratorMetrics, SandboxContribution,
@@ -98,6 +99,7 @@ pub struct Orchestrator<
 > {
     store: S,
     admission: NodeAdmission,
+    creation_claims: CreationClaims,
     operations: OperationTracker,
     factory: F,
     persister: P,
@@ -141,7 +143,7 @@ where
             .orchestrator
             .persisted_sandbox_store_path
             .join(".node-drain");
-        let admission = tokio::task::spawn_blocking(move || {
+        let (admission, creation_claims) = tokio::task::spawn_blocking(move || {
             let directory = marker.parent().expect("node drain marker has parent");
             std::fs::create_dir_all(directory)?;
             // Preserve newly created directory entries before a later drain can
@@ -149,13 +151,22 @@ where
             for ancestor in directory.ancestors() {
                 std::fs::File::open(ancestor)?.sync_all()?;
             }
-            NodeAdmission::persistent(marker)
+            let claims = CreationClaims::persistent(directory.join(".creation-claims"))?;
+            NodeAdmission::persistent(marker).map(|admission| (admission, claims))
         })
         .await
         .context("join node admission restore")?
         .context("restore durable node admission")?;
         let image_refs = local_image_services_from_global_config().runtime_refs;
-        Self::new_inner_with_admission(store, factory, persister, image_refs, admission).await
+        Self::new_inner_with_admission(
+            store,
+            factory,
+            persister,
+            image_refs,
+            admission,
+            creation_claims,
+        )
+        .await
     }
 }
 
@@ -182,6 +193,7 @@ where
             persister,
             image_refs,
             NodeAdmission::default(),
+            CreationClaims::default(),
         )
         .await
     }
@@ -192,6 +204,7 @@ where
         persister: P,
         image_refs: Arc<dyn RuntimeImageRefs>,
         admission: NodeAdmission,
+        creation_claims: CreationClaims,
     ) -> Result<Arc<Self>> {
         let app_config = ConfigManager::global_config();
         let config = &app_config.orchestrator;
@@ -219,6 +232,12 @@ where
             })
             .collect();
         for metadata in persisted {
+            let claims = creation_claims.clone();
+            let id = metadata.id.into_inner();
+            tokio::task::spawn_blocking(move || claims.claim(id))
+                .await
+                .context("join restored runtime creation claim")?
+                .context("preserve restored runtime creation identity")?;
             store.add(metadata).await?;
         }
 
@@ -233,6 +252,7 @@ where
             sandbox_event_tx,
             default_sandbox_timeout: Duration::from_secs(config.default_sandbox_timeout_secs),
             admission,
+            creation_claims,
             operations: OperationTracker::default(),
             is_shutting_down: std::sync::atomic::AtomicBool::new(false),
             shutdown_tx,
@@ -404,6 +424,15 @@ where
         if let Err(err) = self.ensure_accepting_lifecycle_operations() {
             self.counters.record_create_fail(1);
             return Err(err);
+        }
+
+        let claims = self.creation_claims.clone();
+        let claimed = tokio::task::spawn_blocking(move || claims.claim(sandbox_id.into_inner()))
+            .await
+            .context("join runtime creation claim")?
+            .context("persist runtime creation claim")?;
+        if !claimed || self.store.get(&sandbox_id).await?.is_some() {
+            return Err(StoreError::SandboxAlreadyExists { sandbox_id }.into());
         }
 
         let CreateSandboxRequest {
