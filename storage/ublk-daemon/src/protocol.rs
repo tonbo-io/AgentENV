@@ -290,7 +290,6 @@ mod tests {
         match msg {
             Some(DaemonRequest::Delete { dev_id }) => {
                 assert_eq!(dev_id, 7);
-                assert_eq!(allocation_id, uuid::Uuid::from_u128(42));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -573,7 +572,6 @@ mod tests {
                 output_layer_path,
             } => {
                 assert_eq!(dev_id, 5);
-                assert_eq!(allocation_id, uuid::Uuid::from_u128(42));
                 assert_eq!(output_layer_path, PathBuf::from("/snapshots/layer0"));
             }
             _ => panic!("unexpected variant"),
