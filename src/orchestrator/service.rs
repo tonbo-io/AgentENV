@@ -135,7 +135,25 @@ where
             config.orchestrator.persisted_sandbox_store_path.clone(),
             config.virtualization_mode,
         );
-        Self::new(store, factory, persister).await
+        let marker = config
+            .orchestrator
+            .persisted_sandbox_store_path
+            .join(".node-drain");
+        let admission = tokio::task::spawn_blocking(move || {
+            let directory = marker.parent().expect("node drain marker has parent");
+            std::fs::create_dir_all(directory)?;
+            // Preserve newly created directory entries before a later drain can
+            // acknowledge its marker. The configured store is node-local durable storage.
+            for ancestor in directory.ancestors() {
+                std::fs::File::open(ancestor)?.sync_all()?;
+            }
+            NodeAdmission::persistent(marker)
+        })
+        .await
+        .context("join node admission restore")?
+        .context("restore durable node admission")?;
+        let image_refs = local_image_services_from_global_config().runtime_refs;
+        Self::new_inner_with_admission(store, factory, persister, image_refs, admission).await
     }
 }
 
@@ -155,6 +173,23 @@ where
         factory: F,
         persister: P,
         image_refs: Arc<dyn RuntimeImageRefs>,
+    ) -> Result<Arc<Self>> {
+        Self::new_inner_with_admission(
+            store,
+            factory,
+            persister,
+            image_refs,
+            NodeAdmission::default(),
+        )
+        .await
+    }
+
+    async fn new_inner_with_admission(
+        store: S,
+        factory: F,
+        persister: P,
+        image_refs: Arc<dyn RuntimeImageRefs>,
+        admission: NodeAdmission,
     ) -> Result<Arc<Self>> {
         let app_config = ConfigManager::global_config();
         let config = &app_config.orchestrator;
@@ -195,7 +230,7 @@ where
             counters: OrchestratorCounters::default(),
             sandbox_event_tx,
             default_sandbox_timeout: Duration::from_secs(config.default_sandbox_timeout_secs),
-            admission: NodeAdmission::default(),
+            admission,
             is_shutting_down: std::sync::atomic::AtomicBool::new(false),
             shutdown_tx,
             shutdown_outcome: OnceCell::new(),
@@ -2636,10 +2671,15 @@ where
         Ok(())
     }
 
-    /// Close node-local start admission. This is only an in-process observation;
-    /// durable drain fencing and complete runtime cleanup are separate checks.
-    pub fn close_node_admission(&self) -> AdmissionStatus {
-        self.admission.close()
+    /// Persist irreversible node drain before returning an admission observation.
+    /// This does not establish runtime cleanup or authorize host termination.
+    pub async fn drain_node(&self, drain_id: String) -> Result<AdmissionStatus> {
+        let admission = self.admission.clone();
+        tokio::task::spawn_blocking(move || admission.drain(&drain_id))
+            .await
+            .context("join durable node drain")?
+            .context("persist durable node drain")
+            .map_err(Into::into)
     }
 
     pub fn node_admission_status(&self) -> AdmissionStatus {

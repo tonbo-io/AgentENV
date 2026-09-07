@@ -4913,7 +4913,7 @@ async fn node_drain_blocks_all_start_paths_but_allows_cleanup() -> Result<()> {
         .create_sandbox(create_request(Some(60), &[]))
         .await?;
     orchestrator.pause_sandbox(paused.id).await?;
-    assert_eq!(orchestrator.close_node_admission().in_flight, 0);
+    assert_eq!(orchestrator.admission.close().in_flight, 0);
     assert!(matches!(
         orchestrator
             .create_sandbox(create_request(Some(60), &[]))
