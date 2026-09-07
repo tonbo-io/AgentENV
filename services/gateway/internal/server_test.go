@@ -2615,3 +2615,21 @@ func TestUsageReadStaysOnOwnerAndPreservesInstanceFence(t *testing.T) {
 		t.Fatalf("usage reached the wrong node or lost its fence: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestUsageResponseCarriesAuthoritativeNodeWithoutDebugMode(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(headerNodeID, "spoofed")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	server := newTestServer(t, stubSchedulerClient{lookupNodeFunc: func(context.Context, *schedulerv1.LookupNodeRequest, ...grpc.CallOption) (*schedulerv1.LookupNodeResponse, error) {
+		return &schedulerv1.LookupNodeResponse{Node: &schedulerv1.Node{NodeId: "actual", Endpoint: upstream.URL}}, nil
+	}}, 5*time.Second, 4<<20)
+	server.debugMode = false
+	response := httptest.NewRecorder()
+	authenticatedTestHandler(server).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://gateway.test/sandboxes/runtime/usage", nil))
+	if response.Code != http.StatusOK || response.Header().Get(headerNodeID) != "actual" {
+		t.Fatalf("usage node authority lost: %d %v", response.Code, response.Header())
+	}
+}

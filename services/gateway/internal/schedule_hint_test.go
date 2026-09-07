@@ -47,11 +47,14 @@ func TestBuildScheduleHintNewSandbox(t *testing.T) {
 }
 
 func TestBuildScheduleHintCarriesGeneralPlacementConstraints(t *testing.T) {
-	r := newHintRequest(t, http.MethodPost, "/sandboxes", `{"templateID":"snapshot","placement":{"differentNodeFrom":["sandbox-a","sandbox-b"],"snapshotCompatibleWith":["sandbox-a"]}}`)
+	r := newHintRequest(t, http.MethodPost, "/sandboxes", `{"templateID":"snapshot","placement":{"nodeID":"target","differentNodeFrom":["sandbox-a","sandbox-b"],"snapshotCompatibleWith":["sandbox-a"]}}`)
 
 	hint, err := buildScheduleHint(r)
 	if err != nil {
 		t.Fatalf("buildScheduleHint returned error: %v", err)
+	}
+	if hint.GetNewSandbox().GetPlacement().GetNodeId() != "target" {
+		t.Fatal("exact node constraint lost")
 	}
 	want := []string{"sandbox-a", "sandbox-b"}
 	if got := hint.GetNewSandbox().GetPlacement().GetDifferentNodeFrom(); !equalStrings(got, want) {
@@ -262,5 +265,14 @@ func TestBuildScheduleHintColdSandboxOversizedBodyStreams(t *testing.T) {
 	}
 	if string(body) != reqBody {
 		t.Fatalf("restored body length = %d, want %d", len(body), len(reqBody))
+	}
+}
+
+func TestEmptyExactNodeConstraintFailsClosed(t *testing.T) {
+	for _, value := range []string{`""`, `" "`, `[]`, `123`} {
+		r := newHintRequest(t, http.MethodPost, "/sandboxes", `{"templateID":"snapshot","placement":{"nodeID":`+value+`}}`)
+		if _, err := buildScheduleHint(r); err == nil {
+			t.Fatalf("invalid exact target accepted: %s", value)
+		}
 	}
 }

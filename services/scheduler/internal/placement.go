@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"agentenv/services/shared/nodecompatibility"
 	"strings"
 	"time"
 
@@ -24,6 +25,21 @@ func (s *Service) filterPlacementCandidates(nodes []RichNode, hint *schedulerv1.
 	placement := newSandbox.GetPlacement()
 	differentNodeFrom := placement.GetDifferentNodeFrom()
 	snapshotCompatibleWith := placement.GetSnapshotCompatibleWith()
+	if placement.GetNodeId() != "" {
+		if err := validatePlacementReferences("node_id", []string{placement.GetNodeId()}); err != nil {
+			return nil, err
+		}
+		filtered := make([]RichNode, 0, 1)
+		for _, node := range nodes {
+			if node.ID == placement.GetNodeId() {
+				filtered = append(filtered, node)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, status.Error(codes.Unavailable, "required placement node is unavailable")
+		}
+		nodes = filtered
+	}
 	if len(differentNodeFrom) == 0 && len(snapshotCompatibleWith) == 0 {
 		return nodes, nil
 	}
@@ -134,18 +150,6 @@ func isLivePlacementReference(status schedulerv1.NodeStatus) bool {
 // sameSnapshotCompatibilityDomain is intentionally conservative. The target
 // runtime still validates the snapshot itself before it can become ready.
 func sameSnapshotCompatibilityDomain(source, target *schedulerv1.ObservedNode) bool {
-	if source == nil || target == nil || source.GetClusterId() == "" || source.GetClusterId() != target.GetClusterId() {
-		return false
-	}
-	if source.GetVersion() == "" || source.GetVersion() != target.GetVersion() || source.GetCommit() == "" || source.GetCommit() != target.GetCommit() {
-		return false
-	}
-	sourceMachine, targetMachine := source.GetMachineInfo(), target.GetMachineInfo()
-	if sourceMachine == nil || targetMachine == nil || sourceMachine.GetCpuArchitecture() == "" || sourceMachine.GetCpuFamily() == "" || sourceMachine.GetCpuModel() == "" || sourceMachine.GetCpuConfigJson() == "" {
-		return false
-	}
-	return sourceMachine.GetCpuArchitecture() == targetMachine.GetCpuArchitecture() &&
-		sourceMachine.GetCpuFamily() == targetMachine.GetCpuFamily() &&
-		sourceMachine.GetCpuModel() == targetMachine.GetCpuModel() &&
-		sourceMachine.GetCpuConfigJson() == targetMachine.GetCpuConfigJson()
+	sourceKey := nodecompatibility.Key(source)
+	return sourceKey != "" && sourceKey == nodecompatibility.Key(target)
 }

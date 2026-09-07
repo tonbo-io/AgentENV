@@ -3466,6 +3466,17 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NewSandbox> 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct Node {
+    /// Host observation timestamp; repeated responses are not new samples.
+    #[serde(rename = "reportedAtUnixMs")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_at_unix_ms: Option<i64>,
+
+    /// Opaque snapshot placement domain. Empty means compatibility is unknown.
+    #[serde(rename = "snapshotCompatibilityKey")]
+    #[validate(custom(function = "check_xss_string"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_compatibility_key: Option<String>,
+
     /// Version of the orchestrator
     #[serde(rename = "version")]
     #[validate(custom(function = "check_xss_string"))]
@@ -3542,6 +3553,8 @@ impl Node {
         sandbox_paused_count: u32,
     ) -> Node {
         Node {
+            reported_at_unix_ms: None,
+            snapshot_compatibility_key: None,
             version,
             commit,
             id,
@@ -3565,6 +3578,24 @@ impl Node {
 impl std::fmt::Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            self.reported_at_unix_ms
+                .as_ref()
+                .map(|reported_at_unix_ms| {
+                    [
+                        "reportedAtUnixMs".to_string(),
+                        reported_at_unix_ms.to_string(),
+                    ]
+                    .join(",")
+                }),
+            self.snapshot_compatibility_key
+                .as_ref()
+                .map(|snapshot_compatibility_key| {
+                    [
+                        "snapshotCompatibilityKey".to_string(),
+                        snapshot_compatibility_key.to_string(),
+                    ]
+                    .join(",")
+                }),
             Some("version".to_string()),
             Some(self.version.to_string()),
             Some("commit".to_string()),
@@ -3610,6 +3641,8 @@ impl std::str::FromStr for Node {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub reported_at_unix_ms: Vec<i64>,
+            pub snapshot_compatibility_key: Vec<String>,
             pub version: Vec<String>,
             pub commit: Vec<String>,
             pub id: Vec<String>,
@@ -3644,6 +3677,14 @@ impl std::str::FromStr for Node {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "reportedAtUnixMs" => intermediate_rep.reported_at_unix_ms.push(
+                        <i64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "snapshotCompatibilityKey" => intermediate_rep.snapshot_compatibility_key.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "version" => intermediate_rep.version.push(
                         <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
@@ -3713,6 +3754,11 @@ impl std::str::FromStr for Node {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(Node {
+            reported_at_unix_ms: intermediate_rep.reported_at_unix_ms.into_iter().next(),
+            snapshot_compatibility_key: intermediate_rep
+                .snapshot_compatibility_key
+                .into_iter()
+                .next(),
             version: intermediate_rep
                 .version
                 .into_iter()
@@ -6530,6 +6576,12 @@ impl std::str::FromStr for SandboxOnTimeout {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxPlacement {
+    /// Exact required target node. Freshness, resource admission, and all other placement constraints still apply; no fallback to another node.
+    #[serde(rename = "nodeID")]
+    #[validate(length(min = 1, max = 200), custom(function = "check_xss_string"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+
     /// Sandbox IDs whose currently assigned nodes must be excluded. Every referenced assignment must exist and be live; placement fails closed otherwise.
     #[serde(rename = "differentNodeFrom")]
     #[validate(length(max = 32), custom(function = "check_xss_vec_string"))]
@@ -6547,6 +6599,7 @@ impl SandboxPlacement {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> SandboxPlacement {
         SandboxPlacement {
+            node_id: None,
             different_node_from: None,
             snapshot_compatible_with: None,
         }
@@ -6559,6 +6612,9 @@ impl SandboxPlacement {
 impl std::fmt::Display for SandboxPlacement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            self.node_id
+                .as_ref()
+                .map(|node_id| ["nodeID".to_string(), node_id.to_string()].join(",")),
             self.different_node_from
                 .as_ref()
                 .map(|different_node_from| {
@@ -6606,6 +6662,7 @@ impl std::str::FromStr for SandboxPlacement {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub node_id: Vec<String>,
             pub different_node_from: Vec<Vec<String>>,
             pub snapshot_compatible_with: Vec<Vec<String>>,
         }
@@ -6629,6 +6686,10 @@ impl std::str::FromStr for SandboxPlacement {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "nodeID" => intermediate_rep.node_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
                     "differentNodeFrom" => return std::result::Result::Err(
                         "Parsing a container in this style is not supported in SandboxPlacement"
                             .to_string(),
@@ -6651,6 +6712,7 @@ impl std::str::FromStr for SandboxPlacement {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxPlacement {
+            node_id: intermediate_rep.node_id.into_iter().next(),
             different_node_from: intermediate_rep.different_node_from.into_iter().next(),
             snapshot_compatible_with: intermediate_rep.snapshot_compatible_with.into_iter().next(),
         })
