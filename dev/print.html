@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7b86345a.js";
+            window.path_to_searchindex_js = "searchindex-1fd15b1f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c868df7a.js"></script>
@@ -2751,6 +2751,12 @@ snapshot-managed publication, the tool warns that it may be deleted with the
 snapshot; other exported references live independently of snapshot deletion.
 The standalone export preserves the same effective OCI runtime fields described
 under <a href="#overlaybd-image-publication">OverlayBD Image Publication</a>.</p>
+<h3 id="export-rootfs-through-the-api"><a class="header" href="#export-rootfs-through-the-api">Export rootfs through the API</a></h3>
+<p><code>POST /snapshots/{snapshotID}/rootfs-image</code> exposes the same export implementation to authenticated controllers. Both <code>targetRepository</code> and <code>tag</code> are required, so the server never implicitly selects the source image repository or a <code>latest</code> tag. Registry operations use the server’s credentials; scope those credentials to the intended publication repositories.</p>
+<pre><code class="language-json">{"targetRepository":"registry.example.com/workspaces/rootfs","tag":"checkpoint-1"}
+</code></pre>
+<p>The response includes <code>imageRef</code>, <code>manifestDigest</code> and <code>reused</code>. Cold boot from <code>registry.example.com/workspaces/rootfs@&lt;manifestDigest&gt;</code> to pin the exact exported filesystem. The export contains no process memory or attached drives. It retains the effective OCI runtime configuration, so a controller switching identities must also provide the destination launch configuration and clean platform-owned guest state before capture.</p>
+<p>Use a distinct publication target when its lifetime must outlive the snapshot. As with the CLI, reusing an existing snapshot-managed publication target does not detach that target from snapshot garbage collection. Callers own independent-image retention and deletion. Protect publication tags from concurrent replacement (for example, with immutable registry tags); the export’s conflict check is not an atomic compare-and-swap against other registry writers.</p>
 <h2 id="manage-snapshots"><a class="header" href="#manage-snapshots">Manage Snapshots</a></h2>
 <h3 id="list-snapshots"><a class="header" href="#list-snapshots">List Snapshots</a></h3>
 <p>List all snapshots, optionally filtered by source sandbox:</p>
