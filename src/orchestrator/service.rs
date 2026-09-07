@@ -2399,14 +2399,17 @@ where
         handle: SandboxHandle,
         stage: FailedLaunchStage,
     ) {
-        let should_rollback_shared_state = self
-            .detach_launch_runtime_if_current(
-                &plan.sandbox_id(),
-                &handle,
-                stage.should_detach_proxy_route(),
-                stage,
-            )
-            .await;
+        // Withdraw traffic without forgetting the runtime. A failed stop must
+        // remain visible to drain/inventory instead of looking like an empty node.
+        if stage.should_detach_proxy_route() {
+            let sandboxes = self.sandboxes.read().await;
+            if sandboxes
+                .get(&plan.sandbox_id())
+                .is_some_and(|current| Arc::ptr_eq(current, &handle))
+            {
+                self.proxy_routes.write().await.remove(&plan.sandbox_id());
+            }
+        }
 
         // Stop the sandbox.
         let stop_result = {
@@ -2415,7 +2418,17 @@ where
         };
         if let Err(err) = stop_result {
             warn!(error = %format_args!("{err:#}"), "failed to stop sandbox while rolling back launch");
+            return;
         }
+
+        let should_rollback_shared_state = self
+            .detach_launch_runtime_if_current(
+                &plan.sandbox_id(),
+                &handle,
+                stage.should_detach_proxy_route(),
+                stage,
+            )
+            .await;
 
         if !should_rollback_shared_state {
             return;

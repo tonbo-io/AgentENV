@@ -949,6 +949,66 @@ async fn cleanup_failed_launch_removes_created_running_metadata() {
 }
 
 #[tokio::test]
+async fn failed_launch_stop_retains_inventory_until_cleanup_succeeds() {
+    let orchestrator = make_orchestrator().await;
+    let sandbox_id = SandboxId::new();
+    let plan = create_launch_plan_with_resources(sandbox_id);
+    let behavior = Arc::new(MockBehavior::new());
+    behavior.push_action(
+        MockOperation::Stop,
+        MockAction::Fail {
+            message: "cannot stop VM".into(),
+        },
+    );
+    let handle: SandboxHandle = Arc::new(Mutex::new(Box::new(MockSandboxBackend::new(behavior))));
+    orchestrator
+        .store
+        .add(SandboxMetadata {
+            id: sandbox_id,
+            state: SandboxState::Running,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    orchestrator
+        .sandboxes
+        .write()
+        .await
+        .insert(sandbox_id, Arc::clone(&handle));
+    orchestrator
+        .upsert_proxy_route(sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST))
+        .await;
+    orchestrator
+        .cleanup_failed_launch(
+            &plan,
+            Arc::clone(&handle),
+            FailedLaunchStage::RunningPersisted,
+        )
+        .await;
+    assert!(orchestrator.store.get(&sandbox_id).await.unwrap().is_some());
+    assert!(orchestrator
+        .sandboxes
+        .read()
+        .await
+        .contains_key(&sandbox_id));
+    assert!(orchestrator
+        .proxy_routes
+        .read()
+        .await
+        .route(&sandbox_id)
+        .is_none());
+    orchestrator
+        .cleanup_failed_launch(&plan, handle, FailedLaunchStage::RunningPersisted)
+        .await;
+    assert!(orchestrator.store.get(&sandbox_id).await.unwrap().is_none());
+    assert!(!orchestrator
+        .sandboxes
+        .read()
+        .await
+        .contains_key(&sandbox_id));
+}
+
+#[tokio::test]
 async fn cleanup_failed_launch_restores_resume_metadata() {
     let orchestrator = make_orchestrator().await;
     let sandbox_id = SandboxId::new();
