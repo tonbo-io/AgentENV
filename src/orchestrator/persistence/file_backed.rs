@@ -188,10 +188,7 @@ impl FileBackedSandboxPersister {
 
     async fn cleanup_invalid_record(&self, sandbox_id: &SandboxId) -> PersistenceResult<()> {
         debug!(sandbox_id = %sandbox_id, "cleaning up invalid paused sandbox record");
-        // Retain the durable identity until artifact cleanup succeeds. A failed
-        // removal must remain discoverable and retryable after restart.
-        Self::remove_artifact_root(&self.sandbox_artifact_root(sandbox_id)).await?;
-        self.remove_record(sandbox_id).await
+        self.delete_record_and_artifacts(sandbox_id).await
     }
 
     async fn cleanup_orphan_artifacts(
