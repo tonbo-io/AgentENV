@@ -3120,6 +3120,7 @@ async fn orchestrator_delete_paused_sandbox_removes_metadata() -> Result<()> {
         vec![
             RecordingCall::AllocateArtifactRoot,
             RecordingCall::PersistPaused,
+            RecordingCall::MarkDeleting,
             RecordingCall::DeleteRecordAndArtifacts
         ]
     );
@@ -3584,7 +3585,10 @@ async fn resume_marks_resuming_and_deletes_record_after_success() -> Result<()> 
     orchestrator.delete_sandbox(created.id).await?;
     assert_eq!(
         persister.calls(),
-        vec![RecordingCall::DeleteRecordAndArtifacts]
+        vec![
+            RecordingCall::MarkDeleting,
+            RecordingCall::DeleteRecordAndArtifacts
+        ]
     );
     Ok(())
 }
@@ -5027,4 +5031,75 @@ async fn lifecycle_task_remains_counted_after_caller_disconnects() {
     .await
     .unwrap();
     assert_eq!(orchestrator.node_operation_status().interrupted, 0);
+}
+
+#[tokio::test]
+async fn delete_cleanup_failure_is_visible_non_runnable_and_retryable() -> Result<()> {
+    setup();
+    let persister = RecordingPersister::default();
+    let orchestrator = make_orchestrator_without_background_with_factory_and_persister(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::new(),
+        persister.clone(),
+    );
+    let created = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    persister.fail_next(RecordingCall::DeleteRecordAndArtifacts);
+    assert!(matches!(
+        orchestrator.delete_sandbox(created.id).await,
+        Err(OrchestratorError::SandboxPersistenceFailed(_))
+    ));
+    let pending = orchestrator
+        .get_sandbox(&created.id)
+        .await?
+        .expect("cleanup inventory retained");
+    assert_eq!(pending.state, SandboxState::CleanupPending);
+    assert_eq!(
+        orchestrator.metrics_snapshot().await?.running_sandbox_count,
+        1
+    );
+    assert!(orchestrator
+        .resume_sandbox(created.id, NewTimeout::UseExisting)
+        .await
+        .is_err());
+    assert!(orchestrator.pause_sandbox(created.id).await.is_err());
+    orchestrator.delete_sandbox(created.id).await?;
+    assert!(orchestrator.get_sandbox(&created.id).await?.is_none());
+    assert_eq!(
+        orchestrator.metrics_snapshot().await?.running_sandbox_count,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn delete_does_not_stop_runtime_before_persisting_intent() -> Result<()> {
+    setup();
+    let persister = RecordingPersister::default();
+    let orchestrator = make_orchestrator_without_background_with_factory_and_persister(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::new(),
+        persister.clone(),
+    );
+    let created = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    let before = current_metrics(&orchestrator).await;
+    persister.clear_calls();
+    persister.fail_next(RecordingCall::MarkDeleting);
+    assert!(matches!(
+        orchestrator.delete_sandbox(created.id).await,
+        Err(OrchestratorError::SandboxPersistenceFailed(_))
+    ));
+    assert_eq!(persister.calls(), vec![RecordingCall::MarkDeleting]);
+    assert_eq!(
+        orchestrator.get_sandbox(&created.id).await?.unwrap().state,
+        SandboxState::Running
+    );
+    assert_metrics_snapshot(&orchestrator, &before).await;
+    // Successful snapshot/pause still needs the original backend handle.
+    orchestrator.pause_sandbox(created.id).await?;
+    orchestrator.delete_sandbox(created.id).await?;
+    Ok(())
 }

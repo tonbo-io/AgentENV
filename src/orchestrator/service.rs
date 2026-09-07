@@ -621,7 +621,9 @@ where
             .await
             .map_err(|err| match err {
                 StoreError::StateConflict { actual_state, .. } => match actual_state {
-                    SandboxState::Killing => OrchestratorError::SandboxNotFound(source_sandbox_id),
+                    SandboxState::Killing | SandboxState::CleanupPending => {
+                        OrchestratorError::SandboxNotFound(source_sandbox_id)
+                    }
                     _ => OrchestratorError::InvalidSandboxState {
                         sandbox_id: source_sandbox_id,
                         state: actual_state,
@@ -986,7 +988,11 @@ where
                 .update_state_if_state(
                     &sandbox_id,
                     SandboxState::Killing,
-                    &[SandboxState::Running, SandboxState::Paused],
+                    &[
+                        SandboxState::Running,
+                        SandboxState::Paused,
+                        SandboxState::CleanupPending,
+                    ],
                 )
                 .await
             {
@@ -1049,7 +1055,18 @@ where
             }
         };
 
-        let (handle, removed_route) = self.detach_sandbox_handle_and_route(&sandbox_id).await;
+        let deleting = self
+            .store
+            .get(&sandbox_id)
+            .await?
+            .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?;
+        if let Err(error) = self.persister.mark_deleting(&deleting).await {
+            self.store
+                .update_state_if_state(&sandbox_id, previous_state, &[SandboxState::Killing])
+                .await?;
+            return Err(error.into());
+        }
+        let (handle, _removed_route) = self.detach_sandbox_handle_and_route(&sandbox_id).await;
 
         // If the sandbox is still in memory, attempt to stop it.
         if let Some(handle) = handle {
@@ -1061,9 +1078,12 @@ where
             if let Err(err) = stop_result {
                 warn!(error = ?err, "failed to stop sandbox during delete");
                 self.sandboxes.write().await.insert(sandbox_id, handle);
-                self.restore_proxy_route(sandbox_id, removed_route).await;
                 self.store
-                    .update_state_if_state(&sandbox_id, previous_state, &[SandboxState::Killing])
+                    .update_state_if_state(
+                        &sandbox_id,
+                        SandboxState::CleanupPending,
+                        &[SandboxState::Killing],
+                    )
                     .await?;
 
                 return Err(OrchestratorError::SandboxOperationFailed {
@@ -1074,7 +1094,22 @@ where
             }
         }
 
-        // Now the sandbox is successfully stopped, remove its metadata.
+        // Cleanup remains part of deletion, even after the process stopped.
+        // Keep a non-runnable, retryable inventory entry until it succeeds.
+        if let Err(error) = self
+            .persister
+            .delete_record_and_artifacts(&sandbox_id)
+            .await
+        {
+            self.store
+                .update_state_if_state(
+                    &sandbox_id,
+                    SandboxState::CleanupPending,
+                    &[SandboxState::Killing],
+                )
+                .await?;
+            return Err(error.into());
+        }
         let metadata = self.store.remove(&sandbox_id).await?;
         if let Some(metadata) = metadata {
             self.publish_sandbox_event(
@@ -1082,13 +1117,6 @@ where
                 metadata.id,
                 metadata.resources,
             );
-        }
-        if let Err(err) = self
-            .persister
-            .delete_record_and_artifacts(&sandbox_id)
-            .await
-        {
-            warn!(error = ?err, "failed to delete persisted sandbox state");
         }
         self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
             .await;
@@ -1157,7 +1185,7 @@ where
                     // it to finish and then report the final outcome.
                     SandboxState::Pausing => self.join_concurrent_pause(sandbox_id).await,
                     SandboxState::Paused => Ok(()),
-                    SandboxState::Killing => {
+                    SandboxState::Killing | SandboxState::CleanupPending => {
                         info!("sandbox is being deleted while pausing");
                         Err(OrchestratorError::SandboxNotFound(sandbox_id))
                     }
@@ -1233,7 +1261,7 @@ where
         }
 
         match metadata.state {
-            SandboxState::Killing => {
+            SandboxState::Killing | SandboxState::CleanupPending => {
                 return Err(OrchestratorError::SandboxNotFound(sandbox_id));
             }
             SandboxState::Running => {
@@ -1272,7 +1300,7 @@ where
                         // read and CAS.  Wait for it and return the outcome.
                         self.join_concurrent_resume(sandbox_id, timeout).await
                     }
-                    SandboxState::Killing => {
+                    SandboxState::Killing | SandboxState::CleanupPending => {
                         info!("sandbox is being deleted while resuming");
                         Err(OrchestratorError::SandboxNotFound(sandbox_id))
                     }
@@ -1366,7 +1394,9 @@ where
             Ok(_) => {}
             Err(StoreError::StateConflict { actual_state, .. }) => {
                 return match actual_state {
-                    SandboxState::Killing => Err(OrchestratorError::SandboxNotFound(sandbox_id)),
+                    SandboxState::Killing | SandboxState::CleanupPending => {
+                        Err(OrchestratorError::SandboxNotFound(sandbox_id))
+                    }
                     _ => Err(OrchestratorError::InvalidSandboxState {
                         sandbox_id,
                         state: actual_state,
@@ -1999,7 +2029,7 @@ where
                     state: SandboxState::Running,
                 })
             }
-            SandboxState::Killing => {
+            SandboxState::Killing | SandboxState::CleanupPending => {
                 info!("sandbox is being deleted after concurrent pause attempt");
                 Err(OrchestratorError::SandboxNotFound(sandbox_id))
             }
@@ -2034,7 +2064,7 @@ where
                     state: SandboxState::Paused,
                 })
             }
-            SandboxState::Killing => {
+            SandboxState::Killing | SandboxState::CleanupPending => {
                 info!("sandbox is being deleted while resuming");
                 Err(OrchestratorError::SandboxNotFound(sandbox_id))
             }
@@ -2634,6 +2664,11 @@ where
                     }
                     SandboxState::Running => {
                         if let Err(err) = self.pause_sandbox_inner(sandbox_id).await {
+                            last_failures.push(format!("{sandbox_id}: {err}"));
+                        }
+                    }
+                    SandboxState::CleanupPending => {
+                        if let Err(err) = self.delete_sandbox_inner(sandbox_id).await {
                             last_failures.push(format!("{sandbox_id}: {err}"));
                         }
                     }

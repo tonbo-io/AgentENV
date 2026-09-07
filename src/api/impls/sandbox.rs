@@ -827,7 +827,7 @@ impl Sandboxes<()> for ApiImpl {
                     ),
                 );
             }
-            SandboxState::Killing => {
+            SandboxState::Killing | SandboxState::CleanupPending => {
                 return Ok(SandboxesSandboxIdConnectPostResponse::Status404_NotFound(
                     sandbox_not_found(sandbox_id),
                 ));

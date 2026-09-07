@@ -4263,6 +4263,11 @@ pub struct NodeDrainObservation {
     #[serde(rename = "admissionClosed")]
     pub admission_closed: bool,
 
+    /// Complete local metadata inventory, including paused and cleanup-pending sandboxes. Not proof of physical cleanup.
+    #[serde(rename = "sandboxIDs")]
+    #[validate(custom(function = "check_xss_vec_string"))]
+    pub sandbox_ids: Vec<String>,
+
     #[serde(rename = "inFlightStarts")]
     #[validate(range(min = 0u64))]
     pub in_flight_starts: u64,
@@ -4297,6 +4302,7 @@ impl NodeDrainObservation {
         service_instance_id: String,
         drain_id: String,
         admission_closed: bool,
+        sandbox_ids: Vec<String>,
         in_flight_starts: u64,
         in_flight_operations: u64,
         interrupted_operations: u64,
@@ -4309,6 +4315,7 @@ impl NodeDrainObservation {
             service_instance_id,
             drain_id,
             admission_closed,
+            sandbox_ids,
             in_flight_starts,
             in_flight_operations,
             interrupted_operations,
@@ -4333,6 +4340,14 @@ impl std::fmt::Display for NodeDrainObservation {
             Some(self.drain_id.to_string()),
             Some("admissionClosed".to_string()),
             Some(self.admission_closed.to_string()),
+            Some("sandboxIDs".to_string()),
+            Some(
+                self.sandbox_ids
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
             Some("inFlightStarts".to_string()),
             Some(self.in_flight_starts.to_string()),
             Some("inFlightOperations".to_string()),
@@ -4370,6 +4385,7 @@ impl std::str::FromStr for NodeDrainObservation {
             pub service_instance_id: Vec<String>,
             pub drain_id: Vec<String>,
             pub admission_closed: Vec<bool>,
+            pub sandbox_ids: Vec<Vec<String>>,
             pub in_flight_starts: Vec<u64>,
             pub in_flight_operations: Vec<u64>,
             pub interrupted_operations: Vec<u64>,
@@ -4398,50 +4414,27 @@ impl std::str::FromStr for NodeDrainObservation {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
-                    "nodeID" => intermediate_rep.node_id.push(
-                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "nodeID" => intermediate_rep.node_id.push(<String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "serviceInstanceID" => intermediate_rep.service_instance_id.push(
-                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "serviceInstanceID" => intermediate_rep.service_instance_id.push(<String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "drainID" => intermediate_rep.drain_id.push(
-                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "drainID" => intermediate_rep.drain_id.push(<String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "admissionClosed" => intermediate_rep.admission_closed.push(
-                        <bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "admissionClosed" => intermediate_rep.admission_closed.push(<bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
+                    "sandboxIDs" => return std::result::Result::Err("Parsing a container in this style is not supported in NodeDrainObservation".to_string()),
                     #[allow(clippy::redundant_clone)]
-                    "inFlightStarts" => intermediate_rep.in_flight_starts.push(
-                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "inFlightStarts" => intermediate_rep.in_flight_starts.push(<u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "inFlightOperations" => intermediate_rep.in_flight_operations.push(
-                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "inFlightOperations" => intermediate_rep.in_flight_operations.push(<u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "interruptedOperations" => intermediate_rep.interrupted_operations.push(
-                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "interruptedOperations" => intermediate_rep.interrupted_operations.push(<u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "sandboxCount" => intermediate_rep.sandbox_count.push(
-                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "sandboxCount" => intermediate_rep.sandbox_count.push(<u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "pausedSandboxCount" => intermediate_rep.paused_sandbox_count.push(
-                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
+                    "pausedSandboxCount" => intermediate_rep.paused_sandbox_count.push(<u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
                     #[allow(clippy::redundant_clone)]
-                    "sandboxStartingCount" => intermediate_rep.sandbox_starting_count.push(
-                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
-                    ),
-                    _ => {
-                        return std::result::Result::Err(
-                            "Unexpected key while parsing NodeDrainObservation".to_string(),
-                        );
-                    }
+                    "sandboxStartingCount" => intermediate_rep.sandbox_starting_count.push(<u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?),
+                    _ => return std::result::Result::Err("Unexpected key while parsing NodeDrainObservation".to_string())
                 }
             }
 
@@ -4471,6 +4464,11 @@ impl std::str::FromStr for NodeDrainObservation {
                 .into_iter()
                 .next()
                 .ok_or_else(|| "admissionClosed missing in NodeDrainObservation".to_string())?,
+            sandbox_ids: intermediate_rep
+                .sandbox_ids
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sandboxIDs missing in NodeDrainObservation".to_string())?,
             in_flight_starts: intermediate_rep
                 .in_flight_starts
                 .into_iter()
