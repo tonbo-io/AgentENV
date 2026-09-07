@@ -1,0 +1,9 @@
+# Firecracker dependency
+
+This directory is the authority for Tonbo's packaged KVM Firecracker dependency. `source.json` pins the existing `aenv-deps` source commit, build container digests, and a distinct package version. `host-clidr.patch` backports the Linux host-version gate from [Firecracker #6172](https://github.com/firecracker-microvm/firecracker/pull/6172), merged as `28850749525ddb7b8462e66f707caac3d5b2e722`, with kernel-version boundary tests. The original code is Copyright Amazon.com, Inc. or its affiliates, under Apache-2.0.
+
+On host kernels before 6.10, PSCI CPU_ON resets secondary vCPU CLIDR_EL1 values after Firecracker's override. Keeping the override on vCPU 0 creates asymmetric guest cache topology and can disable Linux guest load balancing ([upstream issue #6139](https://github.com/firecracker-microvm/firecracker/issues/6139)). The backport follows upstream by applying the override only on host kernels 6.10 and newer. On older kernels the guest cache description remains limited; this restores symmetry rather than claiming accurate physical cache topology. The guest kernel, workload, CPU affinity, and CPU quota are unchanged.
+
+The Firecracker Dependency workflow builds both architectures and runs the affected pure unit tests on CI. After merge, dispatch it on `main` to publish a new immutable GitHub release with checksums and source/patch provenance. Then update `config/deps_manifest.toml` in a separate PR to select that published release. Runtime rollout uses Cloud's immutable Sandbox image build and reviewed release lock workflow. Guest parallelism and migration correctness require the isolated EKS loaded relocation test; a compiled binary is not that proof.
+
+Remove this backport when the selected dependency source includes the upstream host-version gate; retain the provenance and parallelism validation when replacing it. Do not overwrite a published version or manually replace binaries on runtime nodes.
