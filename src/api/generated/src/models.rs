@@ -212,6 +212,12 @@ pub struct V2SandboxesGetQueryParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct ExportSnapshotRootfsImagePathParams {
+    pub snapshot_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SnapshotsGetQueryParams {
     #[serde(rename = "sandboxID")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -7802,6 +7808,343 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SnapshotInfo
                     }
                     std::result::Result::Err(err) => std::result::Result::Err(format!(
                         r#"Unable to convert header value '{value}' into SnapshotInfo - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SnapshotRootfsImageExport {
+    #[serde(rename = "imageRef")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub image_ref: String,
+
+    #[serde(rename = "manifestDigest")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub manifest_digest: String,
+
+    #[serde(rename = "reused")]
+    pub reused: bool,
+}
+
+impl SnapshotRootfsImageExport {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        image_ref: String,
+        manifest_digest: String,
+        reused: bool,
+    ) -> SnapshotRootfsImageExport {
+        SnapshotRootfsImageExport {
+            image_ref,
+            manifest_digest,
+            reused,
+        }
+    }
+}
+
+/// Converts the SnapshotRootfsImageExport value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for SnapshotRootfsImageExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            Some("imageRef".to_string()),
+            Some(self.image_ref.to_string()),
+            Some("manifestDigest".to_string()),
+            Some(self.manifest_digest.to_string()),
+            Some("reused".to_string()),
+            Some(self.reused.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a SnapshotRootfsImageExport value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for SnapshotRootfsImageExport {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub image_ref: Vec<String>,
+            pub manifest_digest: Vec<String>,
+            pub reused: Vec<bool>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing SnapshotRootfsImageExport".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "imageRef" => intermediate_rep.image_ref.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "manifestDigest" => intermediate_rep.manifest_digest.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "reused" => intermediate_rep.reused.push(
+                        <bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing SnapshotRootfsImageExport".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(SnapshotRootfsImageExport {
+            image_ref: intermediate_rep
+                .image_ref
+                .into_iter()
+                .next()
+                .ok_or_else(|| "imageRef missing in SnapshotRootfsImageExport".to_string())?,
+            manifest_digest: intermediate_rep
+                .manifest_digest
+                .into_iter()
+                .next()
+                .ok_or_else(|| "manifestDigest missing in SnapshotRootfsImageExport".to_string())?,
+            reused: intermediate_rep
+                .reused
+                .into_iter()
+                .next()
+                .ok_or_else(|| "reused missing in SnapshotRootfsImageExport".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<SnapshotRootfsImageExport> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<SnapshotRootfsImageExport>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<SnapshotRootfsImageExport>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for SnapshotRootfsImageExport - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SnapshotRootfsImageExport> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <SnapshotRootfsImageExport as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into SnapshotRootfsImageExport - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SnapshotRootfsImageExportRequest {
+    /// Registry and repository path without a tag, digest or URL scheme
+    #[serde(rename = "targetRepository")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub target_repository: String,
+
+    /// Explicit immutable publication tag chosen by the caller
+    #[serde(rename = "tag")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub tag: String,
+}
+
+impl SnapshotRootfsImageExportRequest {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(target_repository: String, tag: String) -> SnapshotRootfsImageExportRequest {
+        SnapshotRootfsImageExportRequest {
+            target_repository,
+            tag,
+        }
+    }
+}
+
+/// Converts the SnapshotRootfsImageExportRequest value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for SnapshotRootfsImageExportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            Some("targetRepository".to_string()),
+            Some(self.target_repository.to_string()),
+            Some("tag".to_string()),
+            Some(self.tag.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a SnapshotRootfsImageExportRequest value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for SnapshotRootfsImageExportRequest {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub target_repository: Vec<String>,
+            pub tag: Vec<String>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing SnapshotRootfsImageExportRequest".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "targetRepository" => intermediate_rep.target_repository.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "tag" => intermediate_rep.tag.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing SnapshotRootfsImageExportRequest"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(SnapshotRootfsImageExportRequest {
+            target_repository: intermediate_rep
+                .target_repository
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "targetRepository missing in SnapshotRootfsImageExportRequest".to_string()
+                })?,
+            tag: intermediate_rep
+                .tag
+                .into_iter()
+                .next()
+                .ok_or_else(|| "tag missing in SnapshotRootfsImageExportRequest".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<SnapshotRootfsImageExportRequest> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<SnapshotRootfsImageExportRequest>>
+    for HeaderValue
+{
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<SnapshotRootfsImageExportRequest>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for SnapshotRootfsImageExportRequest - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue>
+    for header::IntoHeaderValue<SnapshotRootfsImageExportRequest>
+{
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <SnapshotRootfsImageExportRequest as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into SnapshotRootfsImageExportRequest - {err}"#
                     )),
                 }
             }

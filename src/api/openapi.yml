@@ -148,6 +148,28 @@ components:
             $ref: "#/components/schemas/Error"
 
   schemas:
+    SnapshotRootfsImageExportRequest:
+      type: object
+      additionalProperties: false
+      required: [targetRepository, tag]
+      properties:
+        targetRepository:
+          type: string
+          description: Registry and repository path without a tag, digest or URL scheme
+        tag:
+          type: string
+          description: Explicit immutable publication tag chosen by the caller
+    SnapshotRootfsImageExport:
+      type: object
+      required: [imageRef, manifestDigest, reused]
+      properties:
+        imageRef:
+          type: string
+        manifestDigest:
+          type: string
+        reused:
+          type: boolean
+
     CPUCount:
       type: integer
       format: int32
@@ -2136,6 +2158,46 @@ paths:
           $ref: "#/components/responses/401"
         "404":
           $ref: "#/components/responses/404"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /snapshots/{snapshotID}/rootfs-image:
+    post:
+      operationId: exportSnapshotRootfsImage
+      summary: Export a committed snapshot rootfs to an explicit OCI repository
+      description: |-
+        Publishes disk layers only; memory and attached drives are excluded. The caller owns the exported image lifecycle. An explicit repository and tag are required; an existing tag with another manifest is rejected. Use the returned manifest digest for immutable cold-boot references. Registry access uses the server's configured credentials.
+      tags: [snapshots]
+      security:
+        - ApiKeyAuth: []
+        - AccessTokenAuth: []
+        - AuthProviderBearerAuth: []
+          AuthProviderTeamAuth: []
+        - AdminApiKeyAuth: []
+          AdminTeamAuth: []
+      parameters:
+        - $ref: "#/components/parameters/snapshotID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SnapshotRootfsImageExportRequest"
+      responses:
+        "200":
+          description: The rootfs image was published or its identical manifest already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotRootfsImageExport"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "409":
+          $ref: "#/components/responses/409"
         "500":
           $ref: "#/components/responses/500"
 

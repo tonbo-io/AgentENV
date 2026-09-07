@@ -102,6 +102,10 @@ where
             delete(snapshots_snapshot_id_delete::<I, A, E, C>)
                 .get(snapshots_snapshot_id_get::<I, A, E, C>),
         )
+        .route(
+            "/snapshots/{snapshot_id}/rootfs-image",
+            post(export_snapshot_rootfs_image::<I, A, E, C>),
+        )
         .route("/templates", get(templates_get::<I, A, E, C>))
         .route(
             "/templates/aliases/{alias}",
@@ -3402,6 +3406,209 @@ where
                                                   response.body(Body::from(body_content))
                                                 },
                                                 apis::sandboxes::V2SandboxesGetResponse::Status500_ServerError
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(500);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                            },
+                                            Err(why) => {
+                                                    // Application code returned an error. This should not happen, as the implementation should
+                                                    // return a valid response.
+                                                    return api_impl.as_ref().handle_error(&method, &host, &cookies, why).await;
+                                            },
+                                        };
+
+    resp.map_err(|e| {
+        error!(error = ?e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+#[derive(validator::Validate)]
+#[allow(dead_code)]
+struct ExportSnapshotRootfsImageBodyValidator<'a> {
+    #[validate(nested)]
+    body: &'a models::SnapshotRootfsImageExportRequest,
+}
+
+#[tracing::instrument(skip_all)]
+fn export_snapshot_rootfs_image_validation(
+    path_params: models::ExportSnapshotRootfsImagePathParams,
+    body: models::SnapshotRootfsImageExportRequest,
+) -> std::result::Result<
+    (
+        models::ExportSnapshotRootfsImagePathParams,
+        models::SnapshotRootfsImageExportRequest,
+    ),
+    ValidationErrors,
+> {
+    path_params.validate()?;
+    let b = ExportSnapshotRootfsImageBodyValidator { body: &body };
+    b.validate()?;
+
+    Ok((path_params, body))
+}
+/// ExportSnapshotRootfsImage - POST /snapshots/{snapshotID}/rootfs-image
+#[tracing::instrument(skip_all)]
+async fn export_snapshot_rootfs_image<I, A, E, C>(
+    method: Method,
+    TypedHeader(host): TypedHeader<Host>,
+    cookies: CookieJar,
+    headers: HeaderMap,
+    Path(path_params): Path<models::ExportSnapshotRootfsImagePathParams>,
+    State(api_impl): State<I>,
+    Json(body): Json<models::SnapshotRootfsImageExportRequest>,
+) -> Result<Response, StatusCode>
+where
+    I: AsRef<A> + Send + Sync,
+    A: apis::snapshots::Snapshots<E, Claims = C>
+        + apis::ApiKeyAuthHeader<Claims = C>
+        + apis::ApiAuthBasic<Claims = C>
+        + Send
+        + Sync,
+    E: std::fmt::Debug + Send + Sync + 'static,
+{
+    // Authentication
+    let claims_in_header = api_impl
+        .as_ref()
+        .extract_claims_from_header(&headers, "X-Team-ID")
+        .await;
+    let claims_in_auth_header = api_impl
+        .as_ref()
+        .extract_claims_from_auth_header(apis::BasicAuthKind::Bearer, &headers, "authorization")
+        .await;
+    let claims = None.or(claims_in_header).or(claims_in_auth_header);
+    let Some(claims) = claims else {
+        return response_with_status_code_only(StatusCode::UNAUTHORIZED);
+    };
+
+    #[allow(clippy::redundant_closure)]
+    let validation = tokio::task::spawn_blocking(move || {
+        export_snapshot_rootfs_image_validation(path_params, body)
+    })
+    .await
+    .unwrap();
+
+    let Ok((path_params, body)) = validation else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(validation.unwrap_err().to_string()))
+            .map_err(|_| StatusCode::BAD_REQUEST);
+    };
+
+    let result = api_impl
+        .as_ref()
+        .export_snapshot_rootfs_image(&method, &host, &cookies, &claims, &path_params, &body)
+        .await;
+
+    let mut response = Response::builder();
+
+    let resp = match result {
+                                            Ok(rsp) => match rsp {
+                                                apis::snapshots::ExportSnapshotRootfsImageResponse::Status200_TheRootfsImageWasPublishedOrItsIdenticalManifestAlreadyExists
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(200);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::snapshots::ExportSnapshotRootfsImageResponse::Status400_BadRequest
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(400);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::snapshots::ExportSnapshotRootfsImageResponse::Status401_AuthenticationError
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(401);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::snapshots::ExportSnapshotRootfsImageResponse::Status404_NotFound
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(404);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::snapshots::ExportSnapshotRootfsImageResponse::Status409_Conflict
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(409);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::snapshots::ExportSnapshotRootfsImageResponse::Status500_ServerError
                                                     (body)
                                                 => {
                                                   let mut response = response.status(500);

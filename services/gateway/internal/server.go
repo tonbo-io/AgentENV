@@ -197,7 +197,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, value any) {
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	websocket := isWebSocketRequest(r)
 	streaming := isStreamingRequest(r)
-	longLived := streaming || websocket
+	longLived := streaming || websocket || isRootfsImageExportRequest(r)
 	routingCtx, cancelRouting := context.WithTimeout(r.Context(), s.requestTimeout)
 	defer cancelRouting()
 
@@ -806,6 +806,15 @@ func requestContextForProxy(r *http.Request, routingCtx context.Context, streami
 		return r.Context(), func() {}
 	}
 	return routingCtx, func() {}
+}
+
+// Rootfs export may upload a disk-sized delta. Scheduler lookup keeps its
+// short routing deadline; publication follows caller cancellation, just like
+// the existing streaming control paths.
+func isRootfsImageExportRequest(r *http.Request) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	return r.Method == http.MethodPost && len(parts) == 3 &&
+		parts[0] == "snapshots" && parts[1] != "" && parts[2] == "rootfs-image"
 }
 
 func isStreamingRequest(r *http.Request) bool {

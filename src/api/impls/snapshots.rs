@@ -8,10 +8,32 @@ use http::Method;
 use agentenv_http_server::apis::snapshots::*;
 use agentenv_http_server::models;
 
+use crate::cfg::ConfigManager;
+use crate::snapshot::image_export::{SnapshotImageResult, SnapshotImageService};
+use crate::snapshot::repository::RepositoryError;
 use crate::snapshot::{SnapshotId, SnapshotRecord, SnapshotSource};
 
 use super::pagination::PaginationCursor;
 use super::ApiImpl;
+
+fn rootfs_export_response(
+    result: Result<SnapshotImageResult, RepositoryError>,
+) -> ExportSnapshotRootfsImageResponse {
+    match result {
+        Ok(image) => ExportSnapshotRootfsImageResponse::Status200_TheRootfsImageWasPublishedOrItsIdenticalManifestAlreadyExists(
+            models::SnapshotRootfsImageExport::new(image.image_ref, image.manifest_digest, image.reused),
+        ),
+        Err(error) => {
+            let error = ApiImpl::repository_error(&error);
+            match error.code {
+                400 => ExportSnapshotRootfsImageResponse::Status400_BadRequest(error),
+                404 => ExportSnapshotRootfsImageResponse::Status404_NotFound(error),
+                409 => ExportSnapshotRootfsImageResponse::Status409_Conflict(error),
+                _ => ExportSnapshotRootfsImageResponse::Status500_ServerError(error),
+            }
+        }
+    }
+}
 
 impl From<SnapshotRecord> for models::SnapshotInfo {
     fn from(record: SnapshotRecord) -> Self {
@@ -50,6 +72,36 @@ fn system_time_from_unix_ms(unix_ms: i64) -> SystemTime {
 #[async_trait]
 impl Snapshots<()> for ApiImpl {
     type Claims = super::Claims;
+
+    async fn export_snapshot_rootfs_image(
+        &self,
+        _method: &Method,
+        _host: &Host,
+        _cookies: &CookieJar,
+        _claims: &Self::Claims,
+        path_params: &models::ExportSnapshotRootfsImagePathParams,
+        body: &models::SnapshotRootfsImageExportRequest,
+    ) -> Result<ExportSnapshotRootfsImageResponse, ()> {
+        let service = match SnapshotImageService::from_global_config(
+            ConfigManager::global_config().resolved_regctl_binary(),
+        ) {
+            Ok(service) => service,
+            Err(error) => {
+                return Ok(ExportSnapshotRootfsImageResponse::Status500_ServerError(
+                    Self::internal_error(error.as_ref()),
+                ))
+            }
+        };
+        Ok(rootfs_export_response(
+            service
+                .export_rootfs_image(
+                    &path_params.snapshot_id,
+                    Some(&body.target_repository),
+                    Some(&body.tag),
+                )
+                .await,
+        ))
+    }
 
     async fn snapshots_get(
         &self,
@@ -197,6 +249,40 @@ mod tests {
     use crate::snapshot::{
         rootfs_snapshot_image_tag, CommittedSnapshot, PersistedDiskImagePublication,
     };
+
+    #[test]
+    fn rootfs_export_preserves_immutable_digest_and_retry_result() {
+        let result =
+            super::rootfs_export_response(Ok(crate::snapshot::image_export::SnapshotImageResult {
+                image_ref: "registry.example/machine-rootfs:checkpoint-1".into(),
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                reused: true,
+            }));
+        match result {
+            super::ExportSnapshotRootfsImageResponse::Status200_TheRootfsImageWasPublishedOrItsIdenticalManifestAlreadyExists(body) => {
+                assert_eq!(body.manifest_digest, format!("sha256:{}", "a".repeat(64)));
+                assert!(body.reused);
+            }
+            other => panic!("unexpected export response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rootfs_export_does_not_report_missing_or_invalid_checkpoints_as_success() {
+        use crate::snapshot::repository::RepositoryError;
+        assert!(matches!(
+            super::rootfs_export_response(Err(RepositoryError::SnapshotNotFound {
+                lookup: "missing".into()
+            })),
+            super::ExportSnapshotRootfsImageResponse::Status404_NotFound(_),
+        ));
+        assert!(matches!(
+            super::rootfs_export_response(Err(RepositoryError::InvalidRequest {
+                reason: "target conflicts".into()
+            })),
+            super::ExportSnapshotRootfsImageResponse::Status400_BadRequest(_),
+        ));
+    }
 
     #[test]
     fn snapshot_info_includes_published_rootfs_image_ref() {

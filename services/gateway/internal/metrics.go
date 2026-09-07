@@ -227,6 +227,10 @@ func gatewayRouteLabel(path string) string {
 				return "/sandboxes/{sandbox_id}/" + parts[2]
 			}
 		}
+	case "snapshots":
+		if len(parts) == 3 && parts[2] == "rootfs-image" {
+			return "/snapshots/{snapshot_id}/rootfs-image"
+		}
 	case "nodes":
 		if len(parts) == 2 {
 			return "/nodes/{node_id}"
