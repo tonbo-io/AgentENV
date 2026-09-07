@@ -219,23 +219,40 @@ impl FirecrackerInstance {
             "stopping firecracker process"
         );
 
-        if let Some(mut child) = self.process.take() {
-            // First try a graceful stop with SIGTERM
+        // Keep ownership until wait confirms exit. Error or cancellation must
+        // leave a retryable handle rather than make a live VM look stopped.
+        if let Some(child) = self.process.as_mut() {
             if let Some(pid) = child.id() {
+                let pid = i32::try_from(pid).context("firecracker pid does not fit in i32")?;
                 trace!(pid, "sending SIGTERM to firecracker");
-                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                match kill(Pid::from_raw(pid), Signal::SIGTERM) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                    Err(error) => return Err(error).context("signal firecracker for stop"),
+                }
             }
 
-            // Wait for the process to exit, but if it doesn't within the timeout, force kill it with SIGKILL
-            if time::timeout(timeout, child.wait()).await.is_err() {
-                warn!("firecracker stop timed out; sending SIGKILL");
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+            match time::timeout(timeout, child.wait()).await {
+                Ok(result) => {
+                    result.context("wait for firecracker exit")?;
+                }
+                Err(_) => {
+                    warn!("firecracker stop timed out; sending SIGKILL");
+                    child
+                        .start_kill()
+                        .context("kill firecracker after stop timeout")?;
+                    time::timeout(timeout, child.wait())
+                        .await
+                        .context("firecracker exit is unconfirmed after SIGKILL")?
+                        .context("wait for killed firecracker")?;
+                }
             }
+            self.process = None;
         }
 
-        if self.socket_path.exists() {
-            let _ = fs::remove_file(&self.socket_path);
+        match fs::remove_file(&self.socket_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("remove stopped firecracker socket"),
         }
         debug!("firecracker process stopped");
         Ok(())
@@ -652,6 +669,62 @@ mod tests {
 
         instance.stop(Duration::from_millis(10)).await?;
 
+        assert!(!instance.socket_path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_retains_child_until_forced_exit_is_confirmed() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        let temp = tempdir()?;
+        let mut instance = FirecrackerInstance::new(temp.path().to_path_buf());
+        // The signal handler is installed before readiness. This shell has no
+        // child processes and kill_on_drop bounds cleanup even on assertion failure.
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; printf r; while :; do :; done"])
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut ready = [0];
+        time::timeout(
+            Duration::from_secs(5),
+            child.stdout.as_mut().unwrap().read_exact(&mut ready),
+        )
+        .await??;
+        assert_eq!(ready, [b'r']);
+        let pid = child.id();
+        instance.process = Some(child);
+        fs::write(&instance.socket_path, b"owned socket")?;
+        assert!(time::timeout(
+            Duration::from_millis(10),
+            instance.stop(Duration::from_secs(60))
+        )
+        .await
+        .is_err());
+        assert_eq!(instance.process.as_ref().and_then(Child::id), pid);
+        assert!(instance.socket_path.exists());
+        assert!(instance.process.as_mut().unwrap().try_wait()?.is_none());
+
+        instance.stop(Duration::from_millis(100)).await?;
+        assert!(instance.process.is_none());
+        assert!(!instance.socket_path.exists());
+        instance.stop(Duration::from_millis(100)).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_cleanup_error_is_reported_and_retryable() -> Result<()> {
+        let temp = tempdir()?;
+        let mut instance = FirecrackerInstance::new(temp.path().to_path_buf());
+        fs::create_dir(&instance.socket_path)?;
+        let error = instance.stop(Duration::from_millis(10)).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("remove stopped firecracker socket"));
+        assert!(instance.socket_path.is_dir());
+        fs::remove_dir(&instance.socket_path)?;
+        fs::write(&instance.socket_path, b"stale socket")?;
+        instance.stop(Duration::from_millis(10)).await?;
         assert!(!instance.socket_path.exists());
         Ok(())
     }
