@@ -11,6 +11,26 @@ use crate::{models, types::*};
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[must_use]
 #[allow(clippy::large_enum_variant)]
+pub enum ExportSnapshotRootfsImageResponse {
+    /// The rootfs image was published or its identical manifest already exists
+    Status200_TheRootfsImageWasPublishedOrItsIdenticalManifestAlreadyExists(
+        models::SnapshotRootfsImageExport,
+    ),
+    /// Bad request
+    Status400_BadRequest(models::Error),
+    /// Authentication error
+    Status401_AuthenticationError(models::Error),
+    /// Not found
+    Status404_NotFound(models::Error),
+    /// Conflict
+    Status409_Conflict(models::Error),
+    /// Server error
+    Status500_ServerError(models::Error),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[must_use]
+#[allow(clippy::large_enum_variant)]
 pub enum SnapshotsGetResponse {
     /// Successfully returned snapshots
     Status200_SuccessfullyReturnedSnapshots {
@@ -60,6 +80,20 @@ pub trait Snapshots<E: std::fmt::Debug + Send + Sync + 'static = ()>:
     super::ErrorHandler<E>
 {
     type Claims;
+
+    /// Export a committed snapshot rootfs to an explicit OCI repository.
+    ///
+    /// ExportSnapshotRootfsImage - POST /snapshots/{snapshotID}/rootfs-image
+    async fn export_snapshot_rootfs_image(
+        &self,
+
+        method: &Method,
+        host: &Host,
+        cookies: &CookieJar,
+        claims: &Self::Claims,
+        path_params: &models::ExportSnapshotRootfsImagePathParams,
+        body: &models::SnapshotRootfsImageExportRequest,
+    ) -> Result<ExportSnapshotRootfsImageResponse, E>;
 
     /// List snapshots.
     ///

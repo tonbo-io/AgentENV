@@ -97,6 +97,18 @@ snapshot; other exported references live independently of snapshot deletion.
 The standalone export preserves the same effective OCI runtime fields described
 under [OverlayBD Image Publication](#overlaybd-image-publication).
 
+### Export rootfs through the API
+
+`POST /snapshots/{snapshotID}/rootfs-image` exposes the same export implementation to authenticated controllers. Both `targetRepository` and `tag` are required, so the server never implicitly selects the source image repository or a `latest` tag. Registry operations use the server's credentials; scope those credentials to the intended publication repositories.
+
+```json
+{"targetRepository":"registry.example.com/workspaces/rootfs","tag":"checkpoint-1"}
+```
+
+The response includes `imageRef`, `manifestDigest` and `reused`. Cold boot from `registry.example.com/workspaces/rootfs@<manifestDigest>` to pin the exact exported filesystem. The export contains no process memory or attached drives. It retains the effective OCI runtime configuration, so a controller switching identities must also provide the destination launch configuration and clean platform-owned guest state before capture.
+
+Use a distinct publication target when its lifetime must outlive the snapshot. As with the CLI, reusing an existing snapshot-managed publication target does not detach that target from snapshot garbage collection. Callers own independent-image retention and deletion. Protect publication tags from concurrent replacement (for example, with immutable registry tags); the export's conflict check is not an atomic compare-and-swap against other registry writers.
+
 ## Manage Snapshots
 
 ### List Snapshots

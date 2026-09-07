@@ -2547,3 +2547,34 @@ func TestGatewayClassifiesClientCanceledProxyErrors(t *testing.T) {
 		t.Fatalf("GET StreamInput should not be classified as stream input")
 	}
 }
+
+func TestRootfsExportOutlivesRoutingDeadlineButHonorsCallerCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodPost, "/snapshots/checkpoint-1/rootfs-image", true},
+		{http.MethodGet, "/snapshots/checkpoint-1/rootfs-image", false},
+		{http.MethodPost, "/snapshots/checkpoint-1", false},
+		{http.MethodPost, "/snapshots//rootfs-image", false},
+		{http.MethodPost, "/sandboxes/checkpoint-1/rootfs-image", false},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		if got := isRootfsImageExportRequest(req); got != tc.want {
+			t.Fatalf("%s %s: export=%v, want %v", tc.method, tc.path, got, tc.want)
+		}
+	}
+	caller, cancelCaller := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/checkpoint-1/rootfs-image", nil).WithContext(caller)
+	routing, cancelRouting := context.WithCancel(caller)
+	proxy, cancelProxy := requestContextForProxy(req, routing, isRootfsImageExportRequest(req))
+	defer cancelProxy()
+	cancelRouting()
+	if proxy.Err() != nil {
+		t.Fatal("routing timeout canceled rootfs export")
+	}
+	cancelCaller()
+	if proxy.Err() != context.Canceled {
+		t.Fatal("caller cancellation did not stop rootfs export")
+	}
+}
