@@ -267,11 +267,17 @@ impl SandboxPersister for FileBackedSandboxPersister {
                 Err(err) => {
                     warn!(record_key = %String::from_utf8_lossy(&key), error = %err, "discarding invalid paused sandbox record");
                     if let Some(sandbox_id) = sandbox_id_from_key {
-                        let _ = self.remove_record(&sandbox_id).await;
+                        self.cleanup_invalid_record(&sandbox_id).await?;
                     }
                     continue;
                 }
             };
+            if sandbox_id_from_key != Some(record.metadata.id) {
+                return Err(SandboxPersistenceError::InvalidRecord {
+                    reason: "record key does not match sandbox identity".into(),
+                    source: None,
+                });
+            }
             let sandbox_id = record.metadata.id;
 
             if record.lifecycle == PersistedPausedLifecycle::Deleting {
@@ -787,6 +793,53 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert!(persister.sandbox_artifact_root(&sandbox_id).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_failure_preserves_corrupt_record_until_artifacts_are_cleaned(
+    ) -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let persister = test_persister(temp.path());
+        let id = SandboxId::new();
+        persister
+            .db()
+            .await?
+            .put(id.to_string(), b"invalid-json")
+            .await?;
+        let root = persister.sandbox_artifact_root(&id);
+        tokio::fs::create_dir_all(root.parent().unwrap()).await?;
+        tokio::fs::write(root, b"invalid-directory").await?;
+        assert!(persister
+            .load_all(&MockBackendFactory::new())
+            .await
+            .is_err());
+        assert!(has_record(&persister, &id).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mismatched_record_key_never_targets_another_sandbox() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let persister = test_persister(temp.path());
+        let metadata = SandboxMetadata {
+            id: SandboxId::new(),
+            ..Default::default()
+        };
+        persister.mark_deleting(&metadata).await?;
+        let record = persister.get_record(&metadata.id).await?;
+        let other_id = SandboxId::new();
+        persister
+            .db()
+            .await?
+            .put(other_id.to_string(), serde_json::to_vec(&record)?)
+            .await?;
+        assert!(persister
+            .load_all(&MockBackendFactory::new())
+            .await
+            .is_err());
+        assert!(has_record(&persister, &metadata.id).await?);
+        assert!(has_record(&persister, &other_id).await?);
         Ok(())
     }
 
