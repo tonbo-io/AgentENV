@@ -79,6 +79,12 @@ pub struct NodesGetQueryParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct NodesNodeIdDrainPostPathParams {
+    pub node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NodesNodeIdGetPathParams {
     pub node_id: String,
 }
@@ -3668,9 +3674,7 @@ impl std::str::FromStr for Node {
             let val = match string_iter.next() {
                 Some(x) => x,
                 None => {
-                    return std::result::Result::Err(
-                        "Missing value while parsing Node".to_string(),
-                    );
+                    return std::result::Result::Err("Missing value while parsing Node".to_string());
                 }
             };
 
@@ -4228,6 +4232,455 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NodeDetail> 
                     }
                     std::result::Result::Err(err) => std::result::Result::Err(format!(
                         r#"Unable to convert header value '{value}' into NodeDetail - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+/// Durable admission closure and current node observations. This is not authorization to terminate a host or proof of physical cleanup.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct NodeDrainObservation {
+    #[serde(rename = "nodeID")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub node_id: String,
+
+    #[serde(rename = "serviceInstanceID")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub service_instance_id: String,
+
+    #[serde(rename = "drainID")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub drain_id: String,
+
+    #[serde(rename = "admissionClosed")]
+    pub admission_closed: bool,
+
+    #[serde(rename = "inFlightStarts")]
+    #[validate(range(min = 0u64))]
+    pub in_flight_starts: u64,
+
+    #[serde(rename = "sandboxCount")]
+    #[validate(range(min = 0u64))]
+    pub sandbox_count: u64,
+
+    #[serde(rename = "pausedSandboxCount")]
+    #[validate(range(min = 0u64))]
+    pub paused_sandbox_count: u64,
+
+    #[serde(rename = "sandboxStartingCount")]
+    #[validate(range(min = 0u64))]
+    pub sandbox_starting_count: u64,
+}
+
+impl NodeDrainObservation {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        node_id: String,
+        service_instance_id: String,
+        drain_id: String,
+        admission_closed: bool,
+        in_flight_starts: u64,
+        sandbox_count: u64,
+        paused_sandbox_count: u64,
+        sandbox_starting_count: u64,
+    ) -> NodeDrainObservation {
+        NodeDrainObservation {
+            node_id,
+            service_instance_id,
+            drain_id,
+            admission_closed,
+            in_flight_starts,
+            sandbox_count,
+            paused_sandbox_count,
+            sandbox_starting_count,
+        }
+    }
+}
+
+/// Converts the NodeDrainObservation value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for NodeDrainObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            Some("nodeID".to_string()),
+            Some(self.node_id.to_string()),
+            Some("serviceInstanceID".to_string()),
+            Some(self.service_instance_id.to_string()),
+            Some("drainID".to_string()),
+            Some(self.drain_id.to_string()),
+            Some("admissionClosed".to_string()),
+            Some(self.admission_closed.to_string()),
+            Some("inFlightStarts".to_string()),
+            Some(self.in_flight_starts.to_string()),
+            Some("sandboxCount".to_string()),
+            Some(self.sandbox_count.to_string()),
+            Some("pausedSandboxCount".to_string()),
+            Some(self.paused_sandbox_count.to_string()),
+            Some("sandboxStartingCount".to_string()),
+            Some(self.sandbox_starting_count.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a NodeDrainObservation value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for NodeDrainObservation {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub node_id: Vec<String>,
+            pub service_instance_id: Vec<String>,
+            pub drain_id: Vec<String>,
+            pub admission_closed: Vec<bool>,
+            pub in_flight_starts: Vec<u64>,
+            pub sandbox_count: Vec<u64>,
+            pub paused_sandbox_count: Vec<u64>,
+            pub sandbox_starting_count: Vec<u64>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing NodeDrainObservation".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "nodeID" => intermediate_rep.node_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "serviceInstanceID" => intermediate_rep.service_instance_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "drainID" => intermediate_rep.drain_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "admissionClosed" => intermediate_rep.admission_closed.push(
+                        <bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "inFlightStarts" => intermediate_rep.in_flight_starts.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "sandboxCount" => intermediate_rep.sandbox_count.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "pausedSandboxCount" => intermediate_rep.paused_sandbox_count.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "sandboxStartingCount" => intermediate_rep.sandbox_starting_count.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing NodeDrainObservation".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(NodeDrainObservation {
+            node_id: intermediate_rep
+                .node_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "nodeID missing in NodeDrainObservation".to_string())?,
+            service_instance_id: intermediate_rep
+                .service_instance_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "serviceInstanceID missing in NodeDrainObservation".to_string())?,
+            drain_id: intermediate_rep
+                .drain_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "drainID missing in NodeDrainObservation".to_string())?,
+            admission_closed: intermediate_rep
+                .admission_closed
+                .into_iter()
+                .next()
+                .ok_or_else(|| "admissionClosed missing in NodeDrainObservation".to_string())?,
+            in_flight_starts: intermediate_rep
+                .in_flight_starts
+                .into_iter()
+                .next()
+                .ok_or_else(|| "inFlightStarts missing in NodeDrainObservation".to_string())?,
+            sandbox_count: intermediate_rep
+                .sandbox_count
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sandboxCount missing in NodeDrainObservation".to_string())?,
+            paused_sandbox_count: intermediate_rep
+                .paused_sandbox_count
+                .into_iter()
+                .next()
+                .ok_or_else(|| "pausedSandboxCount missing in NodeDrainObservation".to_string())?,
+            sandbox_starting_count: intermediate_rep
+                .sandbox_starting_count
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "sandboxStartingCount missing in NodeDrainObservation".to_string()
+                })?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<NodeDrainObservation> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<NodeDrainObservation>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<NodeDrainObservation>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for NodeDrainObservation - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NodeDrainObservation> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <NodeDrainObservation as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into NodeDrainObservation - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct NodeDrainRequest {
+    #[serde(rename = "clusterID")]
+    pub cluster_id: uuid::Uuid,
+
+    #[serde(rename = "serviceInstanceID")]
+    #[validate(length(min = 1, max = 128), custom(function = "check_xss_string"))]
+    pub service_instance_id: String,
+
+    #[serde(rename = "drainID")]
+    #[validate(
+            length(min = 1, max = 128),
+            regex(path = *RE_NODEDRAINREQUEST_DRAIN_ID),
+          custom(function = "check_xss_string"),
+    )]
+    pub drain_id: String,
+}
+
+lazy_static::lazy_static! {
+    static ref RE_NODEDRAINREQUEST_DRAIN_ID: regex::Regex = regex::Regex::new("^[A-Za-z0-9_:-]+$").unwrap();
+}
+
+impl NodeDrainRequest {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        cluster_id: uuid::Uuid,
+        service_instance_id: String,
+        drain_id: String,
+    ) -> NodeDrainRequest {
+        NodeDrainRequest {
+            cluster_id,
+            service_instance_id,
+            drain_id,
+        }
+    }
+}
+
+/// Converts the NodeDrainRequest value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for NodeDrainRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            // Skipping clusterID in query parameter serialization
+            Some("serviceInstanceID".to_string()),
+            Some(self.service_instance_id.to_string()),
+            Some("drainID".to_string()),
+            Some(self.drain_id.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a NodeDrainRequest value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for NodeDrainRequest {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub cluster_id: Vec<uuid::Uuid>,
+            pub service_instance_id: Vec<String>,
+            pub drain_id: Vec<String>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing NodeDrainRequest".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "clusterID" => intermediate_rep.cluster_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "serviceInstanceID" => intermediate_rep.service_instance_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "drainID" => intermediate_rep.drain_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing NodeDrainRequest".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(NodeDrainRequest {
+            cluster_id: intermediate_rep
+                .cluster_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "clusterID missing in NodeDrainRequest".to_string())?,
+            service_instance_id: intermediate_rep
+                .service_instance_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "serviceInstanceID missing in NodeDrainRequest".to_string())?,
+            drain_id: intermediate_rep
+                .drain_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "drainID missing in NodeDrainRequest".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<NodeDrainRequest> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<NodeDrainRequest>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<NodeDrainRequest>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for NodeDrainRequest - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NodeDrainRequest> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <NodeDrainRequest as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into NodeDrainRequest - {err}"#
                     )),
                 }
             }

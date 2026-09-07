@@ -112,6 +112,61 @@ impl Admin<()> for ApiImpl {
         ))
     }
 
+    async fn nodes_node_id_drain_post(
+        &self,
+        _method: &Method,
+        _host: &Host,
+        _cookies: &CookieJar,
+        _claims: &Self::Claims,
+        path_params: &models::NodesNodeIdDrainPostPathParams,
+        body: &models::NodeDrainRequest,
+    ) -> Result<NodesNodeIdDrainPostResponse, ()> {
+        let Some(observability) = self.observability() else {
+            return Ok(NodesNodeIdDrainPostResponse::Status404_NotFound(
+                Self::error(404, "node identity is unavailable"),
+            ));
+        };
+        if path_params.node_id != observability.node_id()
+            || body.cluster_id != observability.cluster_id()
+            || body.service_instance_id != observability.service_instance_id()
+        {
+            return Ok(
+                NodesNodeIdDrainPostResponse::Status409_NodeInstanceMismatch(Self::error(
+                    409,
+                    "drain request does not address this exact node service instance",
+                )),
+            );
+        }
+        if let Err(error) = self.orchestrator().drain_node(body.drain_id.clone()).await {
+            return Ok(NodesNodeIdDrainPostResponse::Status500_ServerError(
+                Self::error(500, error.to_string()),
+            ));
+        }
+        let node = match observability.node_snapshot().await {
+            Ok(node) => node,
+            Err(error) => {
+                return Ok(NodesNodeIdDrainPostResponse::Status500_ServerError(
+                    Self::error(500, error.to_string()),
+                ))
+            }
+        };
+        let admission = self.orchestrator().node_admission_status();
+        Ok(
+            NodesNodeIdDrainPostResponse::Status200_DurableAdmissionObservation(
+                models::NodeDrainObservation {
+                    node_id: node.node_id,
+                    service_instance_id: node.service_instance_id,
+                    drain_id: body.drain_id.clone(),
+                    admission_closed: admission.closed,
+                    in_flight_starts: admission.in_flight as u64,
+                    sandbox_count: node.sandbox_count.into(),
+                    paused_sandbox_count: node.paused_sandbox_count.into(),
+                    sandbox_starting_count: node.sandbox_starting_count.into(),
+                },
+            ),
+        )
+    }
+
     async fn nodes_node_id_get(
         &self,
         _method: &Method,

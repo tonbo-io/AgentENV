@@ -1323,6 +1323,53 @@ components:
           type: string
           description: CPU architecture of the node
 
+    NodeDrainRequest:
+      type: object
+      additionalProperties: false
+      required: [clusterID, serviceInstanceID, drainID]
+      properties:
+        clusterID:
+          type: string
+          format: uuid
+        serviceInstanceID:
+          type: string
+          minLength: 1
+          maxLength: 128
+        drainID:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9_:-]+$'
+    NodeDrainObservation:
+      type: object
+      description: Durable admission closure and current node observations. This is not authorization to terminate a host or proof of physical cleanup.
+      required: [nodeID, serviceInstanceID, drainID, admissionClosed, inFlightStarts, sandboxCount, pausedSandboxCount, sandboxStartingCount]
+      properties:
+        nodeID:
+          type: string
+        serviceInstanceID:
+          type: string
+        drainID:
+          type: string
+        admissionClosed:
+          type: boolean
+        inFlightStarts:
+          type: integer
+          format: int64
+          minimum: 0
+        sandboxCount:
+          type: integer
+          format: int64
+          minimum: 0
+        pausedSandboxCount:
+          type: integer
+          format: int64
+          minimum: 0
+        sandboxStartingCount:
+          type: integer
+          format: int64
+          minimum: 0
+
     Node:
       required:
         - id
@@ -2526,5 +2573,40 @@ paths:
           $ref: "#/components/responses/401"
         "404":
           $ref: "#/components/responses/404"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /nodes/{nodeID}/drain:
+    post:
+      summary: Persist node admission closure
+      description: Close create, resume and fork admission on the exact service instance. Retry the same drain ID to observe in-flight starts. A restarted process must be addressed using its new service instance ID. Drain is irreversible for this physical node; observations do not authorize instance termination.
+      tags: [admin]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/nodeID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeDrainRequest"
+      responses:
+        "200":
+          description: Durable admission observation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDrainObservation"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "409":
+          description: Node instance mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/500"

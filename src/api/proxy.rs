@@ -2069,6 +2069,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_drain_requires_control_key_and_available_node_identity() {
+        let api = build_api().await;
+        let app = server::new(Arc::clone(&api));
+        for (keys, expected) in [
+            (vec![], StatusCode::UNAUTHORIZED),
+            (vec!["wrong"], StatusCode::UNAUTHORIZED),
+            (vec![TEST_API_KEY, TEST_API_KEY], StatusCode::UNAUTHORIZED),
+            (vec![TEST_API_KEY], StatusCode::NOT_FOUND),
+        ] {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/nodes/node/drain")
+                .header(header::HOST, "localhost")
+                .header(header::CONTENT_TYPE, "application/json");
+            for key in keys {
+                request = request.header(API_KEY_HEADER, key);
+            }
+            let response = app.clone().oneshot(request.body(Body::from(
+                r#"{"clusterID":"00000000-0000-0000-0000-000000000001","serviceInstanceID":"instance","drainID":"node:1"}"#
+            )).unwrap()).await.unwrap();
+            assert_eq!(response.status(), expected);
+            assert!(!api.orchestrator().node_admission_status().closed);
+        }
+    }
+
+    #[tokio::test]
     async fn control_plane_auth_is_separate_from_sandbox_auth() {
         let app = server::new(build_api().await);
 

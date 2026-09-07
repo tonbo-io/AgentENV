@@ -316,3 +316,9 @@ Methods:
 - ReportSandboxEvent
 - GetNode
 - UnregisterNode
+
+### Node drain admission
+
+A controller can send `POST /nodes/{nodeID}/drain` directly to the exact node with its control-plane `X-API-Key`. The authoritative request and response are in `src/api/openapi.yml`. Supply the cluster ID, current service instance ID and an immutable drain ID. The node rejects an identity mismatch before changing admission. Successful responses follow a durable marker write and report closed admission, in-flight starts, and runtime counters. Poll with the same drain ID; after restart, discover the new service instance ID before retrying. A different drain ID cannot overwrite an existing marker. The marker lives in the node's durable Sandbox store and is never automatically removed.
+
+This endpoint closes create, resume and fork admission while preserving pause, snapshot and cleanup operations. It does not update scheduler discovery, migrate guests, prove all physical operations have completed or authorize cloud instance termination. Controllers must establish scheduler exclusion and verify exact-instance cleanup separately. The node's durable store must survive process/Pod restarts; losing that store is a node-recovery event, not evidence that a previous drain completed.
