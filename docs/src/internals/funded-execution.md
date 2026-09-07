@@ -13,3 +13,5 @@ Before guest execution, the server starts a separate watchdog process holding a 
 Standalone AgentENV users may keep admission or required funding disabled. This is the supported non-billing consumer, not an alternate path for a funded Cloud deployment. Enabling required funding blocks automatic resume without a new caller-issued activation. Active-workload interruption, fairness, pressure behavior and practical density still require Linux/KVM workload validation.
 
 `cargo test -p runtime-policy` covers policy arithmetic and Linux process enforcement, including API-owner SIGSTOP and partial renewal frames. Production acceptance must additionally exercise the actual Firecracker and cgroup paths in an isolated Kubernetes namespace, capture immutable source/image evidence, and remove its resources.
+
+The gateway routes usage reads through the Sandbox owner lookup, including reads of retained final meters. It preserves the `runtimeInstanceID` query fence and never schedules a usage request onto a new node. This matters with multiple nodes: a successful activation on one node does not create a meter on another.

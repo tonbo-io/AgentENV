@@ -223,7 +223,7 @@ func gatewayRouteLabel(path string) string {
 		}
 		if len(parts) == 3 {
 			switch parts[2] {
-			case "snapshots", "custom-extension-params", "pause", "resume", "fork":
+			case "usage", "snapshots", "custom-extension-params", "pause", "resume", "fork":
 				return "/sandboxes/{sandbox_id}/" + parts[2]
 			}
 		}
