@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1fd15b1f.js";
+            window.path_to_searchindex_js = "searchindex-282c5727.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c868df7a.js"></script>
@@ -4442,6 +4442,9 @@ into it (for example using <code>debugfs</code>).</li>
 </ol>
 <p>The guest must keep a long-running dispatcher (started during the initial
 boot) that watches for these per-instance files and executes them after resume.</p>
+<h2 id="arm-guest-cpu-parallelism"><a class="header" href="#arm-guest-cpu-parallelism">ARM guest CPU parallelism</a></h2>
+<p>The KVM dependency <code>1.15.1-tonbo.1</code> backports Firecracker #6172 onto the pinned <code>aenv-deps</code> source. On Linux host kernels before 6.10, PSCI CPU_ON resets secondary CLIDR_EL1 registers; applying the boot-time cache override only to vCPU 0 can break guest scheduling domains. The dependency now gates that override on host kernels 6.10 and newer. Older hosts retain limited cache descriptions, so successful load balancing must not be described as full physical cache-topology accuracy. See <code>dependencies/firecracker/README.md</code> for source, build, and removal conditions.</p>
+<p>After selecting this dependency, validate a fresh multi-vCPU guest and a paused/restored guest with independent CPU workers. Require measured CPU seconds over external wall time to exceed one core before attempting loaded relocation. Guest <code>NumCPU</code>, configured quota, and successful binary builds alone do not demonstrate parallel execution. For Cloud releases, use the isolated EKS CPU-loaded relocation workflow and retain guest topology, raw CPU windows, process identity, per-worker progress, different physical node IDs, and cleanup evidence. Existing snapshots must satisfy the runtime version compatibility gate; do not bypass it during rollout.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="template-builder-and-testing"><a class="header" href="#template-builder-and-testing">Template Builder and Testing</a></h1>
 <p>This document explains how the current template-facing build API maps onto the
