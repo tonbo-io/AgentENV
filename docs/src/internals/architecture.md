@@ -320,3 +320,9 @@ This fencing does not turn an uncertain release into confirmed cleanup. A lost r
 The create entry point claims the runtime ID before constructing or starting its backend. File-backed orchestrators persist the claim under `.creation-claims` in the configured metadata store and fsync the file and directory before dispatch. Concurrent or delayed repeat creates are rejected without replacing the original runtime handle or metadata. Claims survive failed requests and runtime deletion: missing metadata is not permission to recreate an uncertain execution. Restored metadata is adopted into the claim store before admission opens. In-memory orchestrators use process-local claims.
 
 These claims are node-local creation fences, not authorization grants, accounting receipts, cross-node ownership or physical-cleanup proof. They do not fence fork or resumed activations. Previously deleted runtime IDs without retained metadata cannot be reconstructed by this adoption step; the database dispatch guard must remain until cutover accounts for that history and supplies complete execution fencing. Claims are not garbage-collected by a timeout or deletion response.
+
+### Network cleanup ownership
+
+A failed slot cleanup retains the slot handle and its allocated bitmap bit in the network manager. It cannot return to the warm pool or be allocated to another guest. Partial network setup failures use the same cleanup path. Pool maintenance retries retained slots without blocking refill solely because an older cleanup failed; shutdown also retries them and reports failures. Only successful cleanup releases the bit. Cleanup runs outside the pending-list mutex.
+
+This ownership is process-local. It is not durable orphan recovery or a host termination acknowledgement; restart reconciliation, active-slot accounting and complete physical cleanup proof remain required.
