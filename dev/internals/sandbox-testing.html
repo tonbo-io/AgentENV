@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-282c5727.js";
+            window.path_to_searchindex_js = "../searchindex-84d6289e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c868df7a.js"></script>
@@ -953,6 +953,9 @@ boot) that watches for these per-instance files and executes them after resume.<
 <h2 id="arm-guest-cpu-parallelism"><a class="header" href="#arm-guest-cpu-parallelism">ARM guest CPU parallelism</a></h2>
 <p>The KVM dependency <code>1.15.1-tonbo.1</code> backports Firecracker #6172 onto the pinned <code>aenv-deps</code> source. On Linux host kernels before 6.10, PSCI CPU_ON resets secondary CLIDR_EL1 registers; applying the boot-time cache override only to vCPU 0 can break guest scheduling domains. The dependency now gates that override on host kernels 6.10 and newer. Older hosts retain limited cache descriptions, so successful load balancing must not be described as full physical cache-topology accuracy. See <code>dependencies/firecracker/README.md</code> for source, build, and removal conditions.</p>
 <p>After selecting this dependency, validate a fresh multi-vCPU guest and a paused/restored guest with independent CPU workers. Require measured CPU seconds over external wall time to exceed one core before attempting loaded relocation. Guest <code>NumCPU</code>, configured quota, and successful binary builds alone do not demonstrate parallel execution. For Cloud releases, use the isolated EKS CPU-loaded relocation workflow and retain guest topology, raw CPU windows, process identity, per-worker progress, different physical node IDs, and cleanup evidence. Existing snapshots must satisfy the runtime version compatibility gate; do not bypass it during rollout.</p>
+<h2 id="pressure-aware-placement-consumers"><a class="header" href="#pressure-aware-placement-consumers">Pressure-aware placement consumers</a></h2>
+<p>The gateway accepts an exact <code>placement.nodeID</code> alongside the existing <code>differentNodeFrom</code> and <code>snapshotCompatibleWith</code> constraints. A required node is filtered by ordinary resource admission and compatibility; it never falls back to another node. <code>/nodes</code> includes <code>reportedAtUnixMs</code> and an opaque <code>snapshotCompatibilityKey</code>. The key and Scheduler compatibility filtering share one implementation; an empty key means incomplete identity. Authenticated Sandbox control responses carry gateway-owned <code>x-agentenv-node-id</code>, including usage responses, so an external policy controller can associate a runtime meter with the physical placement that served it. Application proxy responses do not acquire this control-plane contract.</p>
+<p>These are placement and observation mechanisms. Host-pressure thresholds, sustained observation windows, migration admission, accounting, and cooldown belong to the owning product controller. Unit tests must cover exact-node rejection after resource filtering and compatibility-domain changes before deploying a controller that relies on these fields.</p>
 
                     </main>
 
