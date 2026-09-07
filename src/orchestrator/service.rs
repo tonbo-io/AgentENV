@@ -2663,8 +2663,7 @@ where
                     | SandboxState::Forking
                     | SandboxState::Pausing
                     | SandboxState::Resuming
-                    | SandboxState::Killing
-                    | SandboxState::CleanupPending => {
+                    | SandboxState::Killing => {
                         match self.wait_for_transition(sandbox_id, metadata.state).await {
                             Ok(_) | Err(OrchestratorError::SandboxNotFound(_)) => {}
                             Err(err) => {
