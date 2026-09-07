@@ -66,6 +66,7 @@ pub enum DaemonRequest {
     /// Release an overlaybd device back to the pool.
     ReleaseOverlaybd {
         dev_id: u32,
+        allocation_id: uuid::Uuid,
     },
     /// Update the virtual size of a ublk device (requires UBLK_F_UPDATE_SIZE).
     UpdateSize {
@@ -110,12 +111,14 @@ pub enum DaemonResponse {
     },
     OverlaybdRuntimeDeviceCreated {
         dev_id: u32,
+        allocation_id: Option<uuid::Uuid>,
         device_path: PathBuf,
         actual_virtual_size: u64,
         runtime_image_config_path: PathBuf,
     },
     DeviceAcquired {
         dev_id: u32,
+        allocation_id: uuid::Uuid,
         device_path: PathBuf,
     },
     Released,
@@ -285,7 +288,9 @@ mod tests {
         sender.await.unwrap();
 
         match msg {
-            Some(DaemonRequest::Delete { dev_id }) => assert_eq!(dev_id, 7),
+            Some(DaemonRequest::Delete { dev_id }) => {
+                assert_eq!(dev_id, 7);
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -403,12 +408,33 @@ mod tests {
     }
 
     #[test]
+    fn release_requires_a_valid_allocation_identity() {
+        assert!(serde_json::from_str::<DaemonRequest>(
+            r#"{"kind":"release_overlaybd","dev_id":7}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<DaemonRequest>(
+            r#"{"kind":"release_overlaybd","dev_id":7,"allocation_id":"not-a-uuid"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn request_release_overlaybd_round_trip() {
-        let req = DaemonRequest::ReleaseOverlaybd { dev_id: 7 };
+        let req = DaemonRequest::ReleaseOverlaybd {
+            dev_id: 7,
+            allocation_id: uuid::Uuid::from_u128(42),
+        };
         let json = serde_json::to_string(&req).unwrap();
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
         match decoded {
-            DaemonRequest::ReleaseOverlaybd { dev_id } => assert_eq!(dev_id, 7),
+            DaemonRequest::ReleaseOverlaybd {
+                dev_id,
+                allocation_id,
+            } => {
+                assert_eq!(dev_id, 7);
+                assert_eq!(allocation_id, uuid::Uuid::from_u128(42));
+            }
             _ => panic!("unexpected variant"),
         }
     }
@@ -436,6 +462,7 @@ mod tests {
     #[test]
     fn response_device_acquired_round_trip() {
         let resp = DaemonResponse::DeviceAcquired {
+            allocation_id: uuid::Uuid::from_u128(42),
             dev_id: 5,
             device_path: PathBuf::from("/dev/ublkb5"),
         };
@@ -443,10 +470,12 @@ mod tests {
         let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
         match decoded {
             DaemonResponse::DeviceAcquired {
+                allocation_id,
                 dev_id,
                 device_path,
             } => {
                 assert_eq!(dev_id, 5);
+                assert_eq!(allocation_id, uuid::Uuid::from_u128(42));
                 assert_eq!(device_path, PathBuf::from("/dev/ublkb5"));
             }
             _ => panic!("unexpected variant"),
@@ -456,6 +485,7 @@ mod tests {
     #[test]
     fn response_overlaybd_runtime_device_created_round_trip() {
         let resp = DaemonResponse::OverlaybdRuntimeDeviceCreated {
+            allocation_id: Some(uuid::Uuid::from_u128(42)),
             dev_id: 7,
             device_path: PathBuf::from("/dev/ublkb7"),
             actual_virtual_size: 4096,
@@ -465,6 +495,7 @@ mod tests {
         let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
         match decoded {
             DaemonResponse::OverlaybdRuntimeDeviceCreated {
+                allocation_id,
                 dev_id,
                 device_path,
                 actual_virtual_size,
@@ -472,6 +503,7 @@ mod tests {
             } => {
                 assert_eq!(dev_id, 7);
                 assert_eq!(device_path, PathBuf::from("/dev/ublkb7"));
+                assert_eq!(allocation_id, Some(uuid::Uuid::from_u128(42)));
                 assert_eq!(actual_virtual_size, 4096);
                 assert_eq!(
                     runtime_image_config_path,

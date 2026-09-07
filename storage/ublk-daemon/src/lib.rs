@@ -1,3 +1,4 @@
+mod allocation;
 pub mod client;
 pub mod protocol;
 pub(crate) mod runtime;

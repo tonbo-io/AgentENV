@@ -355,6 +355,7 @@ mod client_tests {
                 assert_eq!(known_source_virtual_size, Some(8192));
                 assert!(!allow_shrink);
                 DaemonResponse::OverlaybdRuntimeDeviceCreated {
+                    allocation_id: Some(uuid::Uuid::from_u128(42)),
                     dev_id: 11,
                     device_path: PathBuf::from("/dev/ublkb11"),
                     actual_virtual_size: 8192,
@@ -382,6 +383,7 @@ mod client_tests {
             .await
             .unwrap();
         assert_eq!(device.dev_id, 11);
+        assert_eq!(device.allocation_id, Some(uuid::Uuid::from_u128(42)));
         assert_eq!(device.device_path, PathBuf::from("/dev/ublkb11"));
         assert_eq!(device.actual_virtual_size, 8192);
         assert_eq!(
@@ -708,11 +710,13 @@ mod client_tests {
                 DaemonRequest::Shutdown => DaemonResponse::Ok,
                 DaemonRequest::GetFeatures => DaemonResponse::Features { flags: 0 },
                 DaemonRequest::AcquireOverlaybd { .. } => DaemonResponse::DeviceAcquired {
+                    allocation_id: uuid::Uuid::from_u128(42),
                     dev_id: 99,
                     device_path: PathBuf::from("/dev/ublkb99"),
                 },
                 DaemonRequest::CreateOverlaybdRuntimeDevice { .. } => {
                     DaemonResponse::OverlaybdRuntimeDeviceCreated {
+                        allocation_id: Some(uuid::Uuid::from_u128(42)),
                         dev_id: 100,
                         device_path: PathBuf::from("/dev/ublkb100"),
                         actual_virtual_size: 4096,
@@ -1120,6 +1124,7 @@ mod server_tests {
     async fn acquire_overlaybd_exclusive_success() {
         let server = MockServer::start(Box::new(|req| match req {
             DaemonRequest::AcquireOverlaybd { .. } => DaemonResponse::DeviceAcquired {
+                allocation_id: uuid::Uuid::from_u128(42),
                 dev_id: 10,
                 device_path: PathBuf::from("/dev/ublkb10"),
             },
@@ -1130,7 +1135,7 @@ mod server_tests {
         .await;
 
         let client = server.client();
-        let (dev_id, path) = client
+        let (dev_id, path, allocation_id) = client
             .acquire_overlaybd(
                 Path::new("/tmp/image.json"),
                 Path::new("/global.json"),
@@ -1140,6 +1145,7 @@ mod server_tests {
             .await
             .unwrap();
         assert_eq!(dev_id, 10);
+        assert_eq!(allocation_id, uuid::Uuid::from_u128(42));
         assert_eq!(path, PathBuf::from("/dev/ublkb10"));
     }
 
@@ -1149,6 +1155,7 @@ mod server_tests {
             DaemonRequest::AcquireOverlaybd { access_mode, .. } => {
                 assert_eq!(access_mode, uvm_ublk_daemon::AccessMode::Shared);
                 DaemonResponse::DeviceAcquired {
+                    allocation_id: uuid::Uuid::from_u128(42),
                     dev_id: 20,
                     device_path: PathBuf::from("/dev/ublkb20"),
                 }
@@ -1160,7 +1167,7 @@ mod server_tests {
         .await;
 
         let client = server.client();
-        let (dev_id, path) = client
+        let (dev_id, path, allocation_id) = client
             .acquire_overlaybd(
                 Path::new("/tmp/mem.json"),
                 Path::new("/global.json"),
@@ -1170,14 +1177,19 @@ mod server_tests {
             .await
             .unwrap();
         assert_eq!(dev_id, 20);
+        assert_eq!(allocation_id, uuid::Uuid::from_u128(42));
         assert_eq!(path, PathBuf::from("/dev/ublkb20"));
     }
 
     #[tokio::test]
     async fn release_overlaybd_success() {
         let server = MockServer::start(Box::new(|req| match req {
-            DaemonRequest::ReleaseOverlaybd { dev_id } => {
+            DaemonRequest::ReleaseOverlaybd {
+                dev_id,
+                allocation_id,
+            } => {
                 assert_eq!(dev_id, 15);
+                assert_eq!(allocation_id, uuid::Uuid::from_u128(42));
                 DaemonResponse::Released
             }
             _ => DaemonResponse::Error {
@@ -1187,7 +1199,10 @@ mod server_tests {
         .await;
 
         let client = server.client();
-        client.release_overlaybd(15).await.unwrap();
+        client
+            .release_overlaybd(15, uuid::Uuid::from_u128(42))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+use crate::allocation::Allocations;
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,7 @@ struct PooledDevice {
 
 /// Tracks an active exclusive-mode device (rootfs, snapshot resume).
 struct ActiveExclusive {
+    allocations: Allocations,
     dev: UVMUblkDev<OverlaybdTarget>,
     image_config: PathBuf,
     image: Arc<ImageFile>,
@@ -75,7 +77,7 @@ struct ActiveShared {
     dev: UVMUblkDev<OverlaybdTarget>,
     image_config: PathBuf,
     image: Arc<ImageFile>,
-    refcount: usize,
+    allocations: Allocations,
 }
 
 /// Canonical key for shared-mode devices: (image_config, global_config).
@@ -590,9 +592,10 @@ async fn handle_connection(
             )
             .await
         }
-        DaemonRequest::ReleaseOverlaybd { dev_id } => {
-            handle_release_overlaybd(&pool_state, ctrl_ring.clone(), dev_id).await
-        }
+        DaemonRequest::ReleaseOverlaybd {
+            dev_id,
+            allocation_id,
+        } => handle_release_overlaybd(&pool_state, ctrl_ring.clone(), dev_id, allocation_id).await,
         DaemonRequest::UpdateSize {
             dev_id,
             new_sectors,
@@ -700,9 +703,10 @@ async fn handle_create_overlaybd_runtime_device(
         .await
         {
             Ok(DaemonResponse::DeviceAcquired {
+                allocation_id,
                 dev_id,
                 device_path,
-            }) => Ok((dev_id, device_path)),
+            }) => Ok((dev_id, device_path, Some(allocation_id))),
             Ok(other) => bail!("unexpected acquire response for runtime device: {other:?}"),
             Err(err) => Err(err),
         }
@@ -715,9 +719,10 @@ async fn handle_create_overlaybd_runtime_device(
             request.global_config,
         )
         .await
+        .map(|(id, path)| (id, path, None))
     };
 
-    let (dev_id, device_path) = match created {
+    let (dev_id, device_path, allocation_id) = match created {
         Ok(created) => created,
         Err(err) => {
             // The failed create/acquire path has returned, so any transient
@@ -735,6 +740,7 @@ async fn handle_create_overlaybd_runtime_device(
     };
 
     Ok(DaemonResponse::OverlaybdRuntimeDeviceCreated {
+        allocation_id,
         dev_id,
         device_path,
         actual_virtual_size: runtime.actual_virtual_size,
@@ -1174,9 +1180,12 @@ async fn acquire_exclusive(
         schedule_idle_pool_refill(Arc::clone(&pool), ctrl_ring, image.size_bytes());
     }
 
+    let mut allocations = Allocations::default();
+    let allocation_id = allocations.acquire();
     pool.active_exclusive.insert(
         dev_id,
         ActiveExclusive {
+            allocations,
             dev,
             image_config: image_config.to_path_buf(),
             image,
@@ -1184,6 +1193,7 @@ async fn acquire_exclusive(
     );
 
     Ok(DaemonResponse::DeviceAcquired {
+        allocation_id,
         dev_id,
         device_path,
     })
@@ -1200,15 +1210,16 @@ async fn acquire_shared(
 
     // Check if already active.
     if let Some(mut entry) = pool.active_shared.get_mut(&key) {
-        entry.refcount += 1;
+        let allocation_id = entry.allocations.acquire();
         let dev_id = entry.dev.dev_id();
         let device_path = entry.dev.device_path().to_path_buf();
         tracing::info!(
             dev_id,
-            refcount = entry.refcount,
+            refcount = entry.allocations.len(),
             "reusing shared overlaybd device"
         );
         return Ok(DaemonResponse::DeviceAcquired {
+            allocation_id,
             dev_id,
             device_path,
         });
@@ -1230,13 +1241,15 @@ async fn acquire_shared(
     // needs it to build a same-size placeholder.
     let refill_virtual_size = image.size_bytes();
 
+    let mut allocations = Allocations::default();
+    let allocation_id = allocations.acquire();
     match pool.active_shared.entry(key.clone()) {
         Entry::Occupied(mut entry) => {
             let active = entry.get_mut();
-            active.refcount += 1;
+            let allocation_id = active.allocations.acquire();
             let existing_dev_id = active.dev.dev_id();
             let existing_path = active.dev.device_path().to_path_buf();
-            let refcount = active.refcount;
+            let refcount = active.allocations.len();
             drop(entry);
 
             // Do not idle a redundant business-image device.
@@ -1248,6 +1261,7 @@ async fn acquire_shared(
                 "concurrent shared overlaybd acquire reused existing device"
             );
             return Ok(DaemonResponse::DeviceAcquired {
+                allocation_id,
                 dev_id: existing_dev_id,
                 device_path: existing_path,
             });
@@ -1258,7 +1272,7 @@ async fn acquire_shared(
                 dev,
                 image_config: image_config.to_path_buf(),
                 image,
-                refcount: 1,
+                allocations,
             });
         }
     }
@@ -1268,6 +1282,7 @@ async fn acquire_shared(
     }
 
     Ok(DaemonResponse::DeviceAcquired {
+        allocation_id,
         dev_id,
         device_path,
     })
@@ -1277,44 +1292,38 @@ async fn handle_release_overlaybd(
     pool_state: &Option<Arc<PoolState>>,
     ctrl_ring: IoRingHandle<io_uring::squeue::Entry128>,
     dev_id: u32,
+    allocation_id: uuid::Uuid,
 ) -> Result<DaemonResponse> {
     let pool = pool_state
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("warm pool not enabled"))?;
-
-    // Try exclusive first.
-    if let Some((_, active)) = pool.active_exclusive.remove(&dev_id) {
+    // Validate and remove under the same map entry guard. A stale request must
+    // never race removal/reuse of the numeric device ID.
+    if let Entry::Occupied(mut entry) = pool.active_exclusive.entry(dev_id) {
+        entry.get_mut().allocations.release(allocation_id)?;
+        let active = entry.remove();
         return release_exclusive_device(pool, ctrl_ring, dev_id, active).await;
     }
-
-    // Try shared.
-    if let Some(shared_key) = pool.shared_by_dev_id.get(&dev_id) {
-        let key = shared_key.clone();
-        drop(shared_key);
-
-        let mut remove_shared = false;
-        if let Some(mut entry) = pool.active_shared.get_mut(&key) {
-            entry.refcount = entry.refcount.saturating_sub(1);
-            remove_shared = entry.refcount == 0;
-            if !remove_shared {
-                tracing::info!(
-                    dev_id,
-                    refcount = entry.refcount,
-                    "decremented shared refcount"
-                );
+    let key = pool
+        .shared_by_dev_id
+        .get(&dev_id)
+        .map(|entry| entry.clone());
+    if let Some(key) = key {
+        if let Entry::Occupied(mut entry) = pool.active_shared.entry(key) {
+            if entry.get().dev.dev_id() != dev_id {
+                bail!("shared device identity changed");
+            }
+            if !entry.get_mut().allocations.release(allocation_id)? {
                 return Ok(DaemonResponse::Released);
             }
-        }
-
-        if remove_shared {
+            // Keep key removal atomic with the last reference: otherwise a
+            // concurrent acquire could be removed by the old release.
             pool.shared_by_dev_id.remove(&dev_id);
-            if let Some((_, active)) = pool.active_shared.remove(&key) {
-                return release_shared_device(pool, ctrl_ring, dev_id, active).await;
-            }
+            let active = entry.remove();
+            return release_shared_device(pool, ctrl_ring, dev_id, active).await;
         }
     }
-
-    bail!("device {dev_id} not found in active pool");
+    bail!("device {dev_id} has no matching active allocation");
 }
 
 async fn release_exclusive_device(
