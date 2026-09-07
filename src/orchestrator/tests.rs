@@ -114,6 +114,7 @@ fn make_orchestrator_without_background_with_factory_and_persister<
         sandbox_event_tx,
         default_sandbox_timeout: Duration::from_secs(15),
         admission: NodeAdmission::default(),
+        creation_gate: CreationGate::default(),
         operations: OperationTracker::default(),
         is_shutting_down: std::sync::atomic::AtomicBool::new(false),
         shutdown_tx: tokio::sync::watch::channel(false).0,
@@ -5101,5 +5102,81 @@ async fn delete_does_not_stop_runtime_before_persisting_intent() -> Result<()> {
     // Successful snapshot/pause still needs the original backend handle.
     orchestrator.pause_sandbox(created.id).await?;
     orchestrator.delete_sandbox(created.id).await?;
+    Ok(())
+}
+
+async fn creation_test_with_start_counter(
+) -> (Arc<TestOrchestrator>, Arc<std::sync::atomic::AtomicUsize>) {
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let behavior = Arc::new(MockBehavior::new());
+    let count = starts.clone();
+    behavior.set_on_operation(
+        MockOperation::StartNowait,
+        Arc::new(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    );
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior)).await;
+    (orchestrator, starts)
+}
+
+#[tokio::test]
+async fn repeated_creation_preserves_original_runtime_handle_and_metadata() -> Result<()> {
+    let (orchestrator, starts) = creation_test_with_start_counter().await;
+    let id = SandboxId::new();
+    let original = orchestrator
+        .clone()
+        .create_sandbox_inner(id, create_request(Some(60), &[]))
+        .await?;
+    let handle = orchestrator
+        .sandboxes
+        .read()
+        .await
+        .get(&id)
+        .unwrap()
+        .clone();
+    assert!(orchestrator
+        .clone()
+        .create_sandbox_inner(id, create_request(Some(60), &[]))
+        .await
+        .is_err());
+    let current = orchestrator
+        .sandboxes
+        .read()
+        .await
+        .get(&id)
+        .unwrap()
+        .clone();
+    assert!(Arc::ptr_eq(&handle, &current));
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let metadata = orchestrator.store.get(&id).await?.unwrap();
+    assert_eq!(metadata.state, SandboxState::Running);
+    assert_eq!(metadata.runtime_started_at, original.runtime_started_at);
+    orchestrator.delete_sandbox(id).await?;
+    assert!(orchestrator.store.get(&id).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_creation_has_one_runtime_owner() -> Result<()> {
+    let (orchestrator, starts) = creation_test_with_start_counter().await;
+    let id = SandboxId::new();
+    let (a, b) = tokio::join!(
+        orchestrator
+            .clone()
+            .create_sandbox_inner(id, create_request(Some(60), &[])),
+        orchestrator
+            .clone()
+            .create_sandbox_inner(id, create_request(Some(60), &[])),
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(orchestrator.sandboxes.read().await.len(), 1);
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Running
+    );
+    orchestrator.delete_sandbox(id).await?;
     Ok(())
 }

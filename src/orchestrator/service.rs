@@ -25,6 +25,7 @@ use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
 
 use super::admission::{AdmissionStatus, NodeAdmission};
+use super::creation_gate::CreationGate;
 use super::launch_plan::{CreateLaunchSource, LaunchPlan};
 use super::metrics::{
     aggregate_resource_metrics, OrchestratorCounters, OrchestratorMetrics, SandboxContribution,
@@ -98,6 +99,7 @@ pub struct Orchestrator<
 > {
     store: S,
     admission: NodeAdmission,
+    creation_gate: CreationGate,
     operations: OperationTracker,
     factory: F,
     persister: P,
@@ -233,6 +235,7 @@ where
             sandbox_event_tx,
             default_sandbox_timeout: Duration::from_secs(config.default_sandbox_timeout_secs),
             admission,
+            creation_gate: CreationGate::default(),
             operations: OperationTracker::default(),
             is_shutting_down: std::sync::atomic::AtomicBool::new(false),
             shutdown_tx,
@@ -404,6 +407,30 @@ where
         if let Err(err) = self.ensure_accepting_lifecycle_operations() {
             self.counters.record_create_fail(1);
             return Err(err);
+        }
+
+        let _creation = self
+            .creation_gate
+            .try_enter(sandbox_id.into_inner())
+            .context("enter runtime creation gate")?
+            .ok_or(StoreError::SandboxAlreadyExists { sandbox_id })?;
+        if self.store.get(&sandbox_id).await?.is_some() {
+            return Err(StoreError::SandboxAlreadyExists { sandbox_id }.into());
+        }
+        if let (Some(lease), Some(admission)) = (
+            request.execution_lease,
+            crate::sandbox::admission::NodeAdmission::global(),
+        ) {
+            // Reuse the execution boundary's durable registry. This preflight
+            // avoids constructing a doomed backend and running its cleanup;
+            // acquire() still performs the authoritative serialized claim.
+            if admission
+                .has_executed_activation(lease.activation_id)
+                .await
+                .context("read funded activation identity")?
+            {
+                return Err(StoreError::SandboxAlreadyExists { sandbox_id }.into());
+            }
         }
 
         let CreateSandboxRequest {

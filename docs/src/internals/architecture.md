@@ -315,6 +315,12 @@ Every daemon-side pooled acquisition returns a fresh `allocation_id` in addition
 
 This fencing does not turn an uncertain release into confirmed cleanup. A lost release response remains unresolved: callers must not interpret an unknown allocation as success or retry a numeric device ID without its identity. Durable cleanup receipts, device reconciliation and node-wide physical cleanup evidence remain separate requirements before safe host termination.
 
+### Runtime creation exclusion
+
+The orchestrator excludes concurrent create requests for the same runtime ID and rejects existing metadata before backend construction. Funded creates also consult the existing sandbox-admission activation registry, preventing an already-executed activation from entering backend construction and failure cleanup. The serialized admission acquire remains authoritative and is shared by cold creation, fork and resume; no second durable claim store is introduced. The in-process gate is released when the create operation ends or unwinds. Successful request replays query the existing runtime rather than create it again.
+
+This preflight is not a new authorization grant or cross-node fence. Kubernetes execution ownership still requires placement fencing, accounting acknowledgements and recovery qualification; keep the SQL dispatch guard until those consumers are migrated and verified.
+
 ### Network cleanup ownership
 
 A failed slot cleanup retains the slot handle and its allocated bitmap bit in the network manager. It cannot return to the warm pool or be allocated to another guest. Partial network setup failures use the same cleanup path. Pool maintenance retries retained slots without blocking refill solely because an older cleanup failed; shutdown also retries them and reports failures. Only successful cleanup releases the bit. Cleanup runs outside the pending-list mutex.
