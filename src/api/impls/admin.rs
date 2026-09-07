@@ -166,6 +166,11 @@ impl Admin<()> for ApiImpl {
                     in_flight_starts: admission.in_flight as u64,
                     in_flight_operations: operations.in_flight,
                     interrupted_operations: operations.interrupted,
+                    sandbox_ids: node
+                        .sandbox_ids
+                        .into_iter()
+                        .map(|id| id.to_string())
+                        .collect(),
                     sandbox_count: node.sandbox_count.into(),
                     paused_sandbox_count: node.paused_sandbox_count.into(),
                     sandbox_starting_count: node.sandbox_starting_count.into(),
