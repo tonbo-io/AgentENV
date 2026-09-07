@@ -314,3 +314,9 @@ services/                       # distributed control plane (Go)
 Every daemon-side pooled acquisition returns a fresh `allocation_id` in addition to the reusable device number. A shared device tracks a set of acquisition identities; release must present its own identity, and only removal of the last distinct identity returns the device to the pool. Old, unknown and repeated identities are rejected before changing an active allocation. The daemon client, runtime handles and protocol share this contract; raw non-pooled runtime devices carry no pooled allocation identity. Update the runtime and its bundled daemon together.
 
 This fencing does not turn an uncertain release into confirmed cleanup. A lost release response remains unresolved: callers must not interpret an unknown allocation as success or retry a numeric device ID without its identity. Durable cleanup receipts, device reconciliation and node-wide physical cleanup evidence remain separate requirements before safe host termination.
+
+### Network cleanup ownership
+
+A failed slot cleanup retains the slot handle and its allocated bitmap bit in the network manager. It cannot return to the warm pool or be allocated to another guest. Partial network setup failures use the same cleanup path. Pool maintenance retries retained slots without blocking refill solely because an older cleanup failed; shutdown also retries them and reports failures. Only successful cleanup releases the bit. Cleanup runs outside the pending-list mutex.
+
+This ownership is process-local. It is not durable orphan recovery or a host termination acknowledgement; restart reconciliation, active-slot accounting and complete physical cleanup proof remain required.

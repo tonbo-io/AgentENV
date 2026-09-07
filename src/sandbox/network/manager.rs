@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 #[cfg(test)]
@@ -51,6 +51,9 @@ pub(crate) struct NetworkManager {
 
     /// Warm slots ready for immediate reuse.
     pool: WarmPool<Slot>,
+
+    /// Failed cleanup retains ownership and its allocated bit until retry succeeds.
+    pending_cleanup: Mutex<Vec<Slot>>,
 
     /// Configured address plan for newly allocated network slots.
     address_plan: NetworkAddressPlan,
@@ -127,6 +130,7 @@ impl NetworkManager {
         let manager = Self {
             allocated: AtomicBitSet::new(),
             pool: WarmPool::new(config.pool),
+            pending_cleanup: Mutex::new(Vec::new()),
             address_plan: config.address_plan,
             netns_dir: config.netns_dir,
             egress_proxy,
@@ -210,18 +214,52 @@ impl NetworkManager {
         self.cleanup_slot_and_release_bit_inner(slot, false)
     }
 
-    fn cleanup_slot_and_release_bit_inner(&self, mut slot: Slot, sync_cleanup: bool) -> Result<()> {
+    fn cleanup_slot_and_release_bit_inner(&self, slot: Slot, sync_cleanup: bool) -> Result<()> {
+        self.cleanup_slot_with(slot, |slot| slot.cleanup(sync_cleanup))
+    }
+
+    fn cleanup_slot_with(
+        &self,
+        mut slot: Slot,
+        cleanup: impl FnOnce(&mut Slot) -> Result<(), NetworkError>,
+    ) -> Result<()> {
         let idx = slot.idx;
-        let cleanup_result = slot.cleanup(sync_cleanup);
-        let bitset_result = self.release_slot_bit(idx);
-        match (cleanup_result, bitset_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(e), Ok(())) => Err(e.into()),
-            (Ok(()), Err(e)) => Err(e),
-            (Err(ce), Err(be)) => {
-                warn!(cleanup_error = %ce, "network slot cleanup failed alongside bitset release error");
-                Err(be)
+        if let Err(error) = cleanup(&mut slot) {
+            // Do not drop the only cleanup handle or make this address available
+            // to a new guest while old kernel resources may still exist.
+            self.pending_cleanup
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(slot);
+            return Err(error.into());
+        }
+        self.release_slot_bit(idx)
+    }
+
+    fn take_pending_cleanup(&self) -> Vec<Slot> {
+        std::mem::take(
+            &mut *self
+                .pending_cleanup
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    fn retry_pending_cleanup(&self, sync_cleanup: bool) -> Result<()> {
+        let mut failures = Vec::new();
+        for slot in self.take_pending_cleanup() {
+            let idx = slot.idx;
+            if let Err(error) = self.cleanup_slot_and_release_bit_inner(slot, sync_cleanup) {
+                failures.push(format!("slot {idx}: {error}"));
             }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "network cleanup remains pending: {}",
+                failures.join(" | ")
+            ))
         }
     }
 
@@ -277,9 +315,13 @@ impl NetworkManager {
                     Arc::clone(&self.egress_proxy),
                 )
                 .expect("BitSet index within valid range");
-                if let Err(e) = slot.create_network() {
-                    self.allocated.remove(idx);
-                    return Err(anyhow!("Failed to create network: {e}"));
+                if let Err(error) = slot.create_network() {
+                    if let Err(cleanup_error) = self.cleanup_slot_and_release_bit(slot) {
+                        return Err(anyhow!(
+                            "Failed to create network: {error}; cleanup remains pending: {cleanup_error}"
+                        ));
+                    }
+                    return Err(anyhow!("Failed to create network: {error}"));
                 }
 
                 if self.shutting_down() {
@@ -305,6 +347,7 @@ impl NetworkManager {
     }
 
     fn run_pool_maintenance_cycle(&self) -> Result<()> {
+        let pending_result = self.retry_pending_cleanup(false);
         let action = self.pool.compute_maintenance_action(self.pool.len());
 
         match action {
@@ -354,7 +397,7 @@ impl NetworkManager {
             PoolMaintenanceAction::Idle => {}
         }
 
-        Ok(())
+        pending_result
     }
 
     /// Release a network slot. If the pool has room the slot is cached warm for
@@ -397,7 +440,8 @@ impl NetworkManager {
 
     fn shutdown_inner(&self, sync_cleanup: bool) -> Result<()> {
         self.shutting_down.store(true, Ordering::Release);
-        let drained_slots = self.pool.drain_all();
+        let mut drained_slots = self.take_pending_cleanup();
+        drained_slots.extend(self.pool.drain_all());
         let had_slots = !drained_slots.is_empty();
         let mut failures = Vec::new();
 
@@ -1047,6 +1091,51 @@ mod tests {
         assert!(manager.pool.is_empty(), "pool must be empty after pop");
         drop(slot);
         manager.allocated.remove(42);
+    }
+
+    #[test]
+    fn failed_cleanup_keeps_slot_unavailable_until_retry_succeeds() {
+        let manager = manager_with_capacity(0);
+        let slot = manager.allocate_slot(7).unwrap();
+        let error = manager
+            .cleanup_slot_with(slot, |_| {
+                Err(NetworkError::NamespaceError(anyhow!(
+                    "injected unmount failure"
+                )))
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("injected unmount failure"));
+        assert!(manager.allocated.has(7));
+        assert!(manager.allocate_slot(7).is_err());
+        assert!(manager.pool.is_empty());
+        assert_eq!(manager.pending_cleanup.lock().unwrap().len(), 1);
+        // Failure is isolated to this slot; unrelated allocation remains usable.
+        let peer = manager.allocate_slot(8).unwrap();
+        manager.release(peer).unwrap();
+        assert!(manager.allocated.has(7));
+
+        manager.retry_pending_cleanup(false).unwrap();
+        assert!(manager.pending_cleanup.lock().unwrap().is_empty());
+        assert!(!manager.allocated.has(7));
+        let replacement = manager.allocate_slot(7).unwrap();
+        manager.release(replacement).unwrap();
+    }
+
+    #[test]
+    fn shutdown_retries_retained_cleanup_before_reporting_success() {
+        let manager = manager_with_capacity(0);
+        let slot = manager.allocate_slot(8).unwrap();
+        manager
+            .cleanup_slot_with(slot, |_| {
+                Err(NetworkError::NamespaceError(anyhow!(
+                    "injected deletion failure"
+                )))
+            })
+            .unwrap_err();
+        manager.shutdown().unwrap();
+        assert!(manager.pending_cleanup.lock().unwrap().is_empty());
+        assert!(!manager.allocated.has(8));
+        manager.shutdown().unwrap();
     }
 
     #[test]
