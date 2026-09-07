@@ -1,0 +1,129 @@
+name: Firecracker Dependency
+
+on:
+  pull_request:
+    paths:
+      - "dependencies/firecracker/**"
+      - ".github/workflows/firecracker-dependency.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firecracker-dependency-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    outputs:
+      repository: ${{ steps.source.outputs.repository }}
+      commit: ${{ steps.source.outputs.commit }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          data = json.load(open("dependencies/firecracker/source.json"))
+          assert re.fullmatch(r"[0-9a-f]{40}", data["commit"])
+          assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-tonbo\.[0-9]+", data["version"])
+          assert data["repository"] == "kvcache-ai/firecracker"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key in ("repository", "commit", "version"):
+                  print(f"{key}={data[key]}", file=output)
+          PY
+
+  build:
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+          - runner: ubuntu-24.04
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: agentenv
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.source.outputs.repository }}
+          ref: ${{ needs.source.outputs.commit }}
+          path: firecracker
+      - name: Prepare exact dependency source
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 agentenv/dependencies/firecracker/prepare.py firecracker
+          python3 - <<'PY'
+          import json, os, re
+          data = json.load(open("agentenv/dependencies/firecracker/source.json"))
+          image = data["build_images"][os.environ["BUILD_ARCH"]]
+          assert re.fullmatch(r"v[0-9]+@sha256:[0-9a-f]{64}", image)
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              print(f"DEVCTR_IMAGE_TAG={image}", file=output)
+          PY
+      - name: Build static binaries and test kernel version boundary
+        working-directory: firecracker
+        run: |
+          ./tools/devtool -y build --release
+          ./tools/devtool -y sh 'cargo test --locked --release --target "$(uname -m)-unknown-linux-musl" -p vmm --lib kernel_version_tests'
+          ./tools/devtool -y sh 'cargo test --locked --release --target "$(uname -m)-unknown-linux-musl" -p vmm --lib test_parse_kernel_release'
+      - name: Package dependency with provenance
+        env:
+          DEP_VERSION: ${{ needs.source.outputs.version }}
+          BUILD_ARCH: ${{ matrix.arch }}
+        working-directory: firecracker
+        run: |
+          mkdir -p package out
+          for binary in firecracker cpu-template-helper jailer; do
+            cp "build/cargo_target/$BUILD_ARCH-unknown-linux-musl/release/$binary" package/
+          done
+          package/firecracker --version | tee package/version.txt
+          grep -F "v$DEP_VERSION" package/version.txt
+          cp dependency-provenance.json package/
+          tar -czf "out/firecracker-$DEP_VERSION-$BUILD_ARCH.tgz" -C package .
+          cd out
+          sha256sum ./*.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@v6
+        with:
+          name: firecracker-${{ matrix.arch }}
+          path: firecracker/out/
+
+  publish:
+    needs: [source, build]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'tonbo-io/AgentENV'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: firecracker-*
+          path: artifacts
+      - name: Publish immutable dependency release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEP_VERSION: ${{ needs.source.outputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          tag="firecracker-$DEP_VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Refusing to overwrite $tag" >&2
+            exit 1
+          fi
+          cat artifacts/*/SHA256SUMS > artifacts/SHA256SUMS
+          for directory in artifacts/firecracker-*; do
+            (cd "$directory" && sha256sum --check SHA256SUMS)
+          done
+          gh release create "$tag" --target "$RELEASE_COMMIT" --title "$tag" \
+            --notes "Reviewed Firecracker dependency; source and patch provenance are included in each archive. Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID." \
+            artifacts/firecracker-*/*.tgz artifacts/SHA256SUMS

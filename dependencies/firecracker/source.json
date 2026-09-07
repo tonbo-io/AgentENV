@@ -1,0 +1,10 @@
+{
+  "repository": "kvcache-ai/firecracker",
+  "commit": "90288c397d6d3fa576f9d367d997bdeebf835f10",
+  "version": "1.15.1-tonbo.1",
+  "base_version": "1.15.1-patch-v1",
+  "build_images": {
+    "aarch64": "v88@sha256:f1a6d56df70dd3c7e37b1fef28cb395c32d136b3920c8626668a882145f4e1e0",
+    "x86_64": "v88@sha256:738dd7b773124893966f689a4f45139bf6e41b1d7402a528122128c05525b0cb"
+  }
+}
