@@ -5105,9 +5105,25 @@ async fn delete_does_not_stop_runtime_before_persisting_intent() -> Result<()> {
     Ok(())
 }
 
+async fn creation_test_with_start_counter(
+) -> (Arc<TestOrchestrator>, Arc<std::sync::atomic::AtomicUsize>) {
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let behavior = Arc::new(MockBehavior::new());
+    let count = starts.clone();
+    behavior.set_on_operation(
+        MockOperation::StartNowait,
+        Arc::new(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    );
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior)).await;
+    (orchestrator, starts)
+}
+
 #[tokio::test]
 async fn repeated_creation_preserves_original_runtime_handle_and_metadata() -> Result<()> {
-    let orchestrator = make_orchestrator().await;
+    let (orchestrator, starts) = creation_test_with_start_counter().await;
     let id = SandboxId::new();
     let original = orchestrator
         .clone()
@@ -5133,6 +5149,7 @@ async fn repeated_creation_preserves_original_runtime_handle_and_metadata() -> R
         .unwrap()
         .clone();
     assert!(Arc::ptr_eq(&handle, &current));
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
     let metadata = orchestrator.store.get(&id).await?.unwrap();
     assert_eq!(metadata.state, SandboxState::Running);
     assert_eq!(metadata.runtime_started_at, original.runtime_started_at);
@@ -5143,12 +5160,13 @@ async fn repeated_creation_preserves_original_runtime_handle_and_metadata() -> R
         .await
         .is_err());
     assert!(orchestrator.store.get(&id).await?.is_none());
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn concurrent_creation_has_one_runtime_owner() -> Result<()> {
-    let orchestrator = make_orchestrator().await;
+    let (orchestrator, starts) = creation_test_with_start_counter().await;
     let id = SandboxId::new();
     let (a, b) = tokio::join!(
         orchestrator
@@ -5159,6 +5177,7 @@ async fn concurrent_creation_has_one_runtime_owner() -> Result<()> {
             .create_sandbox_inner(id, create_request(Some(60), &[])),
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(orchestrator.sandboxes.read().await.len(), 1);
     assert_eq!(
         orchestrator.store.get(&id).await?.unwrap().state,

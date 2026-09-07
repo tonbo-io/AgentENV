@@ -94,6 +94,35 @@ mod tests {
     }
 
     #[test]
+    fn independent_disk_claimants_have_one_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("claims");
+        let id = Uuid::now_v7();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let directory = directory.clone();
+                std::thread::spawn(move || {
+                    CreationClaims::persistent(directory)
+                        .unwrap()
+                        .claim(id)
+                        .unwrap()
+                })
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .filter_map(|t| t.join().unwrap().then_some(()))
+                .count(),
+            1
+        );
+        assert!(!CreationClaims::persistent(directory)
+            .unwrap()
+            .claim(id)
+            .unwrap());
+    }
+
+    #[test]
     fn io_failure_does_not_reopen_an_uncertain_claim() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().join("claims");
