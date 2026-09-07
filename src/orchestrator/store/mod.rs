@@ -31,6 +31,8 @@ pub enum StoreError {
     SandboxNotFound { sandbox_id: SandboxId },
     #[error("sandbox {sandbox_id} already exists")]
     SandboxAlreadyExists { sandbox_id: SandboxId },
+    #[error("sandbox {sandbox_id} activation conflict")]
+    ActivationConflict { sandbox_id: SandboxId },
     #[error(
         "sandbox {sandbox_id} state conflict: expected one of {expected_states:?}, got {actual_state:?}"
     )]
@@ -63,6 +65,18 @@ pub trait MetadataStore: Send + Sync {
         sandbox_id: &SandboxId,
         new_state: SandboxState,
         expected_states: &[SandboxState],
+    ) -> Result<SandboxState> {
+        self.transition_state(sandbox_id, new_state, expected_states, None)
+            .await
+    }
+    /// An outer Some requires an exact activation match, including None for
+    /// an unfunded runtime. Compare identity and state under the same lock.
+    async fn transition_state(
+        &self,
+        sandbox_id: &SandboxId,
+        new_state: SandboxState,
+        expected_states: &[SandboxState],
+        expected_activation: Option<Option<uuid::Uuid>>,
     ) -> Result<SandboxState>;
     /// Atomically updates sandbox metadata using the latest stored value if the
     /// current state is one of `expected_states`.

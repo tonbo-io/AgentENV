@@ -992,9 +992,27 @@ where
     /// the in-progress operation to finish before proceeding with deletion, preventing
     /// races where an ongoing operation might overwrite the `Killing` state.
     pub async fn delete_sandbox(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+        let activation = self
+            .store
+            .get(&sandbox_id)
+            .await?
+            .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?
+            .execution_lease
+            .map(|lease| lease.activation_id);
+        self.delete_sandbox_for_activation(sandbox_id, activation)
+            .await
+    }
+
+    /// Execute only against the caller's observed activation. A delayed request
+    /// must not follow this sandbox ID into a later resume incarnation.
+    pub async fn delete_sandbox_for_activation(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        activation: Option<uuid::Uuid>,
+    ) -> Result<()> {
         let this = Arc::clone(self);
         self.run_cancellation_safe("delete", sandbox_id, async move {
-            this.delete_sandbox_inner(sandbox_id).await
+            this.delete_sandbox_inner(sandbox_id, activation).await
         })
         .await
     }
@@ -1004,7 +1022,11 @@ where
         skip(self),
         fields(sandbox_id = %sandbox_id)
     )]
-    async fn delete_sandbox_inner(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+    async fn delete_sandbox_inner(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        activation: Option<uuid::Uuid>,
+    ) -> Result<()> {
         info!("deleting sandbox");
 
         // Attempt to transition to Killing, retrying after waiting whenever we
@@ -1012,7 +1034,7 @@ where
         let previous_state = loop {
             match self
                 .store
-                .update_state_if_state(
+                .transition_state(
                     &sandbox_id,
                     SandboxState::Killing,
                     &[
@@ -1020,6 +1042,7 @@ where
                         SandboxState::Paused,
                         SandboxState::CleanupPending,
                     ],
+                    Some(activation),
                 )
                 .await
             {
@@ -1186,9 +1209,25 @@ where
     /// sandbox (`Pausing` state), this call waits for it to complete and then
     /// returns the outcome rather than duplicating the work.
     pub async fn pause_sandbox(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+        let activation = self
+            .store
+            .get(&sandbox_id)
+            .await?
+            .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?
+            .execution_lease
+            .map(|lease| lease.activation_id);
+        self.pause_sandbox_for_activation(sandbox_id, activation)
+            .await
+    }
+
+    pub async fn pause_sandbox_for_activation(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        activation: Option<uuid::Uuid>,
+    ) -> Result<()> {
         let this = Arc::clone(self);
         self.run_cancellation_safe("pause", sandbox_id, async move {
-            this.pause_sandbox_inner(sandbox_id).await
+            this.pause_sandbox_inner(sandbox_id, activation).await
         })
         .await
     }
@@ -1198,11 +1237,20 @@ where
         skip(self),
         fields(sandbox_id = %sandbox_id)
     )]
-    async fn pause_sandbox_inner(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
+    async fn pause_sandbox_inner(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        activation: Option<uuid::Uuid>,
+    ) -> Result<()> {
         info!("pausing sandbox");
         match self
             .store
-            .update_state_if_state(&sandbox_id, SandboxState::Pausing, &[SandboxState::Running])
+            .transition_state(
+                &sandbox_id,
+                SandboxState::Pausing,
+                &[SandboxState::Running],
+                Some(activation),
+            )
             .await
         {
             Ok(_) => {}
@@ -1210,7 +1258,9 @@ where
                 return match actual_state {
                     // Another task is already performing the pause. Wait for
                     // it to finish and then report the final outcome.
-                    SandboxState::Pausing => self.join_concurrent_pause(sandbox_id).await,
+                    SandboxState::Pausing => {
+                        self.join_concurrent_pause(sandbox_id, activation).await
+                    }
                     SandboxState::Paused => Ok(()),
                     SandboxState::Killing | SandboxState::CleanupPending => {
                         info!("sandbox is being deleted while pausing");
@@ -2039,11 +2089,18 @@ where
     /// Joins a concurrent pause already in progress for the same sandbox.
     /// Waits for the `Pausing` state to resolve and maps the final state to
     /// the appropriate `Ok(())` / `Err(...)` result.
-    async fn join_concurrent_pause(&self, sandbox_id: SandboxId) -> Result<()> {
+    async fn join_concurrent_pause(
+        &self,
+        sandbox_id: SandboxId,
+        activation: Option<uuid::Uuid>,
+    ) -> Result<()> {
         debug!("concurrent pause in progress, waiting for completion");
         let m = self
             .wait_for_transition(sandbox_id, SandboxState::Pausing)
             .await?;
+        if m.execution_lease.map(|lease| lease.activation_id) != activation {
+            return Err(StoreError::ActivationConflict { sandbox_id }.into());
+        }
         match m.state {
             SandboxState::Paused => {
                 debug!("concurrent pause succeeded");
@@ -2132,11 +2189,27 @@ where
                 .execution_lease
                 .is_some_and(|lease| lease.remaining(now).is_err());
             let result = if dead || funded_expired {
-                self.delete_sandbox_inner(metadata.id).await
+                self.delete_sandbox_inner(
+                    metadata.id,
+                    metadata.execution_lease.map(|lease| lease.activation_id),
+                )
+                .await
             } else {
                 match metadata.timeout_action {
-                    SandboxTimeoutAction::Pause => self.pause_sandbox_inner(metadata.id).await,
-                    SandboxTimeoutAction::Delete => self.delete_sandbox_inner(metadata.id).await,
+                    SandboxTimeoutAction::Pause => {
+                        self.pause_sandbox_inner(
+                            metadata.id,
+                            metadata.execution_lease.map(|lease| lease.activation_id),
+                        )
+                        .await
+                    }
+                    SandboxTimeoutAction::Delete => {
+                        self.delete_sandbox_inner(
+                            metadata.id,
+                            metadata.execution_lease.map(|lease| lease.activation_id),
+                        )
+                        .await
+                    }
                 }
             };
             if let Err(err) = result {
@@ -2690,12 +2763,24 @@ where
                         unreachable!("paused sandboxes should have been filtered out")
                     }
                     SandboxState::Running => {
-                        if let Err(err) = self.pause_sandbox_inner(sandbox_id).await {
+                        if let Err(err) = self
+                            .pause_sandbox_inner(
+                                sandbox_id,
+                                metadata.execution_lease.map(|lease| lease.activation_id),
+                            )
+                            .await
+                        {
                             last_failures.push(format!("{sandbox_id}: {err}"));
                         }
                     }
                     SandboxState::CleanupPending => {
-                        if let Err(err) = self.delete_sandbox_inner(sandbox_id).await {
+                        if let Err(err) = self
+                            .delete_sandbox_inner(
+                                sandbox_id,
+                                metadata.execution_lease.map(|lease| lease.activation_id),
+                            )
+                            .await
+                        {
                             last_failures.push(format!("{sandbox_id}: {err}"));
                         }
                     }

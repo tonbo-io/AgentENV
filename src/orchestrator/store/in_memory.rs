@@ -137,11 +137,12 @@ impl MetadataStore for InMemoryMetadataStore {
         Ok(())
     }
 
-    async fn update_state_if_state(
+    async fn transition_state(
         &self,
         sandbox_id: &SandboxId,
         new_state: SandboxState,
         expected_states: &[SandboxState],
+        expected_activation: Option<Option<uuid::Uuid>>,
     ) -> Result<SandboxState> {
         let (previous, tx) = {
             let mut inner = self.inner.write().await;
@@ -151,6 +152,17 @@ impl MetadataStore for InMemoryMetadataStore {
                 });
             };
 
+            if expected_activation.is_some_and(|expected| {
+                record
+                    .metadata
+                    .execution_lease
+                    .map(|lease| lease.activation_id)
+                    != expected
+            }) {
+                return Err(StoreError::ActivationConflict {
+                    sandbox_id: *sandbox_id,
+                });
+            }
             let previous_state = record.metadata.state;
             if !expected_states.contains(&previous_state) {
                 return Err(StoreError::StateConflict {
