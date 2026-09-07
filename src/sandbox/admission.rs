@@ -612,6 +612,83 @@ mod tests {
             .is_err());
     }
 
+    #[tokio::test]
+    async fn revoke_and_acquire_have_one_serialized_outcome() {
+        for _ in 0..16 {
+            let root = tempfile::tempdir().unwrap();
+            let owner = registry_owner(&root.path().join("registry")).await;
+            let sandbox = SandboxId::new();
+            let activation = Uuid::now_v7();
+            let lease = ExecutionLease {
+                activation_id: activation,
+                operation_id: Uuid::now_v7(),
+                sequence: 0,
+                expires_at_unix_ms: runtime_policy::unix_millis(SystemTime::now()).unwrap()
+                    + 60_000,
+            };
+            let resources = SandboxResources {
+                cpu_count: 1,
+                memory_mib: 1,
+                disk_size_mib: 1,
+            };
+            let disk = root.path().join("disk");
+            let (admitted, revoked) = tokio::join!(
+                owner.acquire(sandbox, resources, Some(lease), &disk),
+                owner.revoke_unadmitted_activation(sandbox, activation),
+            );
+            match revoked.unwrap() {
+                ActivationRevocation::NeverAdmitted => assert!(admitted.is_err()),
+                ActivationRevocation::PreviouslyAdmitted => assert!(admitted.is_ok()),
+            }
+            assert!(owner.activation_is_recorded(activation).await.unwrap());
+            drop(admitted);
+            assert!(owner
+                .acquire(sandbox, resources, Some(lease), &disk)
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_admission_completes_after_caller_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = registry_owner(&root.path().join("registry")).await;
+        let sandbox = SandboxId::new();
+        let activation = Uuid::now_v7();
+        let lock = owner.claims.lock().await;
+        let caller_owner = Arc::clone(&owner);
+        let caller = tokio::spawn(async move {
+            caller_owner
+                .revoke_unadmitted_activation(sandbox, activation)
+                .await
+        });
+        // The inner task owns a third Arc after the cancellation-safe handoff.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&owner) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        drop(lock);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !owner.activation_is_recorded(activation).await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            owner
+                .revoke_unadmitted_activation(sandbox, activation)
+                .await
+                .unwrap(),
+            ActivationRevocation::NeverAdmitted
+        );
+    }
+
     #[test]
     fn capacity_anchor_survives_warm_resume_workspace_replacement() {
         let root = tempfile::tempdir().unwrap();
