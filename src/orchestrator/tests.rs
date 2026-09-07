@@ -5072,3 +5072,34 @@ async fn delete_cleanup_failure_is_visible_non_runnable_and_retryable() -> Resul
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn delete_does_not_stop_runtime_before_persisting_intent() -> Result<()> {
+    setup();
+    let persister = RecordingPersister::default();
+    let orchestrator = make_orchestrator_without_background_with_factory_and_persister(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::new(),
+        persister.clone(),
+    );
+    let created = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    let before = current_metrics(&orchestrator).await;
+    persister.clear_calls();
+    persister.fail_next(RecordingCall::MarkDeleting);
+    assert!(matches!(
+        orchestrator.delete_sandbox(created.id).await,
+        Err(OrchestratorError::SandboxPersistenceFailed(_))
+    ));
+    assert_eq!(persister.calls(), vec![RecordingCall::MarkDeleting]);
+    assert_eq!(
+        orchestrator.get_sandbox(&created.id).await?.unwrap().state,
+        SandboxState::Running
+    );
+    assert_metrics_snapshot(&orchestrator, &before).await;
+    // Successful snapshot/pause still needs the original backend handle.
+    orchestrator.pause_sandbox(created.id).await?;
+    orchestrator.delete_sandbox(created.id).await?;
+    Ok(())
+}
