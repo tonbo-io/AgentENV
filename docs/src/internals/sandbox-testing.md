@@ -599,3 +599,9 @@ A typical pattern:
 
 The guest must keep a long-running dispatcher (started during the initial
 boot) that watches for these per-instance files and executes them after resume.
+
+## ARM guest CPU parallelism
+
+The KVM dependency `1.15.1-tonbo.1` backports Firecracker #6172 onto the pinned `aenv-deps` source. On Linux host kernels before 6.10, PSCI CPU_ON resets secondary CLIDR_EL1 registers; applying the boot-time cache override only to vCPU 0 can break guest scheduling domains. The dependency now gates that override on host kernels 6.10 and newer. Older hosts retain limited cache descriptions, so successful load balancing must not be described as full physical cache-topology accuracy. See `dependencies/firecracker/README.md` for source, build, and removal conditions.
+
+After selecting this dependency, validate a fresh multi-vCPU guest and a paused/restored guest with independent CPU workers. Require measured CPU seconds over external wall time to exceed one core before attempting loaded relocation. Guest `NumCPU`, configured quota, and successful binary builds alone do not demonstrate parallel execution. For Cloud releases, use the isolated EKS CPU-loaded relocation workflow and retain guest topology, raw CPU windows, process identity, per-worker progress, different physical node IDs, and cleanup evidence. Existing snapshots must satisfy the runtime version compatibility gate; do not bypass it during rollout.
