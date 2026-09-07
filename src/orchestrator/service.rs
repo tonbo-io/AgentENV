@@ -24,6 +24,7 @@ use crate::sandbox::{
 use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
 
+use super::admission::{AdmissionStatus, NodeAdmission};
 use super::launch_plan::{CreateLaunchSource, LaunchPlan};
 use super::metrics::{
     aggregate_resource_metrics, OrchestratorCounters, OrchestratorMetrics, SandboxContribution,
@@ -95,6 +96,7 @@ pub struct Orchestrator<
     P: SandboxPersister = FileBackedSandboxPersister,
 > {
     store: S,
+    admission: NodeAdmission,
     factory: F,
     persister: P,
     sandboxes: RwLock<HashMap<SandboxId, SandboxHandle>>,
@@ -193,6 +195,7 @@ where
             counters: OrchestratorCounters::default(),
             sandbox_event_tx,
             default_sandbox_timeout: Duration::from_secs(config.default_sandbox_timeout_secs),
+            admission: NodeAdmission::default(),
             is_shutting_down: std::sync::atomic::AtomicBool::new(false),
             shutdown_tx,
             shutdown_outcome: OnceCell::new(),
@@ -354,6 +357,10 @@ where
         sandbox_id: SandboxId,
         request: CreateSandboxRequest,
     ) -> Result<SandboxMetadata> {
+        let _admission = self
+            .admission
+            .acquire()
+            .ok_or(OrchestratorError::NodeDraining)?;
         if let Err(err) = self.ensure_accepting_lifecycle_operations() {
             self.counters.record_create_fail(1);
             return Err(err);
@@ -546,6 +553,10 @@ where
         count: u32,
         new_timeout: NewTimeout,
     ) -> Result<Vec<SandboxForkOutcome>> {
+        let _admission = self
+            .admission
+            .acquire()
+            .ok_or(OrchestratorError::NodeDraining)?;
         self.ensure_accepting_lifecycle_operations()?;
 
         info!("forking sandboxes");
@@ -1160,6 +1171,10 @@ where
         sandbox_id: SandboxId,
         timeout: NewTimeout,
     ) -> Result<SandboxMetadata> {
+        let _admission = self
+            .admission
+            .acquire()
+            .ok_or(OrchestratorError::NodeDraining)?;
         self.ensure_accepting_lifecycle_operations()?;
 
         info!("resuming sandbox");
@@ -2619,6 +2634,16 @@ where
 
         info!("orchestrator shutdown completed");
         Ok(())
+    }
+
+    /// Close node-local start admission. This is only an in-process observation;
+    /// durable drain fencing and complete runtime cleanup are separate checks.
+    pub fn close_node_admission(&self) -> AdmissionStatus {
+        self.admission.close()
+    }
+
+    pub fn node_admission_status(&self) -> AdmissionStatus {
+        self.admission.status()
     }
 
     fn is_shutting_down(&self) -> bool {

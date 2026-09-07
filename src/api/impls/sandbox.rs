@@ -92,8 +92,8 @@ fn has_cluster_placement(placement: Option<&models::SandboxPlacement>) -> bool {
 impl From<OrchestratorError> for models::Error {
     fn from(err: OrchestratorError) -> Self {
         match err {
-            OrchestratorError::ShuttingDown => {
-                Self::new(503, "orchestrator is shutting down".to_string())
+            OrchestratorError::ShuttingDown | OrchestratorError::NodeDraining => {
+                Self::new(503, err.to_string())
             }
             OrchestratorError::SandboxNotFound(id) => sandbox_not_found(id),
             OrchestratorError::InvalidSandboxState { .. } => Self::new(400, err.to_string()),

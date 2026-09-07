@@ -113,6 +113,7 @@ fn make_orchestrator_without_background_with_factory_and_persister<
         counters: Default::default(),
         sandbox_event_tx,
         default_sandbox_timeout: Duration::from_secs(15),
+        admission: NodeAdmission::default(),
         is_shutting_down: std::sync::atomic::AtomicBool::new(false),
         shutdown_tx: tokio::sync::watch::channel(false).0,
         shutdown_outcome: tokio::sync::OnceCell::new(),
@@ -4898,5 +4899,41 @@ async fn fork_sandbox_register_failure_cleans_up_metrics() -> Result<()> {
 
     orchestrator.delete_sandbox(child.id).await?;
     orchestrator.delete_sandbox(source.id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn node_drain_blocks_all_start_paths_but_allows_cleanup() -> Result<()> {
+    setup();
+    let orchestrator = make_orchestrator().await;
+    let running = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    let paused = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    orchestrator.pause_sandbox(paused.id).await?;
+    assert_eq!(orchestrator.close_node_admission().in_flight, 0);
+    assert!(matches!(
+        orchestrator
+            .create_sandbox(create_request(Some(60), &[]))
+            .await,
+        Err(OrchestratorError::NodeDraining)
+    ));
+    assert!(matches!(
+        orchestrator
+            .resume_sandbox(paused.id, NewTimeout::Set(Duration::from_secs(60)))
+            .await,
+        Err(OrchestratorError::NodeDraining)
+    ));
+    assert!(matches!(
+        orchestrator
+            .fork_sandbox(running.id, 1, NewTimeout::Set(Duration::from_secs(60)))
+            .await,
+        Err(OrchestratorError::NodeDraining)
+    ));
+    orchestrator.pause_sandbox(running.id).await?;
+    assert!(orchestrator.node_admission_status().closed);
+    assert_eq!(orchestrator.node_admission_status().in_flight, 0);
     Ok(())
 }
