@@ -5,6 +5,10 @@
 //! `close_seal + restack` the live upper before writing the persisted
 //! snapshot config.
 //!
+//! Sealed layers always stay raw locally: compression, when enabled via
+//! `[snapshot.publish_compression]`, happens once at publish time when the
+//! snapshot repository uploads layers to OSS/ACR.
+//!
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -376,7 +380,8 @@ pub(super) async fn stage_overlaybd_snapshot_from_live_runtime(
         output_dir,
         appended_layer,
         MANAGED_BASE_LAYER_FILE,
-        // Rootfs layers must stay raw: only memory snapshots may be compressed.
+        // Sealed rootfs layers always stay raw; compression happens once at
+        // publish time under `[snapshot.publish_compression]`.
         OverlaybdCompactOutput::Raw,
     )
     .await?;
@@ -597,7 +602,8 @@ pub(super) async fn build_mem_snapshot_image_config(
 ///
 /// Writable runtimes are first restacked in-place so the sealed old upper
 /// becomes the newest lower. Read-only runtimes skip the restack phase and
-/// only stage the persisted snapshot image config.
+/// only stage the persisted snapshot image config. The sealed layer always
+/// stays raw; compression, when enabled, happens once at publish time.
 pub(super) async fn restack_snapshot_overlaybd_device(
     ublk_device: &UblkDevice,
     read_only: bool,

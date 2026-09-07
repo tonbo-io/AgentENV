@@ -12,13 +12,13 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::device::UblkDevice;
-use crate::cfg::{MemorySnapshotCompressionAlgorithm, MemorySnapshotConfig};
+use crate::cfg::{OverlaybdCompressionAlgorithm, SnapshotPublishCompressionConfig};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OverlaybdCompactOutput {
     Raw,
     ZFile {
-        algorithm: MemorySnapshotCompressionAlgorithm,
+        algorithm: OverlaybdCompressionAlgorithm,
         workers: usize,
     },
 }
@@ -56,16 +56,19 @@ pub(crate) struct CompactedOverlaybdLayer {
 
 impl OverlaybdCompactOutput {
     /// Maximum persistent compression threads. Prevents absurd config values
-    /// from spawning thousands of OS threads during a production pause.
+    /// from spawning thousands of OS threads during layer upload.
     const MAX_COMPRESSION_WORKERS: usize = 64;
 
-    pub(crate) fn from_memory_snapshot_config(config: &MemorySnapshotConfig) -> Self {
-        if config.compression_enabled {
+    /// Resolve the `[snapshot.publish_compression]` switch into the layer
+    /// output mode applied when recontainerizing local raw layers for upload.
+    /// Capture paths never consult this: local layers always stay raw.
+    pub(crate) fn from_publish_compression_config(
+        config: &SnapshotPublishCompressionConfig,
+    ) -> Self {
+        if config.enabled {
             Self::ZFile {
-                algorithm: config.compression_algorithm,
-                workers: config
-                    .compression_workers
-                    .clamp(1, Self::MAX_COMPRESSION_WORKERS),
+                algorithm: config.algorithm,
+                workers: config.workers.clamp(1, Self::MAX_COMPRESSION_WORKERS),
             }
         } else {
             Self::Raw
@@ -84,8 +87,8 @@ pub(crate) async fn create_commit_args(
         }
         OverlaybdCompactOutput::ZFile { algorithm, workers } => {
             let algorithm = match algorithm {
-                MemorySnapshotCompressionAlgorithm::Lz4 => CompressOptions::LZ4,
-                MemorySnapshotCompressionAlgorithm::Zstd => CompressOptions::ZSTD,
+                OverlaybdCompressionAlgorithm::Lz4 => CompressOptions::LZ4,
+                OverlaybdCompressionAlgorithm::Zstd => CompressOptions::ZSTD,
             };
             let mut compress_args = CompressArgs::new(CompressOptions::new(
                 algorithm,
@@ -326,7 +329,7 @@ mod tests {
             (
                 "lz4",
                 OverlaybdCompactOutput::ZFile {
-                    algorithm: MemorySnapshotCompressionAlgorithm::Lz4,
+                    algorithm: OverlaybdCompressionAlgorithm::Lz4,
                     // Exercise the segmented parallel compression path.
                     workers: 2,
                 },
@@ -335,7 +338,7 @@ mod tests {
             (
                 "zstd",
                 OverlaybdCompactOutput::ZFile {
-                    algorithm: MemorySnapshotCompressionAlgorithm::Zstd,
+                    algorithm: OverlaybdCompressionAlgorithm::Zstd,
                     workers: 1,
                 },
                 1,
@@ -371,5 +374,45 @@ mod tests {
             before
         );
         assert!(!output_path.with_extension("commit.tmp").exists());
+    }
+
+    #[test]
+    fn compact_output_from_publish_compression_config() {
+        let disabled = SnapshotPublishCompressionConfig {
+            enabled: false,
+            algorithm: OverlaybdCompressionAlgorithm::Lz4,
+            workers: 1,
+        };
+        assert_eq!(
+            OverlaybdCompactOutput::from_publish_compression_config(&disabled),
+            OverlaybdCompactOutput::Raw
+        );
+
+        let zstd = SnapshotPublishCompressionConfig {
+            enabled: true,
+            algorithm: OverlaybdCompressionAlgorithm::Zstd,
+            // Zero workers clamps to sequential.
+            workers: 0,
+        };
+        assert_eq!(
+            OverlaybdCompactOutput::from_publish_compression_config(&zstd),
+            OverlaybdCompactOutput::ZFile {
+                algorithm: OverlaybdCompressionAlgorithm::Zstd,
+                workers: 1,
+            }
+        );
+
+        let clamped = SnapshotPublishCompressionConfig {
+            enabled: true,
+            algorithm: OverlaybdCompressionAlgorithm::Lz4,
+            workers: usize::MAX,
+        };
+        assert_eq!(
+            OverlaybdCompactOutput::from_publish_compression_config(&clamped),
+            OverlaybdCompactOutput::ZFile {
+                algorithm: OverlaybdCompressionAlgorithm::Lz4,
+                workers: OverlaybdCompactOutput::MAX_COMPRESSION_WORKERS,
+            }
+        );
     }
 }
