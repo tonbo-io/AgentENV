@@ -425,7 +425,7 @@ where
             // avoids constructing a doomed backend and running its cleanup;
             // acquire() still performs the authoritative serialized claim.
             if admission
-                .has_executed_activation(lease.activation_id)
+                .activation_is_recorded(lease.activation_id)
                 .await
                 .context("read funded activation identity")?
             {
