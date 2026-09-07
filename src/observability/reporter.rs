@@ -260,12 +260,10 @@ impl ObservabilityReporter {
             .context("failed to collect heartbeat snapshot")?;
         let node_id = snapshot.node_id.clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let status = if UblkDeviceManager::try_global().is_some_and(UblkDeviceManager::is_available)
-        {
-            scheduler::NodeStatus::Ready
-        } else {
-            scheduler::NodeStatus::Unhealthy
-        };
+        let status = admission_heartbeat_status(
+            UblkDeviceManager::try_global().is_some_and(UblkDeviceManager::is_available),
+            snapshot.admission_closed,
+        );
         let req = Self::build_heartbeat_request(snapshot, now_ms, p2p_endpoint, status);
 
         let mut request = Request::new(req);
@@ -497,6 +495,19 @@ impl ReporterConfig {
     }
 }
 
+fn admission_heartbeat_status(
+    ublk_available: bool,
+    admission_closed: bool,
+) -> scheduler::NodeStatus {
+    if !ublk_available {
+        scheduler::NodeStatus::Unhealthy
+    } else if admission_closed {
+        scheduler::NodeStatus::Lingering
+    } else {
+        scheduler::NodeStatus::Ready
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +528,22 @@ mod tests {
             enabled: enabled.unwrap_or_default(),
             interval_secs: interval_secs.unwrap_or(5),
         }
+    }
+
+    #[test]
+    fn closed_admission_never_reports_schedulable_heartbeat() {
+        assert_eq!(
+            admission_heartbeat_status(true, false),
+            scheduler::NodeStatus::Ready
+        );
+        assert_eq!(
+            admission_heartbeat_status(true, true),
+            scheduler::NodeStatus::Lingering
+        );
+        assert_eq!(
+            admission_heartbeat_status(false, true),
+            scheduler::NodeStatus::Unhealthy
+        );
     }
 
     #[test]
@@ -602,6 +629,7 @@ mod tests {
                 cpu_architecture: "aarch64".to_string(),
                 cpu_config_json: Some("{\"reg_modifiers\":[]}".to_string()),
             },
+            admission_closed: false,
             sandbox_count: 0,
             sandbox_ids: Vec::new(),
             metrics: NodeMetricsSnapshot {

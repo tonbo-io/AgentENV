@@ -60,7 +60,11 @@ impl From<NodeSnapshot> for models::Node {
             node.service_instance_id,
             node.cluster_id.to_string(),
             node.machine_info.into(),
-            models::NodeStatus::NodeStatusReady,
+            if node.admission_closed {
+                models::NodeStatus::NodeStatusDraining
+            } else {
+                models::NodeStatus::NodeStatusReady
+            },
             node.sandbox_count,
             node.metrics.into(),
             node.create_successes,
@@ -212,7 +216,11 @@ impl Admin<()> for ApiImpl {
             node.node_id,
             node.service_instance_id,
             node.machine_info.into(),
-            models::NodeStatus::NodeStatusReady,
+            if node.admission_closed {
+                models::NodeStatus::NodeStatusDraining
+            } else {
+                models::NodeStatus::NodeStatusReady
+            },
             node.sandbox_count,
             node.metrics.into(),
             vec![],

@@ -986,3 +986,30 @@ func TestRequiredNodeNeverFallsBackOrBypassesResourceAdmission(t *testing.T) {
 		t.Fatalf("invalid target accepted: %v", err)
 	}
 }
+
+func TestNodeReportedDrainExcludesPlacementButPreservesRouting(t *testing.T) {
+	registry := NewAtomicNodeRegistry([]Node{{ID: "node-a", Endpoint: "http://node-a"}}, defaultObservedReportTTL)
+	service := NewService(zap.NewNop(), registry, NewStrategy("round_robin"), NewInMemoryBindingStore(defaultObservedReportTTL), WithRequireFreshHeartbeat())
+	registerObservedNodeForTest(t, service, "node-a", "svc-a")
+	if _, err := service.Schedule(context.Background(), &schedulerv1.ScheduleRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.Heartbeat(context.Background(), &schedulerv1.HeartbeatRequest{
+		NodeId: "node-a", ClusterId: "cluster-1", ServiceInstanceId: "svc-a", Version: "0.1.0", Commit: "abc123",
+		SandboxIds: []string{"existing"},
+		Snapshot:   &schedulerv1.NodeSnapshot{Status: schedulerv1.NodeStatus_NODE_STATUS_LINGERING, SandboxCount: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Schedule(context.Background(), &schedulerv1.ScheduleRequest{}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("draining node remained schedulable: %v", err)
+	}
+	route, err := service.LookupNode(context.Background(), &schedulerv1.LookupNodeRequest{SandboxId: "existing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.GetNode().GetNodeId() != "node-a" {
+		t.Fatalf("lost draining node route: %v", route)
+	}
+}
