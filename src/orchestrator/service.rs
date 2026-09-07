@@ -29,6 +29,7 @@ use super::launch_plan::{CreateLaunchSource, LaunchPlan};
 use super::metrics::{
     aggregate_resource_metrics, OrchestratorCounters, OrchestratorMetrics, SandboxContribution,
 };
+use super::operations::{OperationStatus, OperationTracker};
 use super::persistence::{DisabledSandboxPersister, FileBackedSandboxPersister, SandboxPersister};
 use super::proxy::{ProxyLookupResult, ProxyRoute, ProxyRouteTable, ProxyTarget};
 use super::store::*;
@@ -97,6 +98,7 @@ pub struct Orchestrator<
 > {
     store: S,
     admission: NodeAdmission,
+    operations: OperationTracker,
     factory: F,
     persister: P,
     sandboxes: RwLock<HashMap<SandboxId, SandboxHandle>>,
@@ -231,6 +233,7 @@ where
             sandbox_event_tx,
             default_sandbox_timeout: Duration::from_secs(config.default_sandbox_timeout_secs),
             admission,
+            operations: OperationTracker::default(),
             is_shutting_down: std::sync::atomic::AtomicBool::new(false),
             shutdown_tx,
             shutdown_outcome: OnceCell::new(),
@@ -278,8 +281,10 @@ where
         T: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
+        let operation_permit = self.operations.begin();
         tokio::spawn(async move {
             let result = future.await;
+            operation_permit.complete();
             if tx.send(result).is_err() {
                 debug!(
                     sandbox_id = %sandbox_id,
@@ -2693,6 +2698,10 @@ where
             .context("join durable node drain")?
             .context("persist durable node drain")
             .map_err(Into::into)
+    }
+
+    pub fn node_operation_status(&self) -> OperationStatus {
+        self.operations.status()
     }
 
     pub fn node_admission_status(&self) -> AdmissionStatus {

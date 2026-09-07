@@ -1,6 +1,7 @@
 mod admission;
 mod launch_plan;
 mod metrics;
+mod operations;
 mod persistence;
 mod proxy;
 mod service;
@@ -12,6 +13,7 @@ use crate::virtualization::VirtualizationMode;
 
 pub use admission::AdmissionStatus;
 pub use metrics::OrchestratorMetrics;
+pub use operations::OperationStatus;
 pub use persistence::{
     DisabledSandboxPersister, FileBackedSandboxPersister, PersistenceResult,
     SandboxPersistenceError, SandboxPersister,

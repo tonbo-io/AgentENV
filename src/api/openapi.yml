@@ -1343,7 +1343,7 @@ components:
     NodeDrainObservation:
       type: object
       description: Durable admission closure and current node observations. This is not authorization to terminate a host or proof of physical cleanup.
-      required: [nodeID, serviceInstanceID, drainID, admissionClosed, inFlightStarts, sandboxCount, pausedSandboxCount, sandboxStartingCount]
+      required: [nodeID, serviceInstanceID, drainID, admissionClosed, inFlightStarts, inFlightOperations, interruptedOperations, sandboxCount, pausedSandboxCount, sandboxStartingCount]
       properties:
         nodeID:
           type: string
@@ -1354,6 +1354,16 @@ components:
         admissionClosed:
           type: boolean
         inFlightStarts:
+          type: integer
+          format: int64
+          minimum: 0
+        inFlightOperations:
+          description: Cancellation-safe lifecycle tasks still executing, including cleanup and snapshot operations.
+          type: integer
+          format: int64
+          minimum: 0
+        interruptedOperations:
+          description: Tasks that ended without a completion result in this service instance. A nonzero value requires recovery; process restart is not proof of physical cleanup.
           type: integer
           format: int64
           minimum: 0

@@ -4267,6 +4267,16 @@ pub struct NodeDrainObservation {
     #[validate(range(min = 0u64))]
     pub in_flight_starts: u64,
 
+    /// Cancellation-safe lifecycle tasks still executing, including cleanup and snapshot operations.
+    #[serde(rename = "inFlightOperations")]
+    #[validate(range(min = 0u64))]
+    pub in_flight_operations: u64,
+
+    /// Tasks that ended without a completion result in this service instance. A nonzero value requires recovery; process restart is not proof of physical cleanup.
+    #[serde(rename = "interruptedOperations")]
+    #[validate(range(min = 0u64))]
+    pub interrupted_operations: u64,
+
     #[serde(rename = "sandboxCount")]
     #[validate(range(min = 0u64))]
     pub sandbox_count: u64,
@@ -4288,6 +4298,8 @@ impl NodeDrainObservation {
         drain_id: String,
         admission_closed: bool,
         in_flight_starts: u64,
+        in_flight_operations: u64,
+        interrupted_operations: u64,
         sandbox_count: u64,
         paused_sandbox_count: u64,
         sandbox_starting_count: u64,
@@ -4298,6 +4310,8 @@ impl NodeDrainObservation {
             drain_id,
             admission_closed,
             in_flight_starts,
+            in_flight_operations,
+            interrupted_operations,
             sandbox_count,
             paused_sandbox_count,
             sandbox_starting_count,
@@ -4321,6 +4335,10 @@ impl std::fmt::Display for NodeDrainObservation {
             Some(self.admission_closed.to_string()),
             Some("inFlightStarts".to_string()),
             Some(self.in_flight_starts.to_string()),
+            Some("inFlightOperations".to_string()),
+            Some(self.in_flight_operations.to_string()),
+            Some("interruptedOperations".to_string()),
+            Some(self.interrupted_operations.to_string()),
             Some("sandboxCount".to_string()),
             Some(self.sandbox_count.to_string()),
             Some("pausedSandboxCount".to_string()),
@@ -4353,6 +4371,8 @@ impl std::str::FromStr for NodeDrainObservation {
             pub drain_id: Vec<String>,
             pub admission_closed: Vec<bool>,
             pub in_flight_starts: Vec<u64>,
+            pub in_flight_operations: Vec<u64>,
+            pub interrupted_operations: Vec<u64>,
             pub sandbox_count: Vec<u64>,
             pub paused_sandbox_count: Vec<u64>,
             pub sandbox_starting_count: Vec<u64>,
@@ -4395,6 +4415,14 @@ impl std::str::FromStr for NodeDrainObservation {
                     ),
                     #[allow(clippy::redundant_clone)]
                     "inFlightStarts" => intermediate_rep.in_flight_starts.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "inFlightOperations" => intermediate_rep.in_flight_operations.push(
+                        <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "interruptedOperations" => intermediate_rep.interrupted_operations.push(
                         <u64 as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
                     ),
                     #[allow(clippy::redundant_clone)]
@@ -4448,6 +4476,18 @@ impl std::str::FromStr for NodeDrainObservation {
                 .into_iter()
                 .next()
                 .ok_or_else(|| "inFlightStarts missing in NodeDrainObservation".to_string())?,
+            in_flight_operations: intermediate_rep
+                .in_flight_operations
+                .into_iter()
+                .next()
+                .ok_or_else(|| "inFlightOperations missing in NodeDrainObservation".to_string())?,
+            interrupted_operations: intermediate_rep
+                .interrupted_operations
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "interruptedOperations missing in NodeDrainObservation".to_string()
+                })?,
             sandbox_count: intermediate_rep
                 .sandbox_count
                 .into_iter()

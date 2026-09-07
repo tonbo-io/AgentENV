@@ -155,6 +155,7 @@ impl Admin<()> for ApiImpl {
             }
         };
         let admission = self.orchestrator().node_admission_status();
+        let operations = self.orchestrator().node_operation_status();
         Ok(
             NodesNodeIdDrainPostResponse::Status200_DurableAdmissionObservation(
                 models::NodeDrainObservation {
@@ -163,6 +164,8 @@ impl Admin<()> for ApiImpl {
                     drain_id: body.drain_id.clone(),
                     admission_closed: admission.closed,
                     in_flight_starts: admission.in_flight as u64,
+                    in_flight_operations: operations.in_flight,
+                    interrupted_operations: operations.interrupted,
                     sandbox_count: node.sandbox_count.into(),
                     paused_sandbox_count: node.paused_sandbox_count.into(),
                     sandbox_starting_count: node.sandbox_starting_count.into(),
