@@ -188,9 +188,10 @@ impl FileBackedSandboxPersister {
 
     async fn cleanup_invalid_record(&self, sandbox_id: &SandboxId) -> PersistenceResult<()> {
         debug!(sandbox_id = %sandbox_id, "cleaning up invalid paused sandbox record");
-        self.remove_record(sandbox_id).await?;
+        // Retain the durable identity until artifact cleanup succeeds. A failed
+        // removal must remain discoverable and retryable after restart.
         Self::remove_artifact_root(&self.sandbox_artifact_root(sandbox_id)).await?;
-        Ok(())
+        self.remove_record(sandbox_id).await
     }
 
     async fn cleanup_orphan_artifacts(
@@ -392,9 +393,10 @@ impl SandboxPersister for FileBackedSandboxPersister {
 
     async fn delete_record_and_artifacts(&self, sandbox_id: &SandboxId) -> PersistenceResult<()> {
         debug!(sandbox_id = %sandbox_id, "deleting paused sandbox record and artifacts");
-        self.remove_record(sandbox_id).await?;
+        // Retain the durable identity until artifact cleanup succeeds. A failed
+        // removal must remain discoverable and retryable after restart.
         Self::remove_artifact_root(&self.sandbox_artifact_root(sandbox_id)).await?;
-        Ok(())
+        self.remove_record(sandbox_id).await
     }
 }
 
@@ -767,6 +769,34 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert!(persister.sandbox_artifact_root(&sandbox_id).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_failure_retains_record_for_retry() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let persister = test_persister(temp.path());
+        let sandbox_id = SandboxId::new();
+        persister
+            .db()
+            .await?
+            .put(sandbox_id.to_string(), b"not-json")
+            .await?;
+        let root = persister.sandbox_artifact_root(&sandbox_id);
+        tokio::fs::create_dir_all(root.parent().unwrap()).await?;
+        // A file in place of the directory produces a deterministic failure,
+        // including when Linux CI runs as root (permission bits would not).
+        tokio::fs::write(&root, b"unexpected artifact entry").await?;
+        assert!(persister
+            .delete_record_and_artifacts(&sandbox_id)
+            .await
+            .is_err());
+        assert!(has_record(&persister, &sandbox_id).await?);
+        assert!(persister.cleanup_invalid_record(&sandbox_id).await.is_err());
+        assert!(has_record(&persister, &sandbox_id).await?);
+        tokio::fs::remove_file(root).await?;
+        persister.delete_record_and_artifacts(&sandbox_id).await?;
+        assert!(!has_record(&persister, &sandbox_id).await?);
         Ok(())
     }
 
