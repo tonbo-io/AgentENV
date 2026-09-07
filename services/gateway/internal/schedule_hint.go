@@ -198,6 +198,7 @@ func parseNewSandboxHint(body []byte) (*schedulerv1.NewSandboxHint, error) {
 	hint.Metadata = parsed.Metadata
 	if len(parsed.Placement) > 0 && !bytes.Equal(bytes.TrimSpace(parsed.Placement), []byte("null")) {
 		var placement struct {
+			NodeID                 *string  `json:"nodeID"`
 			DifferentNodeFrom      []string `json:"differentNodeFrom"`
 			SnapshotCompatibleWith []string `json:"snapshotCompatibleWith"`
 		}
@@ -206,9 +207,16 @@ func parseNewSandboxHint(body []byte) (*schedulerv1.NewSandboxHint, error) {
 		if err := decoder.Decode(&placement); err != nil {
 			return nil, fmt.Errorf("invalid sandbox placement: %w", err)
 		}
+		if placement.NodeID != nil && strings.TrimSpace(*placement.NodeID) == "" {
+			return nil, fmt.Errorf("nodeID must not be empty")
+		}
 		hint.Placement = &schedulerv1.SandboxPlacement{
+
 			DifferentNodeFrom:      placement.DifferentNodeFrom,
 			SnapshotCompatibleWith: placement.SnapshotCompatibleWith,
+		}
+		if placement.NodeID != nil {
+			hint.Placement.NodeId = *placement.NodeID
 		}
 	}
 	return hint, nil

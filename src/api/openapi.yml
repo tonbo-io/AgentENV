@@ -644,6 +644,11 @@ components:
       additionalProperties: false
       description: Hard node-placement constraints applied and consumed by the multi-node gateway. A direct runtime-node request containing a placement object is rejected.
       properties:
+        nodeID:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Exact required target node. Freshness, resource admission, and all other placement constraints still apply; no fallback to another node.
         differentNodeFrom:
           type: array
           uniqueItems: true
@@ -1334,6 +1339,14 @@ components:
         - commit
         - machineInfo
       properties:
+        reportedAtUnixMs:
+          type: integer
+          format: int64
+          description: Host observation timestamp; repeated responses are not new samples.
+        snapshotCompatibilityKey:
+          type: string
+          description: Opaque snapshot placement domain. Empty means compatibility is unknown.
+
         version:
           type: string
           description: Version of the orchestrator

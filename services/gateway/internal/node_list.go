@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"agentenv/services/shared/nodecompatibility"
 	"context"
 	"net/http"
 	"strings"
@@ -50,19 +51,21 @@ type nodeListMetrics struct {
 }
 
 type nodeListItem struct {
-	Version              string              `json:"version"`
-	Commit               string              `json:"commit"`
-	ID                   string              `json:"id"`
-	ServiceInstanceID    string              `json:"serviceInstanceID"`
-	ClusterID            string              `json:"clusterID"`
-	MachineInfo          nodeListMachineInfo `json:"machineInfo"`
-	Status               string              `json:"status"`
-	SandboxCount         uint32              `json:"sandboxCount"`
-	Metrics              nodeListMetrics     `json:"metrics"`
-	CreateSuccesses      uint64              `json:"createSuccesses"`
-	CreateFails          uint64              `json:"createFails"`
-	SandboxStartingCount uint32              `json:"sandboxStartingCount"`
-	SandboxPausedCount   uint32              `json:"sandboxPausedCount"`
+	ReportedAtUnixMs         int64               `json:"reportedAtUnixMs"`
+	SnapshotCompatibilityKey string              `json:"snapshotCompatibilityKey"`
+	Version                  string              `json:"version"`
+	Commit                   string              `json:"commit"`
+	ID                       string              `json:"id"`
+	ServiceInstanceID        string              `json:"serviceInstanceID"`
+	ClusterID                string              `json:"clusterID"`
+	MachineInfo              nodeListMachineInfo `json:"machineInfo"`
+	Status                   string              `json:"status"`
+	SandboxCount             uint32              `json:"sandboxCount"`
+	Metrics                  nodeListMetrics     `json:"metrics"`
+	CreateSuccesses          uint64              `json:"createSuccesses"`
+	CreateFails              uint64              `json:"createFails"`
+	SandboxStartingCount     uint32              `json:"sandboxStartingCount"`
+	SandboxPausedCount       uint32              `json:"sandboxPausedCount"`
 }
 
 func isNodeListRequest(r *http.Request) bool {
@@ -122,11 +125,13 @@ func (s *Server) handleNodeList(w http.ResponseWriter, r *http.Request, routingC
 		}
 
 		out = append(out, nodeListItem{
-			Version:           observed.GetVersion(),
-			Commit:            observed.GetCommit(),
-			ID:                observed.GetNodeId(),
-			ServiceInstanceID: observed.GetServiceInstanceId(),
-			ClusterID:         observed.GetClusterId(),
+			ReportedAtUnixMs:         snapshot.GetReportedAtUnixMs(),
+			SnapshotCompatibilityKey: nodecompatibility.Key(observed),
+			Version:                  observed.GetVersion(),
+			Commit:                   observed.GetCommit(),
+			ID:                       observed.GetNodeId(),
+			ServiceInstanceID:        observed.GetServiceInstanceId(),
+			ClusterID:                observed.GetClusterId(),
 			MachineInfo: nodeListMachineInfo{
 				CPUFamily:       observed.GetMachineInfo().GetCpuFamily(),
 				CPUModel:        observed.GetMachineInfo().GetCpuModel(),

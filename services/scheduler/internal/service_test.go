@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"agentenv/services/shared/config"
 	"context"
 	"errors"
 	"strings"
@@ -965,5 +966,23 @@ func TestHeartbeatRejectsEmptyServiceInstanceID(t *testing.T) {
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("expected invalid argument, got %v", err)
+	}
+}
+
+func TestRequiredNodeNeverFallsBackOrBypassesResourceAdmission(t *testing.T) {
+	service := NewService(zap.NewNop(), NewAtomicNodeRegistry(nil, defaultObservedReportTTL), NewStrategy("round_robin"), NewInMemoryBindingStore(defaultObservedReportTTL))
+	hint := &schedulerv1.ScheduleRequestHint{Kind: &schedulerv1.ScheduleRequestHint_NewSandbox{NewSandbox: &schedulerv1.NewSandboxHint{Placement: &schedulerv1.SandboxPlacement{NodeId: "target"}}}}
+	nodes := []RichNode{{Node: Node{ID: "other"}}, {Node: Node{ID: "target"}, Snapshot: &schedulerv1.NodeSnapshot{CpuPercent: 95}}}
+	selected, err := service.filterPlacementCandidates(nodes, hint, time.Now())
+	if err != nil || len(selected) != 1 || selected[0].ID != "target" {
+		t.Fatalf("exact target: %v %v", selected, err)
+	}
+	limited := FilterByResourceLimit(nodes, &config.NodeResourceLimit{MaxCPUUsedPercent: uint32Ptr(90)})
+	if _, err := service.filterPlacementCandidates(limited, hint, time.Now()); status.Code(err) != codes.Unavailable {
+		t.Fatalf("overloaded target silently fell back: %v", err)
+	}
+	hint.GetNewSandbox().GetPlacement().NodeId = " target "
+	if _, err := service.filterPlacementCandidates(nodes, hint, time.Now()); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("invalid target accepted: %v", err)
 	}
 }

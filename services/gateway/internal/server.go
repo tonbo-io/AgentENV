@@ -407,11 +407,9 @@ func (s *Server) proxyRequest(
 		},
 		FlushInterval: flushInterval(options.flushImmediately),
 		ModifyResponse: func(resp *http.Response) error {
-			// In debug mode, expose the upstream node id on the response so
-			// operators can tell which backend node served a given request.
-			// This is purely for debugging/observability and is not consumed
-			// by the client.
-			if s.debugMode {
+			// Control responses bind resource observations to their serving node.
+			// Always overwrite a runtime-provided value at the gateway boundary.
+			if s.debugMode || (options.hostRoute == nil && isSandboxControlPlaneRequest(proxyReq)) {
 				if nodeID := node.GetNodeId(); nodeID != "" {
 					resp.Header.Set(headerNodeID, nodeID)
 				}

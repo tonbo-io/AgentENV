@@ -280,4 +280,6 @@ message SandboxPlacement {
   repeated string different_node_from = 1;
   // Require snapshot compatibility with every referenced sandbox's live node.
   repeated string snapshot_compatible_with = 2;
+  // Require this exact node; ordinary freshness, resource, and compatibility filters still apply.
+  string node_id = 3;
 }
