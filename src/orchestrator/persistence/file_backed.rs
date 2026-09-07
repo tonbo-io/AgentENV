@@ -24,6 +24,7 @@ const RECORD_DB_DIR: &str = "records.db";
 enum PersistedPausedLifecycle {
     Paused,
     Resuming,
+    Deleting,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -273,6 +274,15 @@ impl SandboxPersister for FileBackedSandboxPersister {
             };
             let sandbox_id = record.metadata.id;
 
+            if record.lifecycle == PersistedPausedLifecycle::Deleting {
+                let mut metadata = record.metadata;
+                metadata.state = SandboxState::CleanupPending;
+                metadata.paused_state = None;
+                retained_artifacts.insert(sandbox_id);
+                sandboxes.push(metadata);
+                continue;
+            }
+
             if record.lifecycle == PersistedPausedLifecycle::Resuming {
                 warn!(sandbox_id = %sandbox_id, "discarding paused sandbox record left in resuming state");
                 self.cleanup_invalid_record(&sandbox_id).await?;
@@ -381,6 +391,17 @@ impl SandboxPersister for FileBackedSandboxPersister {
         let mut record = self.get_record(sandbox_id).await?;
         record.lifecycle = PersistedPausedLifecycle::Paused;
         self.put_record(&record).await
+    }
+
+    async fn mark_deleting(&self, metadata: &SandboxMetadata) -> PersistenceResult<()> {
+        self.put_record(&PersistedPausedRecord {
+            version: RECORD_VERSION,
+            lifecycle: PersistedPausedLifecycle::Deleting,
+            metadata: metadata.clone(),
+            artifact_root: self.sandbox_artifact_root(&metadata.id),
+            state: Value::Null,
+        })
+        .await
     }
 
     async fn delete_record(&self, sandbox_id: &SandboxId) -> PersistenceResult<()> {
@@ -766,6 +787,38 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert!(persister.sandbox_artifact_root(&sandbox_id).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deletion_intent_survives_restart_without_restoring_runtime() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let metadata = SandboxMetadata {
+            id: SandboxId::new(),
+            ..Default::default()
+        };
+        {
+            let persister = test_persister(temp.path());
+            let root = persister.sandbox_artifact_root(&metadata.id);
+            tokio::fs::create_dir_all(&root).await?;
+            tokio::fs::write(root.join("remaining-artifact"), b"cleanup required").await?;
+            persister.mark_deleting(&metadata).await?;
+        }
+        let restarted = test_persister(temp.path());
+        let loaded = restarted.load_all(&MockBackendFactory::new()).await?;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, metadata.id);
+        assert_eq!(loaded[0].state, SandboxState::CleanupPending);
+        assert!(loaded[0].paused_state.is_none());
+        assert!(restarted
+            .sandbox_artifact_root(&metadata.id)
+            .join("remaining-artifact")
+            .exists());
+        restarted.delete_record_and_artifacts(&metadata.id).await?;
+        assert!(restarted
+            .load_all(&MockBackendFactory::new())
+            .await?
+            .is_empty());
         Ok(())
     }
 

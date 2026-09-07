@@ -3120,6 +3120,7 @@ async fn orchestrator_delete_paused_sandbox_removes_metadata() -> Result<()> {
         vec![
             RecordingCall::AllocateArtifactRoot,
             RecordingCall::PersistPaused,
+            RecordingCall::MarkDeleting,
             RecordingCall::DeleteRecordAndArtifacts
         ]
     );
@@ -3584,7 +3585,10 @@ async fn resume_marks_resuming_and_deletes_record_after_success() -> Result<()> 
     orchestrator.delete_sandbox(created.id).await?;
     assert_eq!(
         persister.calls(),
-        vec![RecordingCall::DeleteRecordAndArtifacts]
+        vec![
+            RecordingCall::MarkDeleting,
+            RecordingCall::DeleteRecordAndArtifacts
+        ]
     );
     Ok(())
 }

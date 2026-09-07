@@ -19,6 +19,7 @@ pub(crate) enum RecordingCall {
     RollbackResuming,
     DeleteRecord,
     DeleteRecordAndArtifacts,
+    MarkDeleting,
 }
 
 impl RecordingCall {
@@ -30,6 +31,7 @@ impl RecordingCall {
             Self::MarkResuming => "mark_resuming",
             Self::RollbackResuming => "rollback_resuming",
             Self::DeleteRecord => "delete_record",
+            Self::MarkDeleting => "mark_deleting",
             Self::DeleteRecordAndArtifacts => "delete_record_and_artifacts",
         }
     }
@@ -130,6 +132,11 @@ impl SandboxPersister for RecordingPersister {
         self.record(RecordingCall::RollbackResuming);
         self.maybe_fail(RecordingCall::RollbackResuming)?;
         Ok(())
+    }
+
+    async fn mark_deleting(&self, _metadata: &SandboxMetadata) -> PersistenceResult<()> {
+        self.record(RecordingCall::MarkDeleting);
+        self.maybe_fail(RecordingCall::MarkDeleting)
     }
 
     async fn delete_record(&self, _sandbox_id: &SandboxId) -> PersistenceResult<()> {

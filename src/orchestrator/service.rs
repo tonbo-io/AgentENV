@@ -1055,7 +1055,18 @@ where
             }
         };
 
-        let (handle, removed_route) = self.detach_sandbox_handle_and_route(&sandbox_id).await;
+        let deleting = self
+            .store
+            .get(&sandbox_id)
+            .await?
+            .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?;
+        if let Err(error) = self.persister.mark_deleting(&deleting).await {
+            self.store
+                .update_state_if_state(&sandbox_id, previous_state, &[SandboxState::Killing])
+                .await?;
+            return Err(error.into());
+        }
+        let (handle, _removed_route) = self.detach_sandbox_handle_and_route(&sandbox_id).await;
 
         // If the sandbox is still in memory, attempt to stop it.
         if let Some(handle) = handle {
@@ -1067,9 +1078,12 @@ where
             if let Err(err) = stop_result {
                 warn!(error = ?err, "failed to stop sandbox during delete");
                 self.sandboxes.write().await.insert(sandbox_id, handle);
-                self.restore_proxy_route(sandbox_id, removed_route).await;
                 self.store
-                    .update_state_if_state(&sandbox_id, previous_state, &[SandboxState::Killing])
+                    .update_state_if_state(
+                        &sandbox_id,
+                        SandboxState::CleanupPending,
+                        &[SandboxState::Killing],
+                    )
                     .await?;
 
                 return Err(OrchestratorError::SandboxOperationFailed {
