@@ -74,8 +74,8 @@ jobs:
         working-directory: firecracker
         run: |
           ./tools/devtool -y build --release
-          ./tools/devtool -y sh 'cargo test --locked --release --target "$(uname -m)-unknown-linux-musl" -p vmm --lib kernel_version_tests'
-          ./tools/devtool -y sh 'cargo test --locked --release --target "$(uname -m)-unknown-linux-musl" -p vmm --lib test_parse_kernel_release'
+          ./tools/devtool -y sh "cargo test --locked --release --target $(uname -m)-unknown-linux-musl -p vmm --lib kernel_version_tests"
+          ./tools/devtool -y sh "cargo test --locked --release --target $(uname -m)-unknown-linux-musl -p vmm --lib test_parse_kernel_release"
       - name: Package dependency with provenance
         env:
           DEP_VERSION: ${{ needs.source.outputs.version }}
