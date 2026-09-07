@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4675bc62.js";
+            window.path_to_searchindex_js = "../searchindex-c51351cb.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c868df7a.js"></script>
@@ -448,6 +448,9 @@ services/                       # distributed control plane (Go)
 <h3 id="pooled-device-allocation-identity"><a class="header" href="#pooled-device-allocation-identity">Pooled device allocation identity</a></h3>
 <p>Every daemon-side pooled acquisition returns a fresh <code>allocation_id</code> in addition to the reusable device number. A shared device tracks a set of acquisition identities; release must present its own identity, and only removal of the last distinct identity returns the device to the pool. Old, unknown and repeated identities are rejected before changing an active allocation. The daemon client, runtime handles and protocol share this contract; raw non-pooled runtime devices carry no pooled allocation identity. Update the runtime and its bundled daemon together.</p>
 <p>This fencing does not turn an uncertain release into confirmed cleanup. A lost release response remains unresolved: callers must not interpret an unknown allocation as success or retry a numeric device ID without its identity. Durable cleanup receipts, device reconciliation and node-wide physical cleanup evidence remain separate requirements before safe host termination.</p>
+<h3 id="network-cleanup-ownership"><a class="header" href="#network-cleanup-ownership">Network cleanup ownership</a></h3>
+<p>A failed slot cleanup retains the slot handle and its allocated bitmap bit in the network manager. It cannot return to the warm pool or be allocated to another guest. Partial network setup failures use the same cleanup path. Pool maintenance retries retained slots without blocking refill solely because an older cleanup failed; shutdown also retries them and reports failures. Only successful cleanup releases the bit. Cleanup runs outside the pending-list mutex.</p>
+<p>This ownership is process-local. It is not durable orphan recovery or a host termination acknowledgement; restart reconciliation, active-slot accounting and complete physical cleanup proof remain required.</p>
 
                     </main>
 
