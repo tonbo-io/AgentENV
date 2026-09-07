@@ -1830,6 +1830,14 @@ mod tests {
     }
 
     async fn build_api_with_auth(domains: Vec<String>, api_key: &str) -> Arc<ApiImpl> {
+        build_api_with_node_identity(domains, api_key, None).await
+    }
+
+    async fn build_api_with_node_identity(
+        domains: Vec<String>,
+        api_key: &str,
+        identity: Option<crate::identity::NodeIdentity>,
+    ) -> Arc<ApiImpl> {
         let root = tempfile::tempdir().unwrap();
         let orchestrator = Orchestrator::new(
             crate::orchestrator::InMemoryMetadataStore::new(),
@@ -1841,12 +1849,24 @@ mod tests {
         let snapshot_manager = Arc::new(mock_snapshot_manager());
         let template_builder = Arc::new(TemplateBuilder::new());
         let image_resolver = Arc::new(ImageResolver::new(&AppConfig::default()));
+        let observability = match identity {
+            Some(identity) => Some(Arc::new(
+                crate::observability::ObservabilityService::new(
+                    identity,
+                    Arc::clone(&orchestrator),
+                    None,
+                    Arc::new(std::sync::RwLock::new(None)),
+                )
+                .await,
+            )),
+            None => None,
+        };
         Arc::new(ApiImpl::new(
             orchestrator,
             snapshot_manager,
             template_builder,
             image_resolver,
-            None,
+            observability,
             domains,
             ApiKey::new(api_key).unwrap(),
         ))
@@ -2066,6 +2086,73 @@ mod tests {
 
         assert!(is_send_request_failure_text(&SendRequestError));
         assert!(!is_send_request_failure_text(&"client error (Connect)"));
+    }
+
+    #[tokio::test]
+    async fn node_drain_rejects_stale_instance_or_wrong_node_before_closing_admission() {
+        let cluster = uuid::Uuid::new_v4();
+        let api = build_api_with_node_identity(
+            Vec::new(),
+            TEST_API_KEY,
+            Some(crate::identity::NodeIdentity {
+                id: "node-a".into(),
+                cluster_id: cluster,
+                service_instance_id: "current-instance".into(),
+                commit: "test".into(),
+                version: "test".into(),
+            }),
+        )
+        .await;
+        let app = server::new(Arc::clone(&api));
+        for (node, request_cluster, instance) in [
+            ("node-a", cluster, "previous-instance"),
+            ("wrong-node", cluster, "current-instance"),
+            ("node-a", uuid::Uuid::new_v4(), "current-instance"),
+        ] {
+            let body = serde_json::json!({"clusterID":request_cluster,"serviceInstanceID":instance,"drainID":"drain:1"});
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/nodes/{node}/drain"))
+                        .header(header::HOST, "localhost")
+                        .header(API_KEY_HEADER, TEST_API_KEY)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert!(!api.orchestrator().node_admission_status().closed);
+        }
+    }
+
+    #[tokio::test]
+    async fn node_drain_requires_control_key_and_available_node_identity() {
+        let api = build_api().await;
+        let app = server::new(Arc::clone(&api));
+        for (keys, expected) in [
+            (vec![], StatusCode::UNAUTHORIZED),
+            (vec!["wrong"], StatusCode::UNAUTHORIZED),
+            (vec![TEST_API_KEY, TEST_API_KEY], StatusCode::UNAUTHORIZED),
+            (vec![TEST_API_KEY], StatusCode::NOT_FOUND),
+        ] {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/nodes/node/drain")
+                .header(header::HOST, "localhost")
+                .header(header::CONTENT_TYPE, "application/json");
+            for key in keys {
+                request = request.header(API_KEY_HEADER, key);
+            }
+            let response = app.clone().oneshot(request.body(Body::from(
+                r#"{"clusterID":"00000000-0000-0000-0000-000000000001","serviceInstanceID":"instance","drainID":"node:1"}"#
+            )).unwrap()).await.unwrap();
+            assert_eq!(response.status(), expected);
+            assert!(!api.orchestrator().node_admission_status().closed);
+        }
     }
 
     #[tokio::test]

@@ -113,6 +113,8 @@ fn make_orchestrator_without_background_with_factory_and_persister<
         counters: Default::default(),
         sandbox_event_tx,
         default_sandbox_timeout: Duration::from_secs(15),
+        admission: NodeAdmission::default(),
+        operations: OperationTracker::default(),
         is_shutting_down: std::sync::atomic::AtomicBool::new(false),
         shutdown_tx: tokio::sync::watch::channel(false).0,
         shutdown_outcome: tokio::sync::OnceCell::new(),
@@ -945,6 +947,66 @@ async fn cleanup_failed_launch_removes_created_running_metadata() {
         .await;
 
     assert!(orchestrator.store.get(&sandbox_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn failed_launch_stop_retains_inventory_until_cleanup_succeeds() {
+    let orchestrator = make_orchestrator().await;
+    let sandbox_id = SandboxId::new();
+    let plan = create_launch_plan_with_resources(sandbox_id);
+    let behavior = Arc::new(MockBehavior::new());
+    behavior.push_action(
+        MockOperation::Stop,
+        MockAction::Fail {
+            message: "cannot stop VM".into(),
+        },
+    );
+    let handle: SandboxHandle = Arc::new(Mutex::new(Box::new(MockSandboxBackend::new(behavior))));
+    orchestrator
+        .store
+        .add(SandboxMetadata {
+            id: sandbox_id,
+            state: SandboxState::Running,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    orchestrator
+        .sandboxes
+        .write()
+        .await
+        .insert(sandbox_id, Arc::clone(&handle));
+    orchestrator
+        .upsert_proxy_route(sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST))
+        .await;
+    orchestrator
+        .cleanup_failed_launch(
+            &plan,
+            Arc::clone(&handle),
+            FailedLaunchStage::RunningPersisted,
+        )
+        .await;
+    assert!(orchestrator.store.get(&sandbox_id).await.unwrap().is_some());
+    assert!(orchestrator
+        .sandboxes
+        .read()
+        .await
+        .contains_key(&sandbox_id));
+    assert!(orchestrator
+        .proxy_routes
+        .read()
+        .await
+        .route(&sandbox_id)
+        .is_none());
+    orchestrator
+        .cleanup_failed_launch(&plan, handle, FailedLaunchStage::RunningPersisted)
+        .await;
+    assert!(orchestrator.store.get(&sandbox_id).await.unwrap().is_none());
+    assert!(!orchestrator
+        .sandboxes
+        .read()
+        .await
+        .contains_key(&sandbox_id));
 }
 
 #[tokio::test]
@@ -4899,4 +4961,70 @@ async fn fork_sandbox_register_failure_cleans_up_metrics() -> Result<()> {
     orchestrator.delete_sandbox(child.id).await?;
     orchestrator.delete_sandbox(source.id).await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn node_drain_blocks_all_start_paths_but_allows_cleanup() -> Result<()> {
+    setup();
+    let orchestrator = make_orchestrator().await;
+    let running = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    let paused = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    orchestrator.pause_sandbox(paused.id).await?;
+    assert_eq!(orchestrator.admission.close().in_flight, 0);
+    assert!(matches!(
+        orchestrator
+            .create_sandbox(create_request(Some(60), &[]))
+            .await,
+        Err(OrchestratorError::NodeDraining)
+    ));
+    assert!(matches!(
+        orchestrator
+            .resume_sandbox(paused.id, NewTimeout::Set(Duration::from_secs(60)))
+            .await,
+        Err(OrchestratorError::NodeDraining)
+    ));
+    assert!(matches!(
+        orchestrator
+            .fork_sandbox(running.id, 1, NewTimeout::Set(Duration::from_secs(60)))
+            .await,
+        Err(OrchestratorError::NodeDraining)
+    ));
+    orchestrator.pause_sandbox(running.id).await?;
+    assert!(orchestrator.node_admission_status().closed);
+    assert_eq!(orchestrator.node_admission_status().in_flight, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lifecycle_task_remains_counted_after_caller_disconnects() {
+    let orchestrator = make_orchestrator().await;
+    let (started, start_signal) = oneshot::channel();
+    let (finish, finish_signal) = oneshot::channel();
+    let caller_orchestrator = Arc::clone(&orchestrator);
+    let caller = tokio::spawn(async move {
+        caller_orchestrator
+            .run_cancellation_safe("test", SandboxId::new(), async move {
+                started.send(()).unwrap();
+                finish_signal.await.unwrap();
+                Ok(())
+            })
+            .await
+    });
+    start_signal.await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(orchestrator.node_operation_status().in_flight, 1);
+    finish.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while orchestrator.node_operation_status().in_flight != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(orchestrator.node_operation_status().interrupted, 0);
 }

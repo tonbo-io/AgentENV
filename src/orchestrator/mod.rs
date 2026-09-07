@@ -1,5 +1,7 @@
+mod admission;
 mod launch_plan;
 mod metrics;
+mod operations;
 mod persistence;
 mod proxy;
 mod service;
@@ -9,7 +11,9 @@ mod types;
 use crate::types::SandboxId;
 use crate::virtualization::VirtualizationMode;
 
+pub use admission::AdmissionStatus;
 pub use metrics::OrchestratorMetrics;
+pub use operations::OperationStatus;
 pub use persistence::{
     DisabledSandboxPersister, FileBackedSandboxPersister, PersistenceResult,
     SandboxPersistenceError, SandboxPersister,
@@ -58,6 +62,9 @@ pub enum OrchestratorError {
 
     #[error("orchestrator is shutting down")]
     ShuttingDown,
+
+    #[error("node admission is closed for drain")]
+    NodeDraining,
 
     #[error("sandbox {0} not found")]
     SandboxNotFound(SandboxId),

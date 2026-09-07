@@ -24,10 +24,12 @@ use crate::sandbox::{
 use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
 
+use super::admission::{AdmissionStatus, NodeAdmission};
 use super::launch_plan::{CreateLaunchSource, LaunchPlan};
 use super::metrics::{
     aggregate_resource_metrics, OrchestratorCounters, OrchestratorMetrics, SandboxContribution,
 };
+use super::operations::{OperationStatus, OperationTracker};
 use super::persistence::{DisabledSandboxPersister, FileBackedSandboxPersister, SandboxPersister};
 use super::proxy::{ProxyLookupResult, ProxyRoute, ProxyRouteTable, ProxyTarget};
 use super::store::*;
@@ -95,6 +97,8 @@ pub struct Orchestrator<
     P: SandboxPersister = FileBackedSandboxPersister,
 > {
     store: S,
+    admission: NodeAdmission,
+    operations: OperationTracker,
     factory: F,
     persister: P,
     sandboxes: RwLock<HashMap<SandboxId, SandboxHandle>>,
@@ -133,7 +137,25 @@ where
             config.orchestrator.persisted_sandbox_store_path.clone(),
             config.virtualization_mode,
         );
-        Self::new(store, factory, persister).await
+        let marker = config
+            .orchestrator
+            .persisted_sandbox_store_path
+            .join(".node-drain");
+        let admission = tokio::task::spawn_blocking(move || {
+            let directory = marker.parent().expect("node drain marker has parent");
+            std::fs::create_dir_all(directory)?;
+            // Preserve newly created directory entries before a later drain can
+            // acknowledge its marker. The configured store is node-local durable storage.
+            for ancestor in directory.ancestors() {
+                std::fs::File::open(ancestor)?.sync_all()?;
+            }
+            NodeAdmission::persistent(marker)
+        })
+        .await
+        .context("join node admission restore")?
+        .context("restore durable node admission")?;
+        let image_refs = local_image_services_from_global_config().runtime_refs;
+        Self::new_inner_with_admission(store, factory, persister, image_refs, admission).await
     }
 }
 
@@ -153,6 +175,23 @@ where
         factory: F,
         persister: P,
         image_refs: Arc<dyn RuntimeImageRefs>,
+    ) -> Result<Arc<Self>> {
+        Self::new_inner_with_admission(
+            store,
+            factory,
+            persister,
+            image_refs,
+            NodeAdmission::default(),
+        )
+        .await
+    }
+
+    async fn new_inner_with_admission(
+        store: S,
+        factory: F,
+        persister: P,
+        image_refs: Arc<dyn RuntimeImageRefs>,
+        admission: NodeAdmission,
     ) -> Result<Arc<Self>> {
         let app_config = ConfigManager::global_config();
         let config = &app_config.orchestrator;
@@ -193,6 +232,8 @@ where
             counters: OrchestratorCounters::default(),
             sandbox_event_tx,
             default_sandbox_timeout: Duration::from_secs(config.default_sandbox_timeout_secs),
+            admission,
+            operations: OperationTracker::default(),
             is_shutting_down: std::sync::atomic::AtomicBool::new(false),
             shutdown_tx,
             shutdown_outcome: OnceCell::new(),
@@ -240,8 +281,10 @@ where
         T: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
+        let operation_permit = self.operations.begin();
         tokio::spawn(async move {
             let result = future.await;
+            operation_permit.complete();
             if tx.send(result).is_err() {
                 debug!(
                     sandbox_id = %sandbox_id,
@@ -354,6 +397,10 @@ where
         sandbox_id: SandboxId,
         request: CreateSandboxRequest,
     ) -> Result<SandboxMetadata> {
+        let _admission = self
+            .admission
+            .acquire()
+            .ok_or(OrchestratorError::NodeDraining)?;
         if let Err(err) = self.ensure_accepting_lifecycle_operations() {
             self.counters.record_create_fail(1);
             return Err(err);
@@ -546,6 +593,10 @@ where
         count: u32,
         new_timeout: NewTimeout,
     ) -> Result<Vec<SandboxForkOutcome>> {
+        let _admission = self
+            .admission
+            .acquire()
+            .ok_or(OrchestratorError::NodeDraining)?;
         self.ensure_accepting_lifecycle_operations()?;
 
         info!("forking sandboxes");
@@ -1160,6 +1211,10 @@ where
         sandbox_id: SandboxId,
         timeout: NewTimeout,
     ) -> Result<SandboxMetadata> {
+        let _admission = self
+            .admission
+            .acquire()
+            .ok_or(OrchestratorError::NodeDraining)?;
         self.ensure_accepting_lifecycle_operations()?;
 
         info!("resuming sandbox");
@@ -2349,14 +2404,17 @@ where
         handle: SandboxHandle,
         stage: FailedLaunchStage,
     ) {
-        let should_rollback_shared_state = self
-            .detach_launch_runtime_if_current(
-                &plan.sandbox_id(),
-                &handle,
-                stage.should_detach_proxy_route(),
-                stage,
-            )
-            .await;
+        // Withdraw traffic without forgetting the runtime. A failed stop must
+        // remain visible to drain/inventory instead of looking like an empty node.
+        if stage.should_detach_proxy_route() {
+            let sandboxes = self.sandboxes.read().await;
+            if sandboxes
+                .get(&plan.sandbox_id())
+                .is_some_and(|current| Arc::ptr_eq(current, &handle))
+            {
+                self.proxy_routes.write().await.remove(&plan.sandbox_id());
+            }
+        }
 
         // Stop the sandbox.
         let stop_result = {
@@ -2365,7 +2423,17 @@ where
         };
         if let Err(err) = stop_result {
             warn!(error = %format_args!("{err:#}"), "failed to stop sandbox while rolling back launch");
+            return;
         }
+
+        let should_rollback_shared_state = self
+            .detach_launch_runtime_if_current(
+                &plan.sandbox_id(),
+                &handle,
+                stage.should_detach_proxy_route(),
+                stage,
+            )
+            .await;
 
         if !should_rollback_shared_state {
             return;
@@ -2619,6 +2687,25 @@ where
 
         info!("orchestrator shutdown completed");
         Ok(())
+    }
+
+    /// Persist irreversible node drain before returning an admission observation.
+    /// This does not establish runtime cleanup or authorize host termination.
+    pub async fn drain_node(&self, drain_id: String) -> Result<AdmissionStatus> {
+        let admission = self.admission.clone();
+        tokio::task::spawn_blocking(move || admission.drain(&drain_id))
+            .await
+            .context("join durable node drain")?
+            .context("persist durable node drain")
+            .map_err(Into::into)
+    }
+
+    pub fn node_operation_status(&self) -> OperationStatus {
+        self.operations.status()
+    }
+
+    pub fn node_admission_status(&self) -> AdmissionStatus {
+        self.admission.status()
     }
 
     fn is_shutting_down(&self) -> bool {

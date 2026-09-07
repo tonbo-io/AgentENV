@@ -40,6 +40,7 @@ pub struct NodeSnapshot {
     pub service_instance_id: String,
     pub cluster_id: uuid::Uuid,
     pub machine_info: MachineInfo,
+    pub admission_closed: bool,
     pub sandbox_count: u32,
     pub sandbox_ids: Vec<SandboxId>,
     pub metrics: NodeMetricsSnapshot,

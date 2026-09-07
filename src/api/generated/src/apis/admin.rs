@@ -23,6 +23,22 @@ pub enum NodesGetResponse {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[must_use]
 #[allow(clippy::large_enum_variant)]
+pub enum NodesNodeIdDrainPostResponse {
+    /// Durable admission observation
+    Status200_DurableAdmissionObservation(models::NodeDrainObservation),
+    /// Authentication error
+    Status401_AuthenticationError(models::Error),
+    /// Not found
+    Status404_NotFound(models::Error),
+    /// Node instance mismatch
+    Status409_NodeInstanceMismatch(models::Error),
+    /// Server error
+    Status500_ServerError(models::Error),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[must_use]
+#[allow(clippy::large_enum_variant)]
 pub enum NodesNodeIdGetResponse {
     /// Successfully returned the node
     Status200_SuccessfullyReturnedTheNode(models::NodeDetail),
@@ -52,6 +68,20 @@ pub trait Admin<E: std::fmt::Debug + Send + Sync + 'static = ()>: super::ErrorHa
         claims: &Self::Claims,
         query_params: &models::NodesGetQueryParams,
     ) -> Result<NodesGetResponse, E>;
+
+    /// Persist node admission closure.
+    ///
+    /// NodesNodeIdDrainPost - POST /nodes/{nodeID}/drain
+    async fn nodes_node_id_drain_post(
+        &self,
+
+        method: &Method,
+        host: &Host,
+        cookies: &CookieJar,
+        claims: &Self::Claims,
+        path_params: &models::NodesNodeIdDrainPostPathParams,
+        body: &models::NodeDrainRequest,
+    ) -> Result<NodesNodeIdDrainPostResponse, E>;
 
     /// Node info.
     ///
