@@ -315,11 +315,11 @@ Every daemon-side pooled acquisition returns a fresh `allocation_id` in addition
 
 This fencing does not turn an uncertain release into confirmed cleanup. A lost release response remains unresolved: callers must not interpret an unknown allocation as success or retry a numeric device ID without its identity. Durable cleanup receipts, device reconciliation and node-wide physical cleanup evidence remain separate requirements before safe host termination.
 
-### Irreversible runtime creation claims
+### Runtime creation exclusion
 
-The create entry point claims the runtime ID before constructing or starting its backend. File-backed orchestrators persist the claim under `.creation-claims` in the configured metadata store and fsync the file and directory before dispatch. Concurrent or delayed repeat creates are rejected without replacing the original runtime handle or metadata. Claims survive failed requests and runtime deletion: missing metadata is not permission to recreate an uncertain execution. Restored metadata is adopted into the claim store before admission opens. In-memory orchestrators use process-local claims.
+The orchestrator excludes concurrent create requests for the same runtime ID and rejects existing metadata before backend construction. Funded creates also consult the existing sandbox-admission activation registry, preventing an already-executed activation from entering backend construction and failure cleanup. The serialized admission acquire remains authoritative and is shared by cold creation, fork and resume; no second durable claim store is introduced. The in-process gate is released when the create operation ends or unwinds. Successful request replays query the existing runtime rather than create it again.
 
-These claims are node-local creation fences, not authorization grants, accounting receipts, cross-node ownership or physical-cleanup proof. They do not fence fork or resumed activations. Previously deleted runtime IDs without retained metadata cannot be reconstructed by this adoption step; the database dispatch guard must remain until cutover accounts for that history and supplies complete execution fencing. Claims are not garbage-collected by a timeout or deletion response.
+This preflight is not a new authorization grant or cross-node fence. Kubernetes execution ownership still requires placement fencing, accounting acknowledgements and recovery qualification; keep the SQL dispatch guard until those consumers are migrated and verified.
 
 ### Network cleanup ownership
 

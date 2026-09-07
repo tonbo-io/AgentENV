@@ -143,7 +143,7 @@ impl NodeAdmission {
                 bail!("new activation must begin with execution sequence zero");
             }
             self.validate_lease(lease)?;
-            if self.identities.get(id.as_bytes().to_vec()).await?.is_some() {
+            if self.has_executed_activation(id).await? {
                 bail!("activation has already executed on this node");
             }
         }
@@ -206,6 +206,11 @@ impl NodeAdmission {
                 .await?;
         }
         Ok(guard)
+    }
+
+    /// Observation only: acquire() owns the serialized durable admission claim.
+    pub async fn has_executed_activation(&self, id: Uuid) -> Result<bool> {
+        Ok(self.identities.get(id.as_bytes().to_vec()).await?.is_some())
     }
 
     fn validate_lease(&self, lease: ExecutionLease) -> Result<()> {

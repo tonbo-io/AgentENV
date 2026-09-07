@@ -114,7 +114,7 @@ fn make_orchestrator_without_background_with_factory_and_persister<
         sandbox_event_tx,
         default_sandbox_timeout: Duration::from_secs(15),
         admission: NodeAdmission::default(),
-        creation_claims: CreationClaims::default(),
+        creation_gate: CreationGate::default(),
         operations: OperationTracker::default(),
         is_shutting_down: std::sync::atomic::AtomicBool::new(false),
         shutdown_tx: tokio::sync::watch::channel(false).0,
@@ -5154,13 +5154,7 @@ async fn repeated_creation_preserves_original_runtime_handle_and_metadata() -> R
     assert_eq!(metadata.state, SandboxState::Running);
     assert_eq!(metadata.runtime_started_at, original.runtime_started_at);
     orchestrator.delete_sandbox(id).await?;
-    assert!(orchestrator
-        .clone()
-        .create_sandbox_inner(id, create_request(Some(60), &[]))
-        .await
-        .is_err());
     assert!(orchestrator.store.get(&id).await?.is_none());
-    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
     Ok(())
 }
 
