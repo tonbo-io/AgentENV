@@ -488,6 +488,8 @@ func TestIsSandboxControlPlaneRequest(t *testing.T) {
 		path   string
 		want   bool
 	}{
+		{name: "sandbox usage", method: http.MethodGet, path: "/sandboxes/sbx-123/usage", want: true},
+		{name: "sandbox usage wrong method", method: http.MethodPost, path: "/sandboxes/sbx-123/usage", want: false},
 		{name: "sandbox detail", method: http.MethodGet, path: "/sandboxes/sbx-123", want: true},
 		{name: "sandbox delete", method: http.MethodDelete, path: "/sandboxes/sbx-123", want: true},
 		{name: "sandbox pause", method: http.MethodPost, path: "/sandboxes/sbx-123/pause", want: true},
@@ -2576,5 +2578,40 @@ func TestRootfsExportOutlivesRoutingDeadlineButHonorsCallerCancellation(t *testi
 	cancelCaller()
 	if proxy.Err() != context.Canceled {
 		t.Fatal("caller cancellation did not stop rootfs export")
+	}
+}
+
+func TestUsageReadStaysOnOwnerAndPreservesInstanceFence(t *testing.T) {
+	const sandboxID = "60129c86-3e52-4773-b8bf-5f99a584dd85"
+	const instanceID = "60129c86-3e52-4773-b8bf-5f99a584dd85"
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandboxes/"+sandboxID+"/usage" || r.URL.Query().Get("runtimeInstanceID") != instanceID {
+			http.Error(w, "usage identity was not preserved", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer owner.Close()
+	other := httptest.NewServer(http.NotFoundHandler())
+	defer other.Close()
+	mainScheduler := stubSchedulerClient{
+		scheduleFunc: func(context.Context, *schedulerv1.ScheduleRequest, ...grpc.CallOption) (*schedulerv1.ScheduleResponse, error) {
+			return &schedulerv1.ScheduleResponse{Node: &schedulerv1.Node{NodeId: "other", Endpoint: other.URL}}, nil
+		},
+	}
+	queryScheduler := stubSchedulerClient{
+		lookupNodeFunc: func(_ context.Context, req *schedulerv1.LookupNodeRequest, _ ...grpc.CallOption) (*schedulerv1.LookupNodeResponse, error) {
+			if req.GetSandboxId() != sandboxID {
+				return nil, fmt.Errorf("unexpected sandbox identity %q", req.GetSandboxId())
+			}
+			return &schedulerv1.LookupNodeResponse{Node: &schedulerv1.Node{NodeId: "owner", Endpoint: owner.URL}}, nil
+		},
+	}
+	server := newTestServer(t, mainScheduler, time.Second, 1024, withQueryOnlyScheduler(queryScheduler))
+	request := httptest.NewRequest(http.MethodGet, "/sandboxes/"+sandboxID+"/usage?runtimeInstanceID="+instanceID, nil)
+	response := httptest.NewRecorder()
+	authenticatedTestHandler(server).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("usage reached the wrong node or lost its fence: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
