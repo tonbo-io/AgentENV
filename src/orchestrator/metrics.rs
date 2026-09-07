@@ -93,6 +93,7 @@ impl SandboxContribution {
                 | SandboxState::Snapshotting
                 | SandboxState::Forking
                 | SandboxState::Killing
+                | SandboxState::CleanupPending
         );
         let counts_as_starting = matches!(state, SandboxState::Creating | SandboxState::Resuming);
         let memory_bytes = u64::from(resources.memory_mib) * 1024 * 1024;

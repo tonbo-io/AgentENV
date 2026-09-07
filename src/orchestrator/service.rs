@@ -621,7 +621,9 @@ where
             .await
             .map_err(|err| match err {
                 StoreError::StateConflict { actual_state, .. } => match actual_state {
-                    SandboxState::Killing => OrchestratorError::SandboxNotFound(source_sandbox_id),
+                    SandboxState::Killing | SandboxState::CleanupPending => {
+                        OrchestratorError::SandboxNotFound(source_sandbox_id)
+                    }
                     _ => OrchestratorError::InvalidSandboxState {
                         sandbox_id: source_sandbox_id,
                         state: actual_state,
@@ -986,7 +988,11 @@ where
                 .update_state_if_state(
                     &sandbox_id,
                     SandboxState::Killing,
-                    &[SandboxState::Running, SandboxState::Paused],
+                    &[
+                        SandboxState::Running,
+                        SandboxState::Paused,
+                        SandboxState::CleanupPending,
+                    ],
                 )
                 .await
             {
@@ -1074,7 +1080,22 @@ where
             }
         }
 
-        // Now the sandbox is successfully stopped, remove its metadata.
+        // Cleanup remains part of deletion, even after the process stopped.
+        // Keep a non-runnable, retryable inventory entry until it succeeds.
+        if let Err(error) = self
+            .persister
+            .delete_record_and_artifacts(&sandbox_id)
+            .await
+        {
+            self.store
+                .update_state_if_state(
+                    &sandbox_id,
+                    SandboxState::CleanupPending,
+                    &[SandboxState::Killing],
+                )
+                .await?;
+            return Err(error.into());
+        }
         let metadata = self.store.remove(&sandbox_id).await?;
         if let Some(metadata) = metadata {
             self.publish_sandbox_event(
@@ -1082,13 +1103,6 @@ where
                 metadata.id,
                 metadata.resources,
             );
-        }
-        if let Err(err) = self
-            .persister
-            .delete_record_and_artifacts(&sandbox_id)
-            .await
-        {
-            warn!(error = ?err, "failed to delete persisted sandbox state");
         }
         self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
             .await;
@@ -1157,7 +1171,7 @@ where
                     // it to finish and then report the final outcome.
                     SandboxState::Pausing => self.join_concurrent_pause(sandbox_id).await,
                     SandboxState::Paused => Ok(()),
-                    SandboxState::Killing => {
+                    SandboxState::Killing | SandboxState::CleanupPending => {
                         info!("sandbox is being deleted while pausing");
                         Err(OrchestratorError::SandboxNotFound(sandbox_id))
                     }
@@ -1233,7 +1247,7 @@ where
         }
 
         match metadata.state {
-            SandboxState::Killing => {
+            SandboxState::Killing | SandboxState::CleanupPending => {
                 return Err(OrchestratorError::SandboxNotFound(sandbox_id));
             }
             SandboxState::Running => {
@@ -1272,7 +1286,7 @@ where
                         // read and CAS.  Wait for it and return the outcome.
                         self.join_concurrent_resume(sandbox_id, timeout).await
                     }
-                    SandboxState::Killing => {
+                    SandboxState::Killing | SandboxState::CleanupPending => {
                         info!("sandbox is being deleted while resuming");
                         Err(OrchestratorError::SandboxNotFound(sandbox_id))
                     }
@@ -1366,7 +1380,9 @@ where
             Ok(_) => {}
             Err(StoreError::StateConflict { actual_state, .. }) => {
                 return match actual_state {
-                    SandboxState::Killing => Err(OrchestratorError::SandboxNotFound(sandbox_id)),
+                    SandboxState::Killing | SandboxState::CleanupPending => {
+                        Err(OrchestratorError::SandboxNotFound(sandbox_id))
+                    }
                     _ => Err(OrchestratorError::InvalidSandboxState {
                         sandbox_id,
                         state: actual_state,
@@ -1999,7 +2015,7 @@ where
                     state: SandboxState::Running,
                 })
             }
-            SandboxState::Killing => {
+            SandboxState::Killing | SandboxState::CleanupPending => {
                 info!("sandbox is being deleted after concurrent pause attempt");
                 Err(OrchestratorError::SandboxNotFound(sandbox_id))
             }
@@ -2034,7 +2050,7 @@ where
                     state: SandboxState::Paused,
                 })
             }
-            SandboxState::Killing => {
+            SandboxState::Killing | SandboxState::CleanupPending => {
                 info!("sandbox is being deleted while resuming");
                 Err(OrchestratorError::SandboxNotFound(sandbox_id))
             }
@@ -2637,12 +2653,18 @@ where
                             last_failures.push(format!("{sandbox_id}: {err}"));
                         }
                     }
+                    SandboxState::CleanupPending => {
+                        if let Err(err) = self.delete_sandbox_inner(sandbox_id).await {
+                            last_failures.push(format!("{sandbox_id}: {err}"));
+                        }
+                    }
                     SandboxState::Creating
                     | SandboxState::Snapshotting
                     | SandboxState::Forking
                     | SandboxState::Pausing
                     | SandboxState::Resuming
-                    | SandboxState::Killing => {
+                    | SandboxState::Killing
+                    | SandboxState::CleanupPending => {
                         match self.wait_for_transition(sandbox_id, metadata.state).await {
                             Ok(_) | Err(OrchestratorError::SandboxNotFound(_)) => {}
                             Err(err) => {
