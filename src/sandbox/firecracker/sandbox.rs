@@ -52,7 +52,6 @@ use crate::sandbox::ublk::{
 use crate::sandbox::SandboxLaunchConfig;
 use crate::snapshot::RunnableSnapshot;
 use crate::types::SandboxId;
-use futures::FutureExt;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -424,7 +423,7 @@ impl SandboxBackend for FirecrackerSandbox {
             .as_ref()
             .context("Sandbox is not running")?;
         let executor = Executor::new(envd);
-        let output = executor.run_command(command, &[]).boxed().await?;
+        let output = executor.run_command(command, &[]).await?;
         anyhow::ensure!(
             output.exit_code == 0,
             "terminal command exited {}",

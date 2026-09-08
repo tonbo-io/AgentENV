@@ -14,8 +14,31 @@ pub(crate) type TonicBoxBody = tonic::body::Body;
 pub(crate) type Channel = tower::util::BoxCloneService<
     http::Request<TonicBoxBody>,
     http::Response<hyper::body::Incoming>,
-    Box<dyn std::error::Error + Send + Sync>, // Use boxed error to support anyhow and others
+    TransportError,
 >;
+
+// A concrete error keeps tonic's Into<StdError> bound independent of the
+// lifetimes captured by Send execution futures.
+#[derive(Debug)]
+pub struct TransportError(anyhow::Error);
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+impl From<anyhow::Error> for TransportError {
+    fn from(error: anyhow::Error) -> Self {
+        Self(error)
+    }
+}
 
 #[derive(Clone)]
 struct DualClient {
@@ -34,7 +57,7 @@ enum Protocol {
 
 impl Service<http::Request<TonicBoxBody>> for DualClient {
     type Response = http::Response<hyper::body::Incoming>;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Error = TransportError;
     type Future = std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
     >;
@@ -93,7 +116,7 @@ impl Service<http::Request<TonicBoxBody>> for DualClient {
                     *req.uri_mut() =
                         Uri::from_parts(parts).map_err(|e| anyhow!("Invalid URI parts: {}", e))?;
 
-                    h2.request(req).await.map_err(|e| e.into())
+                    h2.request(req).await.map_err(|e| TransportError(e.into()))
                 }
                 Protocol::H1 => {
                     let mut parts = uri.into_parts();
@@ -104,7 +127,7 @@ impl Service<http::Request<TonicBoxBody>> for DualClient {
                     // Coerce version to HTTP/1.1
                     *req.version_mut() = http::Version::HTTP_11;
 
-                    h1.request(req).await.map_err(|e| e.into())
+                    h1.request(req).await.map_err(|e| TransportError(e.into()))
                 }
             }
         })
