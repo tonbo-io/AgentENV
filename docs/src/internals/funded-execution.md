@@ -15,3 +15,10 @@ Standalone AgentENV users may keep admission or required funding disabled. This 
 `cargo test -p runtime-policy` covers policy arithmetic and Linux process enforcement, including API-owner SIGSTOP and partial renewal frames. Production acceptance must additionally exercise the actual Firecracker and cgroup paths in an isolated Kubernetes namespace, capture immutable source/image evidence, and remove its resources.
 
 The gateway routes usage reads through the Sandbox owner lookup, including reads of retained final meters. It preserves the `runtimeInstanceID` query fence and never schedules a usage request onto a new node. This matters with multiple nodes: a successful activation on one node does not create a meter on another.
+
+
+### Proxy route activation ownership
+
+A published runtime route records the funded activation from the final launch, resume or fork metadata along with its guest interaction address. Lease rollover does not replace that activation. `proxy_lookup_for_activation` observes only the exact published activation: missing routes, nil identities and old activations fail without reading a newer metadata record or implicitly resuming a paused VM. Standalone unfunded runtimes retain an explicit absent activation.
+
+This observation is not a connection-lifetime guard. The current HTTP/WebSocket proxy still uses the legacy lookup; Cloud SQL orchestrator, guest-process and ingress consumers must migrate together with the execution-target wire contract before retiring that path. Kubernetes execution cutover also requires receiver node/service checks, route retirement covering pending connections and streams, and stale-request/address-reuse acceptance. The activation-bearing route alone does not establish those guarantees.

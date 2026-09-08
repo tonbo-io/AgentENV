@@ -1879,7 +1879,11 @@ mod tests {
     ) -> axum::Router {
         let api = build_api().await;
         api.orchestrator()
-            .set_proxy_target_for_test(*sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST), state)
+            .set_proxy_target_for_test(
+                *sandbox_id,
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
+                state,
+            )
             .await;
         api.orchestrator()
             .set_auto_resume_for_test(sandbox_id, auto_resume)
@@ -1905,7 +1909,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 *sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -1925,7 +1929,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 *sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -2049,6 +2053,7 @@ mod tests {
     fn build_upstream_uri_preserves_path_and_query() {
         let target = ProxyTarget {
             ip: std::net::Ipv4Addr::LOCALHOST,
+            activation_id: None,
         };
 
         let uri =
@@ -2212,7 +2217,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -2267,7 +2272,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -2421,7 +2426,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Paused,
             )
             .await;

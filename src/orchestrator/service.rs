@@ -755,7 +755,7 @@ where
             metadata.execution_lease = None;
             metadata.update_timeout(new_timeout);
 
-            let proxy_target = match Self::proxy_target_from_sandbox(backend.as_ref()) {
+            let proxy_target = match Self::proxy_target_from_sandbox(backend.as_ref(), &metadata) {
                 Ok(proxy_target) => proxy_target,
                 Err(err) => {
                     Self::stop_failed_fork(backend, sandbox_id).await;
@@ -895,6 +895,25 @@ where
                 ProxyLookupResult::Unavailable(metadata.state)
             }
         })
+    }
+
+    /// Resolve only a route published by this funded activation. Unlike the
+    /// legacy lookup, absence is not a request to resume or consult metadata.
+    /// The returned target is an observation, not a connection-lifetime guard.
+    pub async fn proxy_lookup_for_activation(
+        &self,
+        sandbox_id: &SandboxId,
+        activation_id: uuid::Uuid,
+    ) -> Result<ProxyTarget> {
+        if activation_id.is_nil() {
+            return Err(OrchestratorError::ActivationConflict(*sandbox_id));
+        }
+        let routes = self.proxy_routes.read().await;
+        let route = routes
+            .route(sandbox_id)
+            .filter(|route| route.target().activation_id == Some(activation_id))
+            .ok_or(OrchestratorError::ActivationConflict(*sandbox_id))?;
+        Ok(route.target().clone())
     }
 
     /// Updates the keep-alive timeout for a RUNNING sandbox.
@@ -2651,7 +2670,7 @@ where
 
         let proxy_target = {
             let sandbox = handle.lock().await;
-            match Self::proxy_target_from_sandbox(sandbox.as_ref()) {
+            match Self::proxy_target_from_sandbox(sandbox.as_ref(), &final_metadata) {
                 Ok(proxy_target) => proxy_target,
                 Err(err) => {
                     warn!(error = %format_args!("{err:#}"), "sandbox became ready without a proxy target; rolling back launch");
@@ -2817,10 +2836,18 @@ where
         true
     }
 
-    fn proxy_target_from_sandbox(sandbox: &dyn SandboxBackend) -> Result<ProxyTarget> {
+    fn proxy_target_from_sandbox(
+        sandbox: &dyn SandboxBackend,
+        metadata: &SandboxMetadata,
+    ) -> Result<ProxyTarget> {
         sandbox
             .host_interaction_ip()
-            .map(ProxyTarget::new)
+            .map(|ip| {
+                ProxyTarget::new(
+                    ip,
+                    metadata.execution_lease.map(|lease| lease.activation_id),
+                )
+            })
             .ok_or_else(|| {
                 warn!("sandbox started without an interaction IP");
                 OrchestratorError::InternalError(

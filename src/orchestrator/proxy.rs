@@ -2,10 +2,13 @@ use std::{collections::HashMap, net::Ipv4Addr, time::SystemTime};
 
 use crate::orchestrator::SandboxState;
 use crate::types::SandboxId;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyTarget {
     pub ip: Ipv4Addr,
+    /// The funded activation which published this route, independent of lease rollover.
+    pub activation_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,9 +33,10 @@ pub(crate) struct ProxyRouteTable {
 }
 
 impl ProxyTarget {
-    pub fn new(host_interaction_ip: Ipv4Addr) -> Self {
+    pub fn new(host_interaction_ip: Ipv4Addr, activation_id: Option<Uuid>) -> Self {
         Self {
             ip: host_interaction_ip,
+            activation_id,
         }
     }
 }
@@ -94,7 +98,7 @@ mod tests {
     #[test]
     fn proxy_table_only_exposes_inserted_routes() {
         let sandbox_id = SandboxId::new();
-        let target = ProxyTarget::new(Ipv4Addr::LOCALHOST);
+        let target = ProxyTarget::new(Ipv4Addr::LOCALHOST, None);
         let mut table = ProxyRouteTable::default();
 
         table.upsert(sandbox_id, target.clone(), 1);
@@ -110,7 +114,7 @@ mod tests {
         let sandbox_id = SandboxId::new();
         let mut table = ProxyRouteTable::default();
 
-        table.upsert(sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST), 3);
+        table.upsert(sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST, None), 3);
         let _removed = table.remove(&sandbox_id).unwrap();
 
         assert!(!table.routes.contains_key(&sandbox_id));
