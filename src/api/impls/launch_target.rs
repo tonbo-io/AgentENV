@@ -1,4 +1,4 @@
-//! Shared node incarnation precondition for launch and terminal lifecycle requests.
+//! Shared node incarnation precondition for launch, funded renewal and terminal lifecycle requests.
 use super::ApiImpl;
 use agentenv_http_server::models;
 use uuid::Uuid;

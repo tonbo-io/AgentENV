@@ -863,6 +863,10 @@ components:
       required:
         - timeout
       properties:
+        targetNodeInstance:
+          description: Exact Node incarnation for funded renewal. Optional only for legacy SDK and SQL callers until Kubernetes lifecycle handoff; when supplied, executionLease is required.
+          allOf:
+            - $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         timeout:
@@ -2073,6 +2077,8 @@ paths:
           $ref: "#/components/responses/401"
         "404":
           $ref: "#/components/responses/404"
+        "409":
+          $ref: "#/components/responses/409"
         "500":
           $ref: "#/components/responses/500"
 

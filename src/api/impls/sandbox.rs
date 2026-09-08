@@ -1699,6 +1699,23 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdTimeoutPostPathParams,
         body: &Option<models::SandboxTimeoutRequest>,
     ) -> Result<SandboxesSandboxIdTimeoutPostResponse, ()> {
+        let target = body
+            .as_ref()
+            .and_then(|body| body.target_node_instance.as_ref());
+        let activation = body
+            .as_ref()
+            .and_then(|body| body.execution_lease.as_ref())
+            .map(|lease| lease.activation_id);
+        if let Err(error) = self.check_lifecycle_target(
+            target.map(|target| target.node_id.as_str()),
+            target.map(|target| target.cluster_id),
+            target.map(|target| target.service_instance_id),
+            activation,
+        ) {
+            return Ok(SandboxesSandboxIdTimeoutPostResponse::Status409_Conflict(
+                error,
+            ));
+        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdTimeoutPostResponse::Status404_NotFound(
@@ -1725,6 +1742,12 @@ impl Sandboxes<()> for ApiImpl {
             Err(OrchestratorError::SandboxNotFound(id)) => Ok(
                 SandboxesSandboxIdTimeoutPostResponse::Status404_NotFound(sandbox_not_found(id)),
             ),
+            Err(
+                err @ (OrchestratorError::ActivationConflict(_)
+                | OrchestratorError::InvalidTimeout { .. }),
+            ) => Ok(SandboxesSandboxIdTimeoutPostResponse::Status409_Conflict(
+                err.into(),
+            )),
             Err(err) => {
                 Ok(SandboxesSandboxIdTimeoutPostResponse::Status500_ServerError(err.into()))
             }

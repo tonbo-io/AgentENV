@@ -123,6 +123,22 @@ impl SandboxMetadata {
         }
     }
 
+    /// Called under the metadata store lock after watchdog renewal. A different
+    /// activation or a newer published sequence wins over this delayed write.
+    pub(crate) fn update_funded_timeout_if_current(
+        &mut self,
+        lease: runtime_policy::ExecutionLease,
+    ) -> bool {
+        if !self
+            .execution_lease
+            .is_some_and(|current| current.validate_successor(lease).is_ok())
+        {
+            return false;
+        }
+        self.update_timeout(NewTimeout::Funded(lease));
+        true
+    }
+
     pub fn update_timeout(&mut self, new_timeout: NewTimeout) {
         self._update_timeout(new_timeout, SystemTime::now());
     }
@@ -204,5 +220,62 @@ mod tests {
         metadata.update_timeout(NewTimeout::None);
         assert_eq!(metadata.timeout, None);
         assert_eq!(metadata.expires_at, None);
+    }
+
+    #[test]
+    fn delayed_funding_publication_preserves_successor_and_newer_lease() {
+        let current = runtime_policy::ExecutionLease {
+            activation_id: uuid::Uuid::from_u128(1),
+            operation_id: uuid::Uuid::from_u128(2),
+            sequence: 2,
+            expires_at_unix_ms: u64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap()
+                + 60_000,
+        };
+        let mut metadata = SandboxMetadata {
+            execution_lease: Some(current),
+            ..Default::default()
+        };
+        metadata.set_timeout(Some(Duration::from_secs(60)));
+        let before_expiry = metadata.expires_at;
+        for stale in [
+            runtime_policy::ExecutionLease {
+                activation_id: uuid::Uuid::from_u128(3),
+                sequence: 99,
+                ..current
+            },
+            runtime_policy::ExecutionLease {
+                sequence: 1,
+                ..current
+            },
+            runtime_policy::ExecutionLease {
+                operation_id: uuid::Uuid::from_u128(4),
+                ..current
+            },
+            runtime_policy::ExecutionLease {
+                expires_at_unix_ms: current.expires_at_unix_ms + 60_000,
+                ..current
+            },
+        ] {
+            assert!(!metadata.update_funded_timeout_if_current(stale));
+            assert_eq!(metadata.execution_lease, Some(current));
+            assert_eq!(metadata.expires_at, before_expiry);
+        }
+        let next = runtime_policy::ExecutionLease {
+            operation_id: uuid::Uuid::from_u128(5),
+            sequence: 3,
+            expires_at_unix_ms: current.expires_at_unix_ms + 60_000,
+            ..current
+        };
+        assert!(metadata.update_funded_timeout_if_current(next));
+        assert!(metadata.update_funded_timeout_if_current(next));
+        assert_eq!(metadata.execution_lease, Some(next));
+        metadata.execution_lease = None;
+        assert!(!metadata.update_funded_timeout_if_current(next));
     }
 }

@@ -8545,6 +8545,12 @@ impl std::str::FromStr for SandboxState {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxTimeoutRequest {
+    /// Exact Node incarnation for funded renewal. Optional only for legacy SDK and SQL callers until Kubernetes lifecycle handoff; when supplied, executionLease is required.
+    #[serde(rename = "targetNodeInstance")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_node_instance: Option<models::NodeLaunchTarget>,
+
     #[serde(rename = "executionLease")]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -8560,6 +8566,7 @@ impl SandboxTimeoutRequest {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(timeout: u32) -> SandboxTimeoutRequest {
         SandboxTimeoutRequest {
+            target_node_instance: None,
             execution_lease: None,
             timeout,
         }
@@ -8572,6 +8579,8 @@ impl SandboxTimeoutRequest {
 impl std::fmt::Display for SandboxTimeoutRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping targetNodeInstance in query parameter serialization
+
             // Skipping executionLease in query parameter serialization
             Some("timeout".to_string()),
             Some(self.timeout.to_string()),
@@ -8596,6 +8605,7 @@ impl std::str::FromStr for SandboxTimeoutRequest {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub target_node_instance: Vec<models::NodeLaunchTarget>,
             pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
         }
@@ -8620,6 +8630,11 @@ impl std::str::FromStr for SandboxTimeoutRequest {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
+                    "targetNodeInstance" => intermediate_rep.target_node_instance.push(
+                        <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "executionLease" => intermediate_rep.execution_lease.push(
                         <models::ExecutionLease as std::str::FromStr>::from_str(val)
                             .map_err(|x| x.to_string())?,
@@ -8642,6 +8657,7 @@ impl std::str::FromStr for SandboxTimeoutRequest {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxTimeoutRequest {
+            target_node_instance: intermediate_rep.target_node_instance.into_iter().next(),
             execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep
                 .timeout
