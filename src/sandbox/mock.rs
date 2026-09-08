@@ -455,6 +455,13 @@ impl SandboxBackendFactory for MockBackendFactory {
         )))
     }
 
+    fn capture_paused_state(
+        &self,
+        _state: &dyn PausedSandboxState,
+    ) -> Result<CapturedSandboxSnapshot> {
+        Ok(CapturedSandboxSnapshot::new(MockSnapshot))
+    }
+
     fn decode_paused_state(
         &self,
         _artifact_root: std::path::PathBuf,

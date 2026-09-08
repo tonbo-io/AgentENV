@@ -152,6 +152,24 @@ impl SandboxBackendFactory for FirecrackerSandboxFactory {
         Ok(Box::new(sandbox))
     }
 
+    fn capture_paused_state(
+        &self,
+        state: &dyn PausedSandboxState,
+    ) -> Result<crate::sandbox::CapturedSandboxSnapshot> {
+        let paused = state
+            .downcast_ref::<FirecrackerPausedState>()
+            .context("The provided PausedSandboxState is not a Firecracker paused state")?;
+        let config = paused.snapshot_config();
+        config.validate_persisted()?;
+        let manifest = super::manifest::FirecrackerSnapshotManifest::from_snapshot_config(config)?;
+        Ok(crate::sandbox::CapturedSandboxSnapshot::new(
+            super::sandbox::FirecrackerCapturedSnapshot::new(
+                manifest,
+                config.managed_snapshot_root.clone(),
+            ),
+        ))
+    }
+
     fn decode_paused_state(
         &self,
         artifact_root: PathBuf,

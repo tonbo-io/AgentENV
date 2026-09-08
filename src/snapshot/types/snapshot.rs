@@ -60,7 +60,10 @@ impl SnapshotPublishMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnapshotPublishSource {
     Template,
-    Sandbox { source_sandbox_id: String },
+    Sandbox {
+        source_sandbox_id: String,
+        source_activation_id: Option<uuid::Uuid>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,8 +152,16 @@ impl TemplateBuildInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnapshotSource {
-    Template { build: TemplateBuildInfo },
-    Sandbox { source_sandbox_id: String },
+    Template {
+        build: TemplateBuildInfo,
+    },
+    Sandbox {
+        source_sandbox_id: String,
+        // Existing committed snapshots have no activation attribution. Only
+        // legacy capture replay accepts None; paused publications require Some.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_activation_id: Option<uuid::Uuid>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,8 +380,15 @@ impl SnapshotRecord {
         source: SnapshotPublishSource,
         now_unix_ms: i64,
     ) {
-        if let SnapshotPublishSource::Sandbox { source_sandbox_id } = source {
-            self.source = SnapshotSource::Sandbox { source_sandbox_id };
+        if let SnapshotPublishSource::Sandbox {
+            source_sandbox_id,
+            source_activation_id,
+        } = source
+        {
+            self.source = SnapshotSource::Sandbox {
+                source_sandbox_id,
+                source_activation_id,
+            };
         }
         if let SnapshotSource::Template { build } = &mut self.source {
             build.status = TemplateBuildStatus::Ready;
@@ -389,6 +407,7 @@ impl SnapshotRecord {
     pub fn matches_committed_sandbox_publication(
         &self,
         source_sandbox_id: &str,
+        source_activation_id: Option<uuid::Uuid>,
         alias: Option<&SnapshotAlias>,
     ) -> bool {
         self.committed.is_some()
@@ -397,7 +416,8 @@ impl SnapshotRecord {
                 &self.source,
                 SnapshotSource::Sandbox {
                     source_sandbox_id: existing_source,
-                } if existing_source == source_sandbox_id
+                    source_activation_id: existing_activation,
+                } if existing_source == source_sandbox_id && *existing_activation == source_activation_id
             )
     }
 

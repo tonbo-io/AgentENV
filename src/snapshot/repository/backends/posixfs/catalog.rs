@@ -677,9 +677,13 @@ impl PosixFsCatalogStore {
                     error_reason: None,
                 },
             },
-            SnapshotPublishSource::Sandbox { source_sandbox_id } => {
-                SnapshotSource::Sandbox { source_sandbox_id }
-            }
+            SnapshotPublishSource::Sandbox {
+                source_sandbox_id,
+                source_activation_id,
+            } => SnapshotSource::Sandbox {
+                source_sandbox_id,
+                source_activation_id,
+            },
         };
 
         Ok(SnapshotRecord {
@@ -726,6 +730,7 @@ impl PosixFsCatalogStore {
             match &record.source {
                 SnapshotSource::Sandbox {
                     source_sandbox_id: record_source_sandbox_id,
+                    ..
                 } if record_source_sandbox_id == source_sandbox_id => {}
                 _ => return false,
             }
@@ -865,6 +870,7 @@ mod tests {
                 SnapshotId::generate(),
                 "sandbox-one",
                 SnapshotPublishSource::Sandbox {
+                    source_activation_id: None,
                     source_sandbox_id: "sandbox-1".to_string(),
                 },
             ),
@@ -875,6 +881,7 @@ mod tests {
                 SnapshotId::generate(),
                 "sandbox-two",
                 SnapshotPublishSource::Sandbox {
+                    source_activation_id: None,
                     source_sandbox_id: "sandbox-2".to_string(),
                 },
             ),

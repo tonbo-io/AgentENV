@@ -861,6 +861,22 @@ components:
           default: false
           description: Keep the source sandbox paused before publishing and returning the committed snapshot. If publication fails, AgentENV attempts to resume the source so the request can be retried.
 
+    PausedSandboxSnapshotRequest:
+      type: object
+      required: [snapshotId, expectedActivationID]
+      properties:
+        snapshotId:
+          type: string
+          format: uuid
+          description: Stable publication identity used for retries. The same snapshot ID must not be reused for another source activation.
+        expectedActivationID:
+          type: string
+          format: uuid
+          description: Nonzero activation whose retained paused state is being published. This operation never starts guest execution or obtains new funding.
+        name:
+          type: string
+          description: Optional snapshot template name.
+
     SandboxForkRequest:
       type: object
       properties:
@@ -2212,6 +2228,43 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/SandboxSnapshotRequest"
+      responses:
+        "201":
+          description: Snapshot created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotInfo"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "409":
+          $ref: "#/components/responses/409"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /sandboxes/{sandboxID}/paused-snapshots:
+    post:
+      summary: Publish retained paused snapshot
+      description: Publish an existing paused state under its activation fence without starting the guest. Resume and delete cannot remove the source artifacts during publication. Success, failure and caller cancellation leave the source paused. A running or superseded activation is rejected.
+      tags: [sandboxes]
+      security:
+        - ApiKeyAuth: []
+        - AuthProviderBearerAuth: []
+          AuthProviderTeamAuth: []
+        - AdminApiKeyAuth: []
+          AdminTeamAuth: []
+      parameters:
+        - $ref: "#/components/parameters/sandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PausedSandboxSnapshotRequest"
       responses:
         "201":
           description: Snapshot created successfully

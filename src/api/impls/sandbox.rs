@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -32,6 +32,29 @@ use agentenv_http_server::types::Nullable;
 use super::attached_drives::resolve_attached_drives;
 use super::pagination::PaginationCursor;
 use super::ApiImpl;
+
+fn snapshot_publication_metadata(
+    capture: &crate::orchestrator::SnapshotCaptureResult,
+    id: SnapshotId,
+    alias: Option<SnapshotAlias>,
+    activation: Option<uuid::Uuid>,
+) -> SnapshotPublishMetadata {
+    SnapshotPublishMetadata {
+        id,
+        alias,
+        source: SnapshotPublishSource::Sandbox {
+            source_sandbox_id: capture.metadata.id.to_string(),
+            source_activation_id: activation,
+        },
+        context: capture.metadata.context.clone(),
+        startup: capture.metadata.startup.clone(),
+        resources: capture.metadata.resources,
+        runtime_versions: capture.metadata.runtime_versions.clone(),
+        virtualization_mode: capture.metadata.virtualization_mode,
+        image_configs: capture.metadata.image_configs.clone(),
+        custom_extension_params: capture.metadata.custom_extension_params.clone(),
+    }
+}
 
 fn sandbox_not_found(id: impl Into<String>) -> models::Error {
     ApiImpl::error(404, format!("sandbox {} not found", id.into()))
@@ -1286,6 +1309,97 @@ impl Sandboxes<()> for ApiImpl {
         }
     }
 
+    async fn sandboxes_sandbox_id_paused_snapshots_post(
+        &self,
+        _method: &Method,
+        _host: &Host,
+        _cookies: &CookieJar,
+        _claims: &Self::Claims,
+        path_params: &models::SandboxesSandboxIdPausedSnapshotsPostPathParams,
+        body: &models::PausedSandboxSnapshotRequest,
+    ) -> Result<SandboxesSandboxIdPausedSnapshotsPostResponse, ()> {
+        use SandboxesSandboxIdPausedSnapshotsPostResponse as Response;
+        let Ok(sandbox_id) = SandboxId::parse_str(&path_params.sandbox_id) else {
+            return Ok(Response::Status404_NotFound(sandbox_not_found(
+                &path_params.sandbox_id,
+            )));
+        };
+        if body.expected_activation_id.is_nil() || body.snapshot_id.is_nil() {
+            return Ok(Response::Status400_BadRequest(Self::error(
+                400,
+                "snapshot and activation identities must be nonzero",
+            )));
+        }
+        let alias = match body.name.as_deref().map(SnapshotAlias::parse).transpose() {
+            Ok(alias) => alias,
+            Err(error) => {
+                return Ok(Response::Status400_BadRequest(Self::error(
+                    400,
+                    format!("invalid snapshot alias: {error}"),
+                )))
+            }
+        };
+        let id = SnapshotId::parse(&body.snapshot_id.to_string()).expect("validated UUID");
+        match self.snapshot_manager.get(id.to_string()).await {
+            Ok(Some(record))
+                if record.matches_committed_sandbox_publication(
+                    &sandbox_id.to_string(),
+                    Some(body.expected_activation_id),
+                    alias.as_ref(),
+                ) =>
+            {
+                return Ok(Response::Status201_SnapshotCreatedSuccessfully(
+                    record.into(),
+                ))
+            }
+            Ok(Some(_)) => {
+                return Ok(Response::Status409_Conflict(Self::error(
+                    409,
+                    "snapshot ID belongs to another publication",
+                )))
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Ok(Response::Status500_ServerError(
+                    Self::snapshot_manager_error(&error),
+                ))
+            }
+        }
+        let manager = Arc::clone(&self.snapshot_manager);
+        let activation = body.expected_activation_id;
+        let result = self
+            .orchestrator
+            .with_paused_snapshot(sandbox_id, activation, move |capture| async move {
+                manager
+                    .publish_captured(
+                        snapshot_publication_metadata(&capture, id, alias, Some(activation)),
+                        capture.captured_snapshot,
+                    )
+                    .await
+            })
+            .await;
+        Ok(match result {
+            Ok(Ok(record)) => Response::Status201_SnapshotCreatedSuccessfully(record.into()),
+            Ok(Err(error @ crate::snapshot::RepositoryError::SnapshotIdConflict { .. })) => {
+                Response::Status409_Conflict(Self::error(409, error.to_string()))
+            }
+            Ok(Err(error)) => Self::client_or_server_response(
+                Self::bad_request_for_repository_build_error(&error)
+                    .unwrap_or_else(|| Self::error(500, error.to_string())),
+                Response::Status400_BadRequest,
+                Response::Status500_ServerError,
+            ),
+            Err(OrchestratorError::SandboxNotFound(id)) => {
+                Response::Status404_NotFound(sandbox_not_found(id))
+            }
+            Err(
+                error @ (OrchestratorError::ActivationConflict(_)
+                | OrchestratorError::InvalidSandboxState { .. }),
+            ) => Response::Status409_Conflict(Self::error(409, error.to_string())),
+            Err(error) => Response::Status500_ServerError(Self::internal_error(&error)),
+        })
+    }
+
     async fn sandboxes_sandbox_id_snapshots_post(
         &self,
         _method: &Method,
@@ -1330,6 +1444,7 @@ impl Sandboxes<()> for ApiImpl {
                 Ok(Some(record))
                     if record.matches_committed_sandbox_publication(
                         &sandbox_id.to_string(),
+                        None,
                         alias.as_ref(),
                     ) =>
                 {
@@ -1402,20 +1517,12 @@ impl Sandboxes<()> for ApiImpl {
             .time(
                 "publish",
                 self.snapshot_manager.publish_captured(
-                    SnapshotPublishMetadata {
-                        id: requested_snapshot_id.unwrap_or_else(SnapshotId::generate),
-                        alias: alias.clone(),
-                        source: SnapshotPublishSource::Sandbox {
-                            source_sandbox_id: capture.metadata.id.to_string(),
-                        },
-                        context: capture.metadata.context.clone(),
-                        startup: capture.metadata.startup.clone(),
-                        resources: capture.metadata.resources,
-                        runtime_versions: capture.metadata.runtime_versions.clone(),
-                        virtualization_mode: capture.metadata.virtualization_mode,
-                        image_configs: capture.metadata.image_configs.clone(),
-                        custom_extension_params: capture.metadata.custom_extension_params.clone(),
-                    },
+                    snapshot_publication_metadata(
+                        &capture,
+                        requested_snapshot_id.unwrap_or_else(SnapshotId::generate),
+                        alias.clone(),
+                        None,
+                    ),
                     capture.captured_snapshot,
                 ),
             )

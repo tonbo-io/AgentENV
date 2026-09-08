@@ -639,9 +639,13 @@ impl OssSnapshotRepository {
                         error_reason: None,
                     },
                 },
-                SnapshotPublishSource::Sandbox { source_sandbox_id } => {
-                    SnapshotSource::Sandbox { source_sandbox_id }
-                }
+                SnapshotPublishSource::Sandbox {
+                    source_sandbox_id,
+                    source_activation_id,
+                } => SnapshotSource::Sandbox {
+                    source_sandbox_id,
+                    source_activation_id,
+                },
             };
             SnapshotRecord {
                 id,
@@ -1059,6 +1063,7 @@ impl OssSnapshotRepository {
             match &record.source {
                 SnapshotSource::Sandbox {
                     source_sandbox_id: record_source_sandbox_id,
+                    ..
                 } if record_source_sandbox_id == source_sandbox_id => {}
                 _ => return false,
             }

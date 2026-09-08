@@ -193,6 +193,12 @@ pub struct SandboxesSandboxIdPausePostQueryParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxesSandboxIdPausedSnapshotsPostPathParams {
+    pub sandbox_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxesSandboxIdRefreshesPostPathParams {
     pub sandbox_id: String,
 }
@@ -5748,6 +5754,182 @@ impl std::str::FromStr for NodeStatus {
             "connecting" => std::result::Result::Ok(NodeStatus::NodeStatusConnecting),
             "unhealthy" => std::result::Result::Ok(NodeStatus::NodeStatusUnhealthy),
             _ => std::result::Result::Err(format!(r#"Value not valid: {s}"#)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct PausedSandboxSnapshotRequest {
+    /// Stable publication identity used for retries. The same snapshot ID must not be reused for another source activation.
+    #[serde(rename = "snapshotId")]
+    pub snapshot_id: uuid::Uuid,
+
+    /// Nonzero activation whose retained paused state is being published. This operation never starts guest execution or obtains new funding.
+    #[serde(rename = "expectedActivationID")]
+    pub expected_activation_id: uuid::Uuid,
+
+    /// Optional snapshot template name.
+    #[serde(rename = "name")]
+    #[validate(custom(function = "check_xss_string"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl PausedSandboxSnapshotRequest {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        snapshot_id: uuid::Uuid,
+        expected_activation_id: uuid::Uuid,
+    ) -> PausedSandboxSnapshotRequest {
+        PausedSandboxSnapshotRequest {
+            snapshot_id,
+            expected_activation_id,
+            name: None,
+        }
+    }
+}
+
+/// Converts the PausedSandboxSnapshotRequest value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for PausedSandboxSnapshotRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            // Skipping snapshotId in query parameter serialization
+
+            // Skipping expectedActivationID in query parameter serialization
+            self.name
+                .as_ref()
+                .map(|name| ["name".to_string(), name.to_string()].join(",")),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a PausedSandboxSnapshotRequest value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for PausedSandboxSnapshotRequest {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub snapshot_id: Vec<uuid::Uuid>,
+            pub expected_activation_id: Vec<uuid::Uuid>,
+            pub name: Vec<String>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing PausedSandboxSnapshotRequest".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "snapshotId" => intermediate_rep.snapshot_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "expectedActivationID" => intermediate_rep.expected_activation_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "name" => intermediate_rep.name.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing PausedSandboxSnapshotRequest".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(PausedSandboxSnapshotRequest {
+            snapshot_id: intermediate_rep
+                .snapshot_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "snapshotId missing in PausedSandboxSnapshotRequest".to_string())?,
+            expected_activation_id: intermediate_rep
+                .expected_activation_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "expectedActivationID missing in PausedSandboxSnapshotRequest".to_string()
+                })?,
+            name: intermediate_rep.name.into_iter().next(),
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<PausedSandboxSnapshotRequest> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<PausedSandboxSnapshotRequest>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<PausedSandboxSnapshotRequest>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for PausedSandboxSnapshotRequest - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<PausedSandboxSnapshotRequest> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <PausedSandboxSnapshotRequest as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into PausedSandboxSnapshotRequest - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
         }
     }
 }

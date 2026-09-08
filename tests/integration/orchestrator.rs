@@ -292,6 +292,7 @@ async fn orchestrator_capture_snapshot_can_be_published_and_relaunched() -> Resu
                     id: SnapshotId::generate(),
                     alias: Some(SnapshotAlias::parse(&published_alias)?),
                     source: SnapshotPublishSource::Sandbox {
+                        source_activation_id: None,
                         source_sandbox_id: sandbox_id_str.clone(),
                     },
                     context: capture.metadata.context.clone(),
@@ -312,7 +313,7 @@ async fn orchestrator_capture_snapshot_can_be_published_and_relaunched() -> Resu
         assert!(matches!(
             &record.source,
             SnapshotSource::Sandbox {
-                source_sandbox_id
+                source_sandbox_id, ..
             } if source_sandbox_id == &sandbox_id_str
         ));
         let committed = record
@@ -453,6 +454,7 @@ async fn orchestrator_capture_snapshot_can_atomically_leave_source_paused() -> R
                         Uuid::now_v7()
                     ))?),
                     source: SnapshotPublishSource::Sandbox {
+                        source_activation_id: None,
                         source_sandbox_id: sandbox_id.to_string(),
                     },
                     context: capture.metadata.context.clone(),

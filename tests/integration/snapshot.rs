@@ -97,6 +97,7 @@ async fn publish_captured_snapshot_for_test(
                 id: SnapshotId::generate(),
                 alias: Some(SnapshotAlias::parse(alias)?),
                 source: SnapshotPublishSource::Sandbox {
+                    source_activation_id: None,
                     source_sandbox_id: source_sandbox_id.to_string(),
                 },
                 context: agentenv::snapshot::CommandContext::default(),

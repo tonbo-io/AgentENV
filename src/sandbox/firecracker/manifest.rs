@@ -72,6 +72,31 @@ pub struct FirecrackerAttachedDriveArtifacts {
 }
 
 impl FirecrackerSnapshotManifest {
+    pub(crate) fn from_snapshot_config(
+        config: &super::config::FirecrackerSnapshotConfig,
+    ) -> Result<Self> {
+        let rootfs = config
+            .common
+            .rootfs_image_config
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("paused snapshot has no rootfs image config"))?;
+        let rootfs_size = config
+            .common
+            .rootfs_virtual_size
+            .ok_or_else(|| anyhow::anyhow!("paused snapshot has no rootfs size"))?;
+        Self::new(
+            config.vm_state_path.clone(),
+            config.mem_overlaybd_config.image_config_path.clone(),
+            config.mem_virtual_size,
+            rootfs.image_config_path.clone(),
+            rootfs_size,
+            config
+                .common
+                .resolved_tools_drive_path(crate::cfg::ConfigManager::global_config())?,
+            &config.common.extra_drives,
+        )
+    }
+
     pub fn new(
         vm_state_path: impl Into<PathBuf>,
         mem_image_config_path: impl Into<PathBuf>,
