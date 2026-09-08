@@ -5342,7 +5342,9 @@ async fn cancelled_terminal_command_keeps_killing_fence_until_physical_stop() ->
             .delete_sandbox_with_terminal_command(id, activation, "/fixture-stop".into())
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), entered.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("shutdown command entered");
     assert_eq!(
         orchestrator.store.get(&id).await?.unwrap().state,
         SandboxState::Killing
@@ -5353,7 +5355,8 @@ async fn cancelled_terminal_command_keeps_killing_fence_until_physical_stop() ->
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await?;
+    .await
+    .expect("owned deletion finishes after caller cancellation");
     assert_eq!(behavior.stop_calls(), 1);
     Ok(())
 }

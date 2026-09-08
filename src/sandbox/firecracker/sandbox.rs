@@ -422,7 +422,8 @@ impl SandboxBackend for FirecrackerSandbox {
             .envd_instance
             .as_ref()
             .context("Sandbox is not running")?;
-        let output = Executor::new(envd).run_command(command, &[]).await?;
+        let executor = Executor::new(envd);
+        let output = Box::pin(executor.run_command(command, &[])).await?;
         anyhow::ensure!(
             output.exit_code == 0,
             "terminal command exited {}",
