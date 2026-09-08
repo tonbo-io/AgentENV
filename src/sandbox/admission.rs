@@ -337,8 +337,13 @@ impl NodeAdmission {
             let entry = &ledger.entries[&id];
             if entry.released && entry.process.as_ref().is_none_or(ProcessHandle::exited) {
                 if fs::remove_dir(&entry.leaf).is_ok() || !entry.leaf.exists() {
+                    let reservation = ledger.budget.reservations.remove(&id);
+                    info!(
+                        activation_id = %id,
+                        released_memory_bytes = reservation.map_or(0, |value| value.memory_bytes),
+                        "released stopped runtime admission"
+                    );
                     ledger.entries.remove(&id);
-                    ledger.budget.reservations.remove(&id);
                 }
                 continue;
             }
@@ -365,6 +370,13 @@ impl NodeAdmission {
                 let reservation = ledger.budget.reservations.get_mut(&id).unwrap();
                 reservation.memory_bytes = next;
                 reservation.disk_bytes = reservation.disk_bytes.saturating_add(next - old);
+                info!(
+                    activation_id = %id,
+                    observed_memory_bytes = current,
+                    previous_memory_bytes = old,
+                    reserved_memory_bytes = next,
+                    "grew runtime admission"
+                );
                 available = available.saturating_sub(next - old);
             }
         }
