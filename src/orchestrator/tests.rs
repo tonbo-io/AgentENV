@@ -5603,7 +5603,10 @@ async fn fenced_resume_rejects_stale_source_and_never_renews_running_instance() 
 
 #[tokio::test]
 async fn funded_proxy_routes_follow_launch_pause_and_resume_activation() -> Result<()> {
-    let (orchestrator, _) = creation_test_with_start_counter().await;
+    let behavior = Arc::new(MockBehavior::new());
+    behavior.record_execution_configuration();
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior.clone())).await;
     let source = Uuid::now_v7();
     let successor = Uuid::now_v7();
     let lease = |activation_id| runtime_policy::ExecutionLease {
@@ -5640,6 +5643,13 @@ async fn funded_proxy_routes_follow_launch_pause_and_resume_activation() -> Resu
         orchestrator.proxy_lookup_for_activation(&id, source).await,
         Err(OrchestratorError::ActivationConflict(_))
     ));
+    let mut paused = orchestrator.store.get(&id).await?.unwrap();
+    paused.auto_resume = true;
+    orchestrator.store.update(paused).await?;
+    assert_eq!(
+        orchestrator.proxy_lookup_for(&id).await?,
+        ProxyLookupResult::Paused { auto_resume: false }
+    );
     // A lookup cannot resume the retained VM as a side effect.
     assert_eq!(
         orchestrator.store.get(&id).await?.unwrap().state,
@@ -5659,6 +5669,14 @@ async fn funded_proxy_routes_follow_launch_pause_and_resume_activation() -> Resu
         orchestrator.proxy_lookup_for_activation(&id, source).await,
         Err(OrchestratorError::ActivationConflict(_))
     ));
+    assert_eq!(
+        behavior
+            .configured_executions()
+            .into_iter()
+            .map(|lease| lease.unwrap().activation_id)
+            .collect::<Vec<_>>(),
+        vec![source, successor]
+    );
     orchestrator
         .delete_sandbox_for_activation(id, Some(successor))
         .await?;

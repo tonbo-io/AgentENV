@@ -887,7 +887,7 @@ where
             Some(metadata) if metadata.state == SandboxState::Paused => {
                 debug!(auto_resume = metadata.auto_resume, "sandbox is paused");
                 ProxyLookupResult::Paused {
-                    auto_resume: metadata.auto_resume,
+                    auto_resume: metadata.auto_resume && metadata.execution_lease.is_none(),
                 }
             }
             Some(metadata) => {

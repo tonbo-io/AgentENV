@@ -111,6 +111,8 @@ struct HostProxyRoute {
 
 #[derive(Debug)]
 enum ProxyRequestError {
+    InvalidExecutionTarget,
+    ExecutionTargetConflict,
     MissingSandboxId,
     InvalidSandboxId,
     MissingTargetPort,
@@ -125,6 +127,7 @@ enum ProxyRequestError {
     InternalServerError,
 }
 
+const EXECUTION_TARGET_HEADER: &str = env!("AENV_EXECUTION_PROXY_HEADER");
 const PROXY_ROUTE: &str = "/proxy";
 const ENVD_STREAM_INPUT_PATH: &str = "/process.Process/StreamInput";
 /// Header carrying the target sandbox chosen by the client.
@@ -772,52 +775,69 @@ async fn resolve_proxy_request(
     let sandbox_id = parse_sandbox_id_header(&parts.headers)?;
     let target_port = parse_target_port_header(&parts.headers)?;
 
+    let execution = parse_execution_target(&parts.headers)?;
     let mut auto_resume_attempted = false;
-    let target = loop {
-        match api_impl.orchestrator().proxy_lookup_for(&sandbox_id).await {
-            Ok(ProxyLookupResult::Ready(target)) => break target,
-            Ok(ProxyLookupResult::NotFound) => {
-                return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
-            }
-            Ok(ProxyLookupResult::Paused { auto_resume: true }) => {
-                if auto_resume_attempted {
+    let target = if let Some(execution) = execution {
+        api_impl
+            .check_launch_target(Some(&execution.node))
+            .map_err(|_| ProxyRequestError::ExecutionTargetConflict)?;
+        api_impl
+            .orchestrator()
+            .proxy_lookup_for_activation(&sandbox_id, execution.activation_id)
+            .await
+            .map_err(|_| ProxyRequestError::ExecutionTargetConflict)?
+    } else {
+        loop {
+            match api_impl.orchestrator().proxy_lookup_for(&sandbox_id).await {
+                Ok(ProxyLookupResult::Ready(target)) => {
+                    if target.activation_id.is_some() {
+                        return Err(ProxyRequestError::ExecutionTargetConflict);
+                    }
+                    break target;
+                }
+                Ok(ProxyLookupResult::NotFound) => {
+                    return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
+                }
+                Ok(ProxyLookupResult::Paused { auto_resume: true }) => {
+                    if auto_resume_attempted {
+                        return Err(ProxyRequestError::AutoResumeFailed(sandbox_id));
+                    }
+                    try_auto_resume(api_impl, sandbox_id).await?;
+                    auto_resume_attempted = true;
+                    continue;
+                }
+                Ok(ProxyLookupResult::Paused { auto_resume: false }) => {
+                    return Err(ProxyRequestError::SandboxUnavailable(
+                        sandbox_id,
+                        SandboxState::Paused,
+                    ))
+                }
+                Ok(ProxyLookupResult::Unavailable(_)) | Ok(ProxyLookupResult::RouteMissing)
+                    if auto_resume_attempted =>
+                {
+                    return Err(ProxyRequestError::AutoResumeFailed(sandbox_id))
+                }
+                Ok(ProxyLookupResult::Unavailable(state)) => {
+                    return Err(ProxyRequestError::SandboxUnavailable(sandbox_id, state))
+                }
+                Ok(ProxyLookupResult::RouteMissing) => {
+                    return Err(ProxyRequestError::MissingRuntimeRoute(sandbox_id))
+                }
+                Err(OrchestratorError::SandboxNotFound(_)) => {
+                    return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
+                }
+                Err(err) if auto_resume_attempted => {
+                    warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %err,
+                        "failed to resolve proxy target after auto-resume"
+                    );
                     return Err(ProxyRequestError::AutoResumeFailed(sandbox_id));
                 }
-                try_auto_resume(api_impl, sandbox_id).await?;
-                auto_resume_attempted = true;
-                continue;
-            }
-            Ok(ProxyLookupResult::Paused { auto_resume: false }) => {
-                return Err(ProxyRequestError::SandboxUnavailable(
-                    sandbox_id,
-                    SandboxState::Paused,
-                ))
-            }
-            Ok(ProxyLookupResult::Unavailable(_)) | Ok(ProxyLookupResult::RouteMissing)
-                if auto_resume_attempted =>
-            {
-                return Err(ProxyRequestError::AutoResumeFailed(sandbox_id))
-            }
-            Ok(ProxyLookupResult::Unavailable(state)) => {
-                return Err(ProxyRequestError::SandboxUnavailable(sandbox_id, state))
-            }
-            Ok(ProxyLookupResult::RouteMissing) => {
-                return Err(ProxyRequestError::MissingRuntimeRoute(sandbox_id))
-            }
-            Err(OrchestratorError::SandboxNotFound(_)) => {
-                return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
-            }
-            Err(err) if auto_resume_attempted => {
-                warn!(
-                    sandbox_id = %sandbox_id,
-                    error = %err,
-                    "failed to resolve proxy target after auto-resume"
-                );
-                return Err(ProxyRequestError::AutoResumeFailed(sandbox_id));
-            }
-            Err(err) => {
-                warn!(sandbox_id = %sandbox_id, error = %err, "failed to resolve proxy target");
-                return Err(ProxyRequestError::InternalServerError);
+                Err(err) => {
+                    warn!(sandbox_id = %sandbox_id, error = %err, "failed to resolve proxy target");
+                    return Err(ProxyRequestError::InternalServerError);
+                }
             }
         }
     };
@@ -834,6 +854,25 @@ async fn resolve_proxy_request(
         upstream_uri,
         original_host: parts.headers.get(header::HOST).cloned(),
     })
+}
+
+fn parse_execution_target(
+    headers: &HeaderMap,
+) -> Result<Option<agentenv_http_server::models::ExecutionProxyTarget>, ProxyRequestError> {
+    let mut values = headers.get_all(EXECUTION_TARGET_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ProxyRequestError::InvalidExecutionTarget);
+    }
+    let target: agentenv_http_server::models::ExecutionProxyTarget =
+        serde_json::from_slice(value.as_bytes())
+            .map_err(|_| ProxyRequestError::InvalidExecutionTarget)?;
+    if target.activation_id.is_nil() {
+        return Err(ProxyRequestError::InvalidExecutionTarget);
+    }
+    Ok(Some(target))
 }
 
 async fn try_auto_resume(
@@ -892,6 +931,13 @@ pub(crate) fn sandbox_not_found_response(sandbox_id: SandboxId) -> Response<Body
 
 fn proxy_error_response(error: &ProxyRequestError) -> Response<Body> {
     let (status, message) = match error {
+        ProxyRequestError::InvalidExecutionTarget => {
+            (StatusCode::BAD_REQUEST, "invalid execution target")
+        }
+        ProxyRequestError::ExecutionTargetConflict => (
+            StatusCode::CONFLICT,
+            "execution target does not match current runtime",
+        ),
         ProxyRequestError::MissingSandboxId => {
             (StatusCode::BAD_REQUEST, "missing sandbox routing header")
         }
@@ -933,7 +979,9 @@ fn proxy_error_response(error: &ProxyRequestError) -> Response<Body> {
     }
 
     match error {
-        ProxyRequestError::MissingSandboxId
+        ProxyRequestError::InvalidExecutionTarget
+        | ProxyRequestError::ExecutionTargetConflict
+        | ProxyRequestError::MissingSandboxId
         | ProxyRequestError::InvalidSandboxId
         | ProxyRequestError::MissingTargetPort
         | ProxyRequestError::InvalidTargetPort
@@ -1023,6 +1071,7 @@ fn build_upstream_uri_with_scheme(
 fn sanitize_request_headers(headers: &mut HeaderMap) {
     // These headers are only for the control-plane hop between the client and
     // AgentENV. Upstream sandbox services should not see them.
+    headers.remove(EXECUTION_TARGET_HEADER);
     headers.remove(SANDBOX_ID_HEADER);
     headers.remove(E2B_SANDBOX_ID_HEADER);
     headers.remove(TARGET_PORT_HEADER);
@@ -1310,7 +1359,7 @@ mod tests {
         template::TemplateBuilder,
     };
 
-    const TEST_API_KEY: &str =
+    pub(super) const TEST_API_KEY: &str =
         "e2b_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
@@ -1833,7 +1882,7 @@ mod tests {
         build_api_with_node_identity(domains, api_key, None).await
     }
 
-    async fn build_api_with_node_identity(
+    pub(super) async fn build_api_with_node_identity(
         domains: Vec<String>,
         api_key: &str,
         identity: Option<crate::identity::NodeIdentity>,
@@ -3279,5 +3328,123 @@ mod tests {
             response.body().as_deref(),
             Some(b"upstream denied websocket".as_slice())
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_target_tests {
+    use super::tests::{build_api_with_node_identity, TEST_API_KEY};
+    use super::*;
+    use std::net::Ipv4Addr;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn proxy_receiver_requires_current_node_and_activation_for_funded_routes() {
+        let cluster = Uuid::new_v4();
+        let service = Uuid::new_v4();
+        let activation = Uuid::new_v4();
+        let id = SandboxId::new();
+        let api = build_api_with_node_identity(
+            Vec::new(),
+            TEST_API_KEY,
+            Some(crate::identity::NodeIdentity {
+                id: "node-a".into(),
+                cluster_id: cluster,
+                service_instance_id: service.to_string(),
+                commit: "test".into(),
+                version: "test".into(),
+            }),
+        )
+        .await;
+        api.orchestrator()
+            .set_proxy_target_for_test(
+                id,
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, Some(activation)),
+                SandboxState::Running,
+            )
+            .await;
+        let target = serde_json::json!({"node":{
+            "nodeID":"node-a", "clusterID":cluster, "serviceInstanceID":service
+        }, "activationID":activation});
+        let request_parts = |target: Option<&serde_json::Value>| {
+            let mut request = Request::builder()
+                .uri("/process.Process/Start")
+                .header(SANDBOX_ID_HEADER, id.to_string())
+                .header(TARGET_PORT_HEADER, "49983");
+            if let Some(target) = target {
+                request = request.header(EXECUTION_TARGET_HEADER, target.to_string());
+            }
+            request.body(Body::empty()).unwrap().into_parts().0
+        };
+        for websocket in [false, true] {
+            let resolved = resolve_proxy_request(
+                &api,
+                "process.Process/Start",
+                &request_parts(Some(&target)),
+                websocket,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolved.sandbox_id, id);
+            assert!(matches!(
+                resolve_proxy_request(&api, "x", &request_parts(None), websocket).await,
+                Err(ProxyRequestError::ExecutionTargetConflict)
+            ));
+            for key in ["nodeID", "clusterID", "serviceInstanceID", "activationID"] {
+                let mut stale = target.clone();
+                if key == "activationID" {
+                    stale[key] = serde_json::json!(Uuid::new_v4());
+                } else {
+                    stale["node"][key] = serde_json::json!(Uuid::new_v4().to_string());
+                }
+                assert!(
+                    matches!(
+                        resolve_proxy_request(&api, "x", &request_parts(Some(&stale)), websocket)
+                            .await,
+                        Err(ProxyRequestError::ExecutionTargetConflict)
+                    ),
+                    "stale {key}"
+                );
+            }
+        }
+        // Removing the published route must not recover it from metadata or resume.
+        api.orchestrator().remove_proxy_route_for_test(&id).await;
+        assert!(matches!(
+            resolve_proxy_request(&api, "x", &request_parts(Some(&target)), false).await,
+            Err(ProxyRequestError::ExecutionTargetConflict)
+        ));
+    }
+
+    #[test]
+    fn execution_header_rejects_ambiguous_and_malformed_input_and_is_not_forwarded() {
+        let mut headers = HeaderMap::new();
+        for invalid in ["", "null", "{}", "not-json"] {
+            headers.insert(
+                EXECUTION_TARGET_HEADER,
+                HeaderValue::from_str(invalid).unwrap(),
+            );
+            assert!(matches!(
+                parse_execution_target(&headers),
+                Err(ProxyRequestError::InvalidExecutionTarget)
+            ));
+        }
+        let valid = serde_json::json!({"node": {"nodeID":"node", "clusterID":Uuid::new_v4(),
+            "serviceInstanceID":Uuid::new_v4()}, "activationID":Uuid::new_v4()})
+        .to_string();
+        headers.insert(
+            EXECUTION_TARGET_HEADER,
+            HeaderValue::from_str(&valid).unwrap(),
+        );
+        assert!(parse_execution_target(&headers).unwrap().is_some());
+        headers.append(
+            EXECUTION_TARGET_HEADER,
+            HeaderValue::from_str(&valid).unwrap(),
+        );
+        assert!(matches!(
+            parse_execution_target(&headers),
+            Err(ProxyRequestError::InvalidExecutionTarget)
+        ));
+        sanitize_request_headers(&mut headers);
+        assert!(!headers.contains_key(EXECUTION_TARGET_HEADER));
     }
 }
