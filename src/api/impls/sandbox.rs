@@ -1383,7 +1383,12 @@ impl Sandboxes<()> for ApiImpl {
             Ok(Err(error @ crate::snapshot::RepositoryError::SnapshotIdConflict { .. })) => {
                 Response::Status409_Conflict(Self::error(409, error.to_string()))
             }
-            Ok(Err(error)) => Response::Status500_ServerError(Self::snapshot_manager_error(&error)),
+            Ok(Err(error)) => Self::client_or_server_response(
+                Self::bad_request_for_repository_build_error(&error)
+                    .unwrap_or_else(|| Self::error(500, error.to_string())),
+                Response::Status400_BadRequest,
+                Response::Status500_ServerError,
+            ),
             Err(OrchestratorError::SandboxNotFound(id)) => {
                 Response::Status404_NotFound(sandbox_not_found(id))
             }
