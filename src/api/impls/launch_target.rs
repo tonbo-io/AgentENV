@@ -1,4 +1,4 @@
-//! One shared incarnation precondition for cold/warm create, resume and fork.
+//! Shared node incarnation precondition for launch and terminal lifecycle requests.
 use super::ApiImpl;
 use agentenv_http_server::models;
 use uuid::Uuid;
@@ -15,7 +15,44 @@ fn matches_target(target: &models::NodeLaunchTarget, actual: Option<(&str, Uuid,
         && target.service_instance_id.to_string() == service
 }
 
+fn lifecycle_target(
+    node: Option<&str>,
+    cluster: Option<Uuid>,
+    service: Option<Uuid>,
+    activation: Option<Uuid>,
+) -> Result<Option<models::NodeLaunchTarget>, ()> {
+    match (node, cluster, service) {
+        // Existing SQL orchestrator and public SDK lifecycle callers omit this
+        // tuple until Kubernetes execution-authority handoff retires them.
+        (None, None, None) => Ok(None),
+        (Some(node), Some(cluster), Some(service)) if activation.is_some_and(|id| !id.is_nil()) => {
+            Ok(Some(models::NodeLaunchTarget::new(
+                node.to_owned(),
+                cluster,
+                service,
+            )))
+        }
+        _ => Err(()),
+    }
+}
+
 impl ApiImpl {
+    pub(crate) fn check_lifecycle_target(
+        &self,
+        node: Option<&str>,
+        cluster: Option<Uuid>,
+        service: Option<Uuid>,
+        activation: Option<Uuid>,
+    ) -> Result<(), models::Error> {
+        let target = lifecycle_target(node, cluster, service, activation).map_err(|_| {
+            Self::error(
+                409,
+                "lifecycle requires a complete node target and activation",
+            )
+        })?;
+        self.check_launch_target(target.as_ref())
+    }
+
     pub(crate) fn check_launch_target(
         &self,
         target: Option<&models::NodeLaunchTarget>,
@@ -38,7 +75,7 @@ impl ApiImpl {
         } else {
             Err(Self::error(
                 409,
-                "launch does not address this exact node service instance",
+                "request does not address this exact node service instance",
             ))
         }
     }
@@ -47,6 +84,32 @@ impl ApiImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lifecycle_target_requires_complete_tuple_and_activation() {
+        let cluster = Uuid::from_u128(1);
+        let service = Uuid::from_u128(2);
+        let activation = Uuid::from_u128(3);
+        for mask in 0..8 {
+            let node = (mask & 1 != 0).then_some("node-a");
+            let cluster = (mask & 2 != 0).then_some(cluster);
+            let service = (mask & 4 != 0).then_some(service);
+            for expected_activation in [None, Some(Uuid::nil()), Some(activation)] {
+                let result = lifecycle_target(node, cluster, service, expected_activation);
+                if mask == 0 {
+                    assert!(result.unwrap().is_none());
+                } else if mask == 7 && expected_activation == Some(activation) {
+                    let target = result.unwrap().unwrap();
+                    assert!(matches_target(
+                        &target,
+                        Some(("node-a", cluster.unwrap(), &service.unwrap().to_string()))
+                    ));
+                } else {
+                    assert!(result.is_err(), "partial target mask {mask}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn stale_wrong_missing_and_nil_node_identity_cannot_launch() {
         let target =

@@ -911,6 +911,14 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdDeletePathParams,
         query_params: &models::SandboxesSandboxIdDeleteQueryParams,
     ) -> Result<SandboxesSandboxIdDeleteResponse, ()> {
+        if let Err(error) = self.check_lifecycle_target(
+            query_params.expected_node_id.as_deref(),
+            query_params.expected_cluster_id,
+            query_params.expected_service_instance_id,
+            query_params.expected_activation_id,
+        ) {
+            return Ok(SandboxesSandboxIdDeleteResponse::Status409_Conflict(error));
+        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdDeleteResponse::Status404_NotFound(
@@ -1272,6 +1280,16 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdPausePostPathParams,
         query_params: &models::SandboxesSandboxIdPausePostQueryParams,
     ) -> Result<SandboxesSandboxIdPausePostResponse, ()> {
+        if let Err(error) = self.check_lifecycle_target(
+            query_params.expected_node_id.as_deref(),
+            query_params.expected_cluster_id,
+            query_params.expected_service_instance_id,
+            query_params.expected_activation_id,
+        ) {
+            return Ok(SandboxesSandboxIdPausePostResponse::Status409_Conflict(
+                error,
+            ));
+        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdPausePostResponse::Status404_NotFound(
