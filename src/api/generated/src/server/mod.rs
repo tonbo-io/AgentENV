@@ -46,6 +46,10 @@ where
         .route("/nodes", get(nodes_get::<I, A, E, C>))
         .route("/nodes/{node_id}", get(nodes_node_id_get::<I, A, E, C>))
         .route(
+            "/nodes/{node_id}/activation-revocations",
+            post(nodes_node_id_activation_revocations_post::<I, A, E, C>),
+        )
+        .route(
             "/nodes/{node_id}/drain",
             post(nodes_node_id_drain_post::<I, A, E, C>),
         )
@@ -252,6 +256,208 @@ where
                 .await;
         }
     };
+
+    resp.map_err(|e| {
+        error!(error = ?e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+#[derive(validator::Validate)]
+#[allow(dead_code)]
+struct NodesNodeIdActivationRevocationsPostBodyValidator<'a> {
+    #[validate(nested)]
+    body: &'a models::ActivationRevocationRequest,
+}
+
+#[tracing::instrument(skip_all)]
+fn nodes_node_id_activation_revocations_post_validation(
+    path_params: models::NodesNodeIdActivationRevocationsPostPathParams,
+    body: models::ActivationRevocationRequest,
+) -> std::result::Result<
+    (
+        models::NodesNodeIdActivationRevocationsPostPathParams,
+        models::ActivationRevocationRequest,
+    ),
+    ValidationErrors,
+> {
+    path_params.validate()?;
+    let b = NodesNodeIdActivationRevocationsPostBodyValidator { body: &body };
+    b.validate()?;
+
+    Ok((path_params, body))
+}
+/// NodesNodeIdActivationRevocationsPost - POST /nodes/{nodeID}/activation-revocations
+#[tracing::instrument(skip_all)]
+async fn nodes_node_id_activation_revocations_post<I, A, E, C>(
+    method: Method,
+    TypedHeader(host): TypedHeader<Host>,
+    cookies: CookieJar,
+    headers: HeaderMap,
+    Path(path_params): Path<models::NodesNodeIdActivationRevocationsPostPathParams>,
+    State(api_impl): State<I>,
+    Json(body): Json<models::ActivationRevocationRequest>,
+) -> Result<Response, StatusCode>
+where
+    I: AsRef<A> + Send + Sync,
+    A: apis::admin::Admin<E, Claims = C> + apis::ApiKeyAuthHeader<Claims = C> + Send + Sync,
+    E: std::fmt::Debug + Send + Sync + 'static,
+{
+    // Authentication
+    let claims_in_header = api_impl
+        .as_ref()
+        .extract_claims_from_header(&headers, "X-API-Key")
+        .await;
+    let claims = None.or(claims_in_header);
+    let Some(claims) = claims else {
+        return response_with_status_code_only(StatusCode::UNAUTHORIZED);
+    };
+
+    #[allow(clippy::redundant_closure)]
+    let validation = tokio::task::spawn_blocking(move || {
+        nodes_node_id_activation_revocations_post_validation(path_params, body)
+    })
+    .await
+    .unwrap();
+
+    let Ok((path_params, body)) = validation else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(validation.unwrap_err().to_string()))
+            .map_err(|_| StatusCode::BAD_REQUEST);
+    };
+
+    let result = api_impl
+        .as_ref()
+        .nodes_node_id_activation_revocations_post(
+            &method,
+            &host,
+            &cookies,
+            &claims,
+            &path_params,
+            &body,
+        )
+        .await;
+
+    let mut response = Response::builder();
+
+    let resp = match result {
+                                            Ok(rsp) => match rsp {
+                                                apis::admin::NodesNodeIdActivationRevocationsPostResponse::Status200_DurableAdmissionDisposition
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(200);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::admin::NodesNodeIdActivationRevocationsPostResponse::Status400_BadRequest
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(400);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::admin::NodesNodeIdActivationRevocationsPostResponse::Status401_AuthenticationError
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(401);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::admin::NodesNodeIdActivationRevocationsPostResponse::Status404_NotFound
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(404);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::admin::NodesNodeIdActivationRevocationsPostResponse::Status409_NodeInstanceMismatch
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(409);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                                apis::admin::NodesNodeIdActivationRevocationsPostResponse::Status500_ServerError
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(500);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
+                                                },
+                                            },
+                                            Err(why) => {
+                                                    // Application code returned an error. This should not happen, as the implementation should
+                                                    // return a valid response.
+                                                    return api_impl.as_ref().handle_error(&method, &host, &cookies, why).await;
+                                            },
+                                        };
 
     resp.map_err(|e| {
         error!(error = ?e);
@@ -1754,10 +1960,18 @@ where
 #[tracing::instrument(skip_all)]
 fn sandboxes_sandbox_id_delete_validation(
     path_params: models::SandboxesSandboxIdDeletePathParams,
-) -> std::result::Result<(models::SandboxesSandboxIdDeletePathParams,), ValidationErrors> {
+    query_params: models::SandboxesSandboxIdDeleteQueryParams,
+) -> std::result::Result<
+    (
+        models::SandboxesSandboxIdDeletePathParams,
+        models::SandboxesSandboxIdDeleteQueryParams,
+    ),
+    ValidationErrors,
+> {
     path_params.validate()?;
+    query_params.validate()?;
 
-    Ok((path_params,))
+    Ok((path_params, query_params))
 }
 /// SandboxesSandboxIdDelete - DELETE /sandboxes/{sandboxID}
 #[tracing::instrument(skip_all)]
@@ -1767,6 +1981,7 @@ async fn sandboxes_sandbox_id_delete<I, A, E, C>(
     cookies: CookieJar,
     headers: HeaderMap,
     Path(path_params): Path<models::SandboxesSandboxIdDeletePathParams>,
+    QueryExtra(query_params): QueryExtra<models::SandboxesSandboxIdDeleteQueryParams>,
     State(api_impl): State<I>,
 ) -> Result<Response, StatusCode>
 where
@@ -1793,12 +2008,13 @@ where
     };
 
     #[allow(clippy::redundant_closure)]
-    let validation =
-        tokio::task::spawn_blocking(move || sandboxes_sandbox_id_delete_validation(path_params))
-            .await
-            .unwrap();
+    let validation = tokio::task::spawn_blocking(move || {
+        sandboxes_sandbox_id_delete_validation(path_params, query_params)
+    })
+    .await
+    .unwrap();
 
-    let Ok((path_params,)) = validation else {
+    let Ok((path_params, query_params)) = validation else {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Body::from(validation.unwrap_err().to_string()))
@@ -1807,7 +2023,14 @@ where
 
     let result = api_impl
         .as_ref()
-        .sandboxes_sandbox_id_delete(&method, &host, &cookies, &claims, &path_params)
+        .sandboxes_sandbox_id_delete(
+            &method,
+            &host,
+            &cookies,
+            &claims,
+            &path_params,
+            &query_params,
+        )
         .await;
 
     let mut response = Response::builder();
@@ -1818,6 +2041,24 @@ where
                                                 => {
                                                   let mut response = response.status(204);
                                                   response.body(Body::empty())
+                                                },
+                                                apis::sandboxes::SandboxesSandboxIdDeleteResponse::Status409_Conflict
+                                                    (body)
+                                                => {
+                                                  let mut response = response.status(409);
+                                                  {
+                                                    let mut response_headers = response.headers_mut().unwrap();
+                                                    response_headers.insert(
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static("application/json"));
+                                                  }
+
+                                                  let body_content =  tokio::task::spawn_blocking(move ||
+                                                      serde_json::to_vec(&body).map_err(|e| {
+                                                        error!(error = ?e);
+                                                        StatusCode::INTERNAL_SERVER_ERROR
+                                                      })).await.unwrap()?;
+                                                  response.body(Body::from(body_content))
                                                 },
                                                 apis::sandboxes::SandboxesSandboxIdDeleteResponse::Status404_NotFound
                                                     (body)
@@ -2434,10 +2675,18 @@ where
 #[tracing::instrument(skip_all)]
 fn sandboxes_sandbox_id_pause_post_validation(
     path_params: models::SandboxesSandboxIdPausePostPathParams,
-) -> std::result::Result<(models::SandboxesSandboxIdPausePostPathParams,), ValidationErrors> {
+    query_params: models::SandboxesSandboxIdPausePostQueryParams,
+) -> std::result::Result<
+    (
+        models::SandboxesSandboxIdPausePostPathParams,
+        models::SandboxesSandboxIdPausePostQueryParams,
+    ),
+    ValidationErrors,
+> {
     path_params.validate()?;
+    query_params.validate()?;
 
-    Ok((path_params,))
+    Ok((path_params, query_params))
 }
 /// SandboxesSandboxIdPausePost - POST /sandboxes/{sandboxID}/pause
 #[tracing::instrument(skip_all)]
@@ -2447,6 +2696,7 @@ async fn sandboxes_sandbox_id_pause_post<I, A, E, C>(
     cookies: CookieJar,
     headers: HeaderMap,
     Path(path_params): Path<models::SandboxesSandboxIdPausePostPathParams>,
+    QueryExtra(query_params): QueryExtra<models::SandboxesSandboxIdPausePostQueryParams>,
     State(api_impl): State<I>,
 ) -> Result<Response, StatusCode>
 where
@@ -2474,12 +2724,12 @@ where
 
     #[allow(clippy::redundant_closure)]
     let validation = tokio::task::spawn_blocking(move || {
-        sandboxes_sandbox_id_pause_post_validation(path_params)
+        sandboxes_sandbox_id_pause_post_validation(path_params, query_params)
     })
     .await
     .unwrap();
 
-    let Ok((path_params,)) = validation else {
+    let Ok((path_params, query_params)) = validation else {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Body::from(validation.unwrap_err().to_string()))
@@ -2488,7 +2738,14 @@ where
 
     let result = api_impl
         .as_ref()
-        .sandboxes_sandbox_id_pause_post(&method, &host, &cookies, &claims, &path_params)
+        .sandboxes_sandbox_id_pause_post(
+            &method,
+            &host,
+            &cookies,
+            &claims,
+            &path_params,
+            &query_params,
+        )
         .await;
 
     let mut response = Response::builder();

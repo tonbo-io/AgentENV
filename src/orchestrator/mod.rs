@@ -67,6 +67,9 @@ pub enum OrchestratorError {
     #[error("node admission is closed for drain")]
     NodeDraining,
 
+    #[error("sandbox {0} activation changed")]
+    ActivationConflict(SandboxId),
+
     #[error("sandbox {0} not found")]
     SandboxNotFound(SandboxId),
 
@@ -111,6 +114,9 @@ impl From<store::StoreError> for OrchestratorError {
         match value {
             store::StoreError::SandboxNotFound { sandbox_id } => {
                 OrchestratorError::SandboxNotFound(sandbox_id)
+            }
+            store::StoreError::ActivationConflict { sandbox_id } => {
+                OrchestratorError::ActivationConflict(sandbox_id)
             }
             other => OrchestratorError::StoreOperationFailed(other),
         }

@@ -201,16 +201,17 @@ impl MetadataStore for ScriptedStore {
         self.inner.update(metadata).await
     }
 
-    async fn update_state_if_state(
+    async fn transition_state(
         &self,
         sandbox_id: &SandboxId,
         new_state: SandboxState,
         expected_states: &[SandboxState],
+        expected_activation: Option<Option<uuid::Uuid>>,
     ) -> StdResult<SandboxState, StoreError> {
         match ScriptedStoreControl::take_action(&self.control.update_if_state_actions) {
             StoreAction::Delegate => {
                 self.inner
-                    .update_state_if_state(sandbox_id, new_state, expected_states)
+                    .transition_state(sandbox_id, new_state, expected_states, expected_activation)
                     .await
             }
             StoreAction::Fail(err) => Err(err),
@@ -341,14 +342,15 @@ impl MetadataStore for RaceBeforeUpdateStore {
         self.inner.update(metadata).await
     }
 
-    async fn update_state_if_state(
+    async fn transition_state(
         &self,
         sandbox_id: &SandboxId,
         new_state: SandboxState,
         expected_states: &[SandboxState],
+        expected_activation: Option<Option<uuid::Uuid>>,
     ) -> StdResult<SandboxState, StoreError> {
         self.inner
-            .update_state_if_state(sandbox_id, new_state, expected_states)
+            .transition_state(sandbox_id, new_state, expected_states, expected_activation)
             .await
     }
 
@@ -448,11 +450,12 @@ impl MetadataStore for ConflictOnUpdateStore {
         Ok(())
     }
 
-    async fn update_state_if_state(
+    async fn transition_state(
         &self,
         _sandbox_id: &SandboxId,
         _new_state: SandboxState,
         _expected_states: &[SandboxState],
+        _expected_activation: Option<Option<uuid::Uuid>>,
     ) -> StdResult<SandboxState, StoreError> {
         Err(StoreError::Backend {
             source: anyhow::anyhow!("unused in conflict test store"),
@@ -561,11 +564,12 @@ impl MetadataStore for ScriptedWaitStore {
         Ok(())
     }
 
-    async fn update_state_if_state(
+    async fn transition_state(
         &self,
         _sandbox_id: &SandboxId,
         _new_state: SandboxState,
         _expected_states: &[SandboxState],
+        _expected_activation: Option<Option<uuid::Uuid>>,
     ) -> StdResult<SandboxState, StoreError> {
         Err(StoreError::Backend {
             source: anyhow::anyhow!("unused in this test store"),
@@ -1472,7 +1476,7 @@ async fn join_concurrent_pause_maps_killing_to_not_found() {
     ));
 
     let err = orchestrator
-        .join_concurrent_pause(sandbox_id)
+        .join_concurrent_pause(sandbox_id, None)
         .await
         .expect_err("killing after joined pause should map to not found");
     assert!(matches!(err, OrchestratorError::SandboxNotFound(_)));
@@ -5178,5 +5182,48 @@ async fn concurrent_creation_has_one_runtime_owner() -> Result<()> {
         SandboxState::Running
     );
     orchestrator.delete_sandbox(id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_lifecycle_activation_preserves_current_runtime() -> Result<()> {
+    let (orchestrator, _) = creation_test_with_start_counter().await;
+    let id = SandboxId::new();
+    orchestrator
+        .clone()
+        .create_sandbox_inner(id, create_request(Some(60), &[]))
+        .await?;
+    let activation = uuid::Uuid::now_v7();
+    let mut metadata = orchestrator.store.get(&id).await?.unwrap();
+    metadata.execution_lease = Some(runtime_policy::ExecutionLease {
+        activation_id: activation,
+        operation_id: uuid::Uuid::now_v7(),
+        sequence: 0,
+        expires_at_unix_ms: u64::MAX,
+    });
+    orchestrator.store.update(metadata).await?;
+    for expected in [None, Some(uuid::Uuid::now_v7())] {
+        assert!(matches!(
+            orchestrator
+                .delete_sandbox_for_activation(id, expected)
+                .await,
+            Err(OrchestratorError::ActivationConflict(_))
+        ));
+        assert!(matches!(
+            orchestrator
+                .pause_sandbox_for_activation(id, expected)
+                .await,
+            Err(OrchestratorError::ActivationConflict(_))
+        ));
+        assert_eq!(
+            orchestrator.store.get(&id).await?.unwrap().state,
+            SandboxState::Running
+        );
+        assert!(orchestrator.sandboxes.read().await.contains_key(&id));
+    }
+    orchestrator
+        .delete_sandbox_for_activation(id, Some(activation))
+        .await?;
+    assert!(orchestrator.store.get(&id).await?.is_none());
     Ok(())
 }

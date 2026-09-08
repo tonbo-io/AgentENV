@@ -79,6 +79,12 @@ pub struct NodesGetQueryParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct NodesNodeIdActivationRevocationsPostPathParams {
+    pub node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NodesNodeIdDrainPostPathParams {
     pub node_id: String,
 }
@@ -133,6 +139,15 @@ pub struct SandboxesSandboxIdDeletePathParams {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxesSandboxIdDeleteQueryParams {
+    /// Expected funded activation identity. A mismatch returns conflict without modifying the sandbox. Omission temporarily retains ID-only callers during lifecycle authority migration.
+    #[serde(rename = "expectedActivationID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_activation_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxesSandboxIdForkPostPathParams {
     pub sandbox_id: String,
 }
@@ -153,6 +168,15 @@ pub struct SandboxesSandboxIdNetworkPutPathParams {
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxesSandboxIdPausePostPathParams {
     pub sandbox_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct SandboxesSandboxIdPausePostQueryParams {
+    /// Expected funded activation identity. A mismatch returns conflict without modifying the sandbox. Omission temporarily retains ID-only callers during lifecycle authority migration.
+    #[serde(rename = "expectedActivationID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_activation_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
@@ -324,6 +348,446 @@ pub struct V2TemplatesGetQueryParams {
 pub struct V2TemplatesTemplateIdBuildsBuildIdPostPathParams {
     pub template_id: String,
     pub build_id: String,
+}
+
+/// Admission history on this exact node only. NeverAdmitted prevents future first admission here; PreviouslyAdmitted requires physical reconciliation and proves neither running nor stopped. Neither is a cross-node fence or a host cleanup receipt.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct ActivationRevocationObservation {
+    #[serde(rename = "nodeID")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub node_id: String,
+
+    #[serde(rename = "clusterID")]
+    pub cluster_id: uuid::Uuid,
+
+    #[serde(rename = "serviceInstanceID")]
+    pub service_instance_id: uuid::Uuid,
+
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: uuid::Uuid,
+
+    #[serde(rename = "activationID")]
+    pub activation_id: uuid::Uuid,
+
+    /// Note: inline enums are not fully supported by openapi-generator
+    #[serde(rename = "disposition")]
+    #[validate(custom(function = "check_xss_string"))]
+    pub disposition: String,
+}
+
+impl ActivationRevocationObservation {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        node_id: String,
+        cluster_id: uuid::Uuid,
+        service_instance_id: uuid::Uuid,
+        sandbox_id: uuid::Uuid,
+        activation_id: uuid::Uuid,
+        disposition: String,
+    ) -> ActivationRevocationObservation {
+        ActivationRevocationObservation {
+            node_id,
+            cluster_id,
+            service_instance_id,
+            sandbox_id,
+            activation_id,
+            disposition,
+        }
+    }
+}
+
+/// Converts the ActivationRevocationObservation value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for ActivationRevocationObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            Some("nodeID".to_string()),
+            Some(self.node_id.to_string()),
+            // Skipping clusterID in query parameter serialization
+
+            // Skipping serviceInstanceID in query parameter serialization
+
+            // Skipping sandboxID in query parameter serialization
+
+            // Skipping activationID in query parameter serialization
+            Some("disposition".to_string()),
+            Some(self.disposition.to_string()),
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a ActivationRevocationObservation value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for ActivationRevocationObservation {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub node_id: Vec<String>,
+            pub cluster_id: Vec<uuid::Uuid>,
+            pub service_instance_id: Vec<uuid::Uuid>,
+            pub sandbox_id: Vec<uuid::Uuid>,
+            pub activation_id: Vec<uuid::Uuid>,
+            pub disposition: Vec<String>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing ActivationRevocationObservation".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "nodeID" => intermediate_rep.node_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "clusterID" => intermediate_rep.cluster_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "serviceInstanceID" => intermediate_rep.service_instance_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "sandboxID" => intermediate_rep.sandbox_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "activationID" => intermediate_rep.activation_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "disposition" => intermediate_rep.disposition.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing ActivationRevocationObservation"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(ActivationRevocationObservation {
+            node_id: intermediate_rep
+                .node_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "nodeID missing in ActivationRevocationObservation".to_string())?,
+            cluster_id: intermediate_rep
+                .cluster_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "clusterID missing in ActivationRevocationObservation".to_string()
+                })?,
+            service_instance_id: intermediate_rep
+                .service_instance_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "serviceInstanceID missing in ActivationRevocationObservation".to_string()
+                })?,
+            sandbox_id: intermediate_rep
+                .sandbox_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "sandboxID missing in ActivationRevocationObservation".to_string()
+                })?,
+            activation_id: intermediate_rep
+                .activation_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "activationID missing in ActivationRevocationObservation".to_string()
+                })?,
+            disposition: intermediate_rep
+                .disposition
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "disposition missing in ActivationRevocationObservation".to_string()
+                })?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<ActivationRevocationObservation> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<ActivationRevocationObservation>>
+    for HeaderValue
+{
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<ActivationRevocationObservation>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for ActivationRevocationObservation - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue>
+    for header::IntoHeaderValue<ActivationRevocationObservation>
+{
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <ActivationRevocationObservation as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into ActivationRevocationObservation - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct ActivationRevocationRequest {
+    #[serde(rename = "clusterID")]
+    pub cluster_id: uuid::Uuid,
+
+    #[serde(rename = "serviceInstanceID")]
+    pub service_instance_id: uuid::Uuid,
+
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: uuid::Uuid,
+
+    #[serde(rename = "activationID")]
+    pub activation_id: uuid::Uuid,
+}
+
+impl ActivationRevocationRequest {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        cluster_id: uuid::Uuid,
+        service_instance_id: uuid::Uuid,
+        sandbox_id: uuid::Uuid,
+        activation_id: uuid::Uuid,
+    ) -> ActivationRevocationRequest {
+        ActivationRevocationRequest {
+            cluster_id,
+            service_instance_id,
+            sandbox_id,
+            activation_id,
+        }
+    }
+}
+
+/// Converts the ActivationRevocationRequest value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for ActivationRevocationRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            // Skipping clusterID in query parameter serialization
+
+            // Skipping serviceInstanceID in query parameter serialization
+
+            // Skipping sandboxID in query parameter serialization
+
+            // Skipping activationID in query parameter serialization
+
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a ActivationRevocationRequest value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for ActivationRevocationRequest {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub cluster_id: Vec<uuid::Uuid>,
+            pub service_instance_id: Vec<uuid::Uuid>,
+            pub sandbox_id: Vec<uuid::Uuid>,
+            pub activation_id: Vec<uuid::Uuid>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing ActivationRevocationRequest".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "clusterID" => intermediate_rep.cluster_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "serviceInstanceID" => intermediate_rep.service_instance_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "sandboxID" => intermediate_rep.sandbox_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "activationID" => intermediate_rep.activation_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing ActivationRevocationRequest".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(ActivationRevocationRequest {
+            cluster_id: intermediate_rep
+                .cluster_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "clusterID missing in ActivationRevocationRequest".to_string())?,
+            service_instance_id: intermediate_rep
+                .service_instance_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    "serviceInstanceID missing in ActivationRevocationRequest".to_string()
+                })?,
+            sandbox_id: intermediate_rep
+                .sandbox_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "sandboxID missing in ActivationRevocationRequest".to_string())?,
+            activation_id: intermediate_rep
+                .activation_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "activationID missing in ActivationRevocationRequest".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<ActivationRevocationRequest> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<ActivationRevocationRequest>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<ActivationRevocationRequest>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for ActivationRevocationRequest - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ActivationRevocationRequest> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <ActivationRevocationRequest as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into ActivationRevocationRequest - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
 }
 
 /// Block drive to attach when starting a sandbox. Attached drives are sandbox launch inputs; if the sandbox is later snapshotted, the current drive state is captured into the resulting snapshot.

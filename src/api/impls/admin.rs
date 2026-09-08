@@ -116,6 +116,70 @@ impl Admin<()> for ApiImpl {
         ))
     }
 
+    async fn nodes_node_id_activation_revocations_post(
+        &self,
+        _method: &Method,
+        _host: &Host,
+        _cookies: &CookieJar,
+        _claims: &Self::Claims,
+        path_params: &models::NodesNodeIdActivationRevocationsPostPathParams,
+        body: &models::ActivationRevocationRequest,
+    ) -> Result<NodesNodeIdActivationRevocationsPostResponse, ()> {
+        use crate::sandbox::admission::{ActivationRevocation, NodeAdmission};
+        use NodesNodeIdActivationRevocationsPostResponse as Response;
+        let Some(observability) = self.observability() else {
+            return Ok(Response::Status404_NotFound(Self::error(
+                404,
+                "node identity is unavailable",
+            )));
+        };
+        if path_params.node_id != observability.node_id()
+            || body.cluster_id != observability.cluster_id()
+            || body.service_instance_id.to_string() != observability.service_instance_id()
+        {
+            return Ok(Response::Status409_NodeInstanceMismatch(Self::error(
+                409,
+                "revocation does not address this exact node service instance",
+            )));
+        }
+        if body.activation_id.is_nil() || body.sandbox_id.is_nil() {
+            return Ok(Response::Status400_BadRequest(Self::error(
+                400,
+                "activation and sandbox identities are required",
+            )));
+        }
+        let Some(admission) = NodeAdmission::global() else {
+            return Ok(Response::Status500_ServerError(Self::error(
+                500,
+                "durable execution admission is unavailable",
+            )));
+        };
+        let sandbox = crate::types::SandboxId::from_uuid(body.sandbox_id);
+        let disposition = match admission
+            .revoke_unadmitted_activation(sandbox, body.activation_id)
+            .await
+        {
+            Ok(ActivationRevocation::NeverAdmitted) => "NeverAdmitted",
+            Ok(ActivationRevocation::PreviouslyAdmitted) => "PreviouslyAdmitted",
+            Err(error) => {
+                return Ok(Response::Status500_ServerError(Self::error(
+                    500,
+                    error.to_string(),
+                )))
+            }
+        };
+        Ok(Response::Status200_DurableAdmissionDisposition(
+            models::ActivationRevocationObservation::new(
+                observability.node_id().to_owned(),
+                body.cluster_id,
+                body.service_instance_id,
+                body.sandbox_id,
+                body.activation_id,
+                disposition.to_owned(),
+            ),
+        ))
+    }
+
     async fn nodes_node_id_drain_post(
         &self,
         _method: &Method,

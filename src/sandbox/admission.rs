@@ -45,6 +45,16 @@ struct Entry {
     released: bool,
 }
 
+/// Admission evidence only. PreviouslyAdmitted does not prove a process is
+/// running or stopped; it requires separate physical reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationRevocation {
+    NeverAdmitted,
+    PreviouslyAdmitted,
+}
+
+const REVOKED_PREFIX: &str = "revoked-before-admission-v1:";
+
 pub struct AdmissionGuard {
     owner: Arc<NodeAdmission>,
     id: Uuid,
@@ -143,8 +153,8 @@ impl NodeAdmission {
                 bail!("new activation must begin with execution sequence zero");
             }
             self.validate_lease(lease)?;
-            if self.has_executed_activation(id).await? {
-                bail!("activation has already executed on this node");
+            if self.activation_is_recorded(id).await? {
+                bail!("activation is already admitted or revoked on this node");
             }
         }
         let maximum_memory_bytes =
@@ -209,8 +219,50 @@ impl NodeAdmission {
     }
 
     /// Observation only: acquire() owns the serialized durable admission claim.
-    pub async fn has_executed_activation(&self, id: Uuid) -> Result<bool> {
+    pub async fn activation_is_recorded(&self, id: Uuid) -> Result<bool> {
         Ok(self.identities.get(id.as_bytes().to_vec()).await?.is_some())
+    }
+
+    /// Serialize with acquire, and fsync the existing activation registry before
+    /// acknowledging that a delayed launch can never acquire this activation.
+    pub async fn revoke_unadmitted_activation(
+        self: &Arc<Self>,
+        sandbox: SandboxId,
+        activation: Uuid,
+    ) -> Result<ActivationRevocation> {
+        let owner = Arc::clone(self);
+        // Keep claims locked through the synchronous write even if the HTTP
+        // caller disconnects while LocalKvStore is on a blocking thread.
+        tokio::spawn(async move { owner.revoke_unadmitted_inner(sandbox, activation).await })
+            .await
+            .context("join activation revocation")?
+    }
+
+    async fn revoke_unadmitted_inner(
+        &self,
+        sandbox: SandboxId,
+        activation: Uuid,
+    ) -> Result<ActivationRevocation> {
+        if activation.is_nil() {
+            bail!("activation identity is required");
+        }
+        let _claim = self.claims.lock().await;
+        let key = activation.as_bytes().to_vec();
+        if let Some(value) = self.identities.get(key.clone()).await? {
+            let value = std::str::from_utf8(&value).context("invalid activation registry value")?;
+            let (owner, result) = match value.strip_prefix(REVOKED_PREFIX) {
+                Some(owner) => (owner, ActivationRevocation::NeverAdmitted),
+                None => (value, ActivationRevocation::PreviouslyAdmitted),
+            };
+            if SandboxId::parse_str(owner).context("invalid activation owner")? != sandbox {
+                bail!("activation belongs to another sandbox");
+            }
+            return Ok(result);
+        }
+        self.identities
+            .put(key, format!("{REVOKED_PREFIX}{sandbox}").into_bytes())
+            .await?;
+        Ok(ActivationRevocation::NeverAdmitted)
     }
 
     fn validate_lease(&self, lease: ExecutionLease) -> Result<()> {
@@ -476,6 +528,166 @@ fn disk_anchor(work_directory: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn registry_owner(path: &Path) -> Arc<NodeAdmission> {
+        Arc::new(NodeAdmission {
+            config: AdmissionConfig {
+                enabled: true,
+                require_execution_lease: true,
+                memory_percent: 85,
+                initial_memory_bytes: 1024,
+                runtime_overhead_bytes: 0,
+                max_starting: 2,
+                disk_reserve_bytes: 0,
+                maximum_funded_seconds: 600,
+                state_path: path.to_path_buf(),
+            },
+            root: path.to_path_buf(),
+            reserve_memory: 0,
+            ledger: Mutex::new(Ledger {
+                budget: Budget::new(4096, 2).unwrap(),
+                entries: HashMap::new(),
+            }),
+            identities: LocalKvStore::open(path, LocalStoreDurability::Sync)
+                .await
+                .unwrap(),
+            claims: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    #[tokio::test]
+    async fn revocation_replay_survives_reopen_without_reclassifying_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("registry");
+        let sandbox = SandboxId::new();
+        let denied = Uuid::now_v7();
+        let admitted = Uuid::now_v7();
+        let owner = registry_owner(&path).await;
+        assert_eq!(
+            owner
+                .revoke_unadmitted_activation(sandbox, denied)
+                .await
+                .unwrap(),
+            ActivationRevocation::NeverAdmitted
+        );
+        assert!(owner.activation_is_recorded(denied).await.unwrap());
+        owner
+            .identities
+            .put(
+                admitted.as_bytes().to_vec(),
+                sandbox.to_string().into_bytes(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            owner
+                .revoke_unadmitted_activation(sandbox, admitted)
+                .await
+                .unwrap(),
+            ActivationRevocation::PreviouslyAdmitted
+        );
+        assert!(owner
+            .revoke_unadmitted_activation(SandboxId::new(), denied)
+            .await
+            .is_err());
+        drop(owner);
+        let reopened = registry_owner(&path).await;
+        assert_eq!(
+            reopened
+                .revoke_unadmitted_activation(sandbox, denied)
+                .await
+                .unwrap(),
+            ActivationRevocation::NeverAdmitted
+        );
+        assert_eq!(
+            reopened
+                .revoke_unadmitted_activation(sandbox, admitted)
+                .await
+                .unwrap(),
+            ActivationRevocation::PreviouslyAdmitted
+        );
+        assert!(reopened
+            .revoke_unadmitted_activation(sandbox, Uuid::nil())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn revoke_and_acquire_have_one_serialized_outcome() {
+        for _ in 0..16 {
+            let root = tempfile::tempdir().unwrap();
+            let owner = registry_owner(&root.path().join("registry")).await;
+            let sandbox = SandboxId::new();
+            let activation = Uuid::now_v7();
+            let lease = ExecutionLease {
+                activation_id: activation,
+                operation_id: Uuid::now_v7(),
+                sequence: 0,
+                expires_at_unix_ms: runtime_policy::unix_millis(SystemTime::now()).unwrap()
+                    + 60_000,
+            };
+            let resources = SandboxResources {
+                cpu_count: 1,
+                memory_mib: 1,
+                disk_size_mib: 1,
+            };
+            let disk = root.path().join("disk");
+            let (admitted, revoked) = tokio::join!(
+                owner.acquire(sandbox, resources, Some(lease), &disk),
+                owner.revoke_unadmitted_activation(sandbox, activation),
+            );
+            match revoked.unwrap() {
+                ActivationRevocation::NeverAdmitted => assert!(admitted.is_err()),
+                ActivationRevocation::PreviouslyAdmitted => assert!(admitted.is_ok()),
+            }
+            assert!(owner.activation_is_recorded(activation).await.unwrap());
+            drop(admitted);
+            assert!(owner
+                .acquire(sandbox, resources, Some(lease), &disk)
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_admission_completes_after_caller_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = registry_owner(&root.path().join("registry")).await;
+        let sandbox = SandboxId::new();
+        let activation = Uuid::now_v7();
+        let lock = owner.claims.lock().await;
+        let caller_owner = Arc::clone(&owner);
+        let caller = tokio::spawn(async move {
+            caller_owner
+                .revoke_unadmitted_activation(sandbox, activation)
+                .await
+        });
+        // The inner task owns a third Arc after the cancellation-safe handoff.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&owner) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        drop(lock);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !owner.activation_is_recorded(activation).await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            owner
+                .revoke_unadmitted_activation(sandbox, activation)
+                .await
+                .unwrap(),
+            ActivationRevocation::NeverAdmitted
+        );
+    }
 
     #[test]
     fn capacity_anchor_survives_warm_resume_workspace_replacement() {

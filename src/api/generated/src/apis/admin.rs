@@ -23,6 +23,24 @@ pub enum NodesGetResponse {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[must_use]
 #[allow(clippy::large_enum_variant)]
+pub enum NodesNodeIdActivationRevocationsPostResponse {
+    /// Durable admission disposition
+    Status200_DurableAdmissionDisposition(models::ActivationRevocationObservation),
+    /// Bad request
+    Status400_BadRequest(models::Error),
+    /// Authentication error
+    Status401_AuthenticationError(models::Error),
+    /// Not found
+    Status404_NotFound(models::Error),
+    /// Node instance mismatch
+    Status409_NodeInstanceMismatch(models::Error),
+    /// Server error
+    Status500_ServerError(models::Error),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[must_use]
+#[allow(clippy::large_enum_variant)]
 pub enum NodesNodeIdDrainPostResponse {
     /// Durable admission observation
     Status200_DurableAdmissionObservation(models::NodeDrainObservation),
@@ -68,6 +86,20 @@ pub trait Admin<E: std::fmt::Debug + Send + Sync + 'static = ()>: super::ErrorHa
         claims: &Self::Claims,
         query_params: &models::NodesGetQueryParams,
     ) -> Result<NodesGetResponse, E>;
+
+    /// Prevent first admission of an activation.
+    ///
+    /// NodesNodeIdActivationRevocationsPost - POST /nodes/{nodeID}/activation-revocations
+    async fn nodes_node_id_activation_revocations_post(
+        &self,
+
+        method: &Method,
+        host: &Host,
+        cookies: &CookieJar,
+        claims: &Self::Claims,
+        path_params: &models::NodesNodeIdActivationRevocationsPostPathParams,
+        body: &models::ActivationRevocationRequest,
+    ) -> Result<NodesNodeIdActivationRevocationsPostResponse, E>;
 
     /// Persist node admission closure.
     ///
