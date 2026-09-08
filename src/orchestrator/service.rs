@@ -1506,7 +1506,16 @@ where
                     &[SandboxState::Paused],
                     Some(Some(activation)),
                 )
-                .await?;
+                .await
+                .map_err(|error| match error {
+                    StoreError::StateConflict { actual_state, .. } => {
+                        OrchestratorError::InvalidSandboxState {
+                            sandbox_id,
+                            state: actual_state,
+                        }
+                    }
+                    other => OrchestratorError::from(other),
+                })?;
             let outcome = std::panic::AssertUnwindSafe(async {
                 let metadata = this
                     .store

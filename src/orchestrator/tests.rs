@@ -5381,12 +5381,17 @@ async fn paused_publication_rejects_running_and_stale_sources_and_never_resumes_
         expires_at_unix_ms: u64::MAX,
     });
     orchestrator.store.update(metadata).await?;
-    assert!(orchestrator
-        .with_paused_snapshot::<(), _>(id, activation, |_| async {
-            panic!("running source must not publish")
+    assert!(matches!(
+        orchestrator
+            .with_paused_snapshot::<(), _>(id, activation, |_| async {
+                panic!("running source must not publish")
+            })
+            .await,
+        Err(OrchestratorError::InvalidSandboxState {
+            state: SandboxState::Running,
+            ..
         })
-        .await
-        .is_err());
+    ));
     orchestrator
         .pause_sandbox_for_activation(id, Some(activation))
         .await?;
