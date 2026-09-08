@@ -3224,6 +3224,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<MemoryMb> {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NewColdSandbox {
+    #[serde(rename = "targetNodeInstance")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_node_instance: Option<models::NodeLaunchTarget>,
+
     #[serde(rename = "executionLease")]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3316,6 +3321,7 @@ impl NewColdSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(image: String) -> NewColdSandbox {
         NewColdSandbox {
+            target_node_instance: None,
             execution_lease: None,
             image,
             timeout: Some(15),
@@ -3342,6 +3348,8 @@ impl NewColdSandbox {
 impl std::fmt::Display for NewColdSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping targetNodeInstance in query parameter serialization
+
             // Skipping executionLease in query parameter serialization
             Some("image".to_string()),
             Some(self.image.to_string()),
@@ -3406,6 +3414,7 @@ impl std::str::FromStr for NewColdSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub target_node_instance: Vec<models::NodeLaunchTarget>,
             pub execution_lease: Vec<models::ExecutionLease>,
             pub image: Vec<String>,
             pub timeout: Vec<u32>,
@@ -3444,6 +3453,11 @@ impl std::str::FromStr for NewColdSandbox {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "targetNodeInstance" => intermediate_rep.target_node_instance.push(
+                        <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "executionLease" => intermediate_rep.execution_lease.push(
                         <models::ExecutionLease as std::str::FromStr>::from_str(val)
@@ -3533,6 +3547,7 @@ impl std::str::FromStr for NewColdSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(NewColdSandbox {
+            target_node_instance: intermediate_rep.target_node_instance.into_iter().next(),
             execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             image: intermediate_rep
                 .image
@@ -3602,6 +3617,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NewColdSandb
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NewSandbox {
+    #[serde(rename = "targetNodeInstance")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_node_instance: Option<models::NodeLaunchTarget>,
+
     #[serde(rename = "executionLease")]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3676,6 +3696,7 @@ impl NewSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(template_id: String) -> NewSandbox {
         NewSandbox {
+            target_node_instance: None,
             execution_lease: None,
             template_id,
             timeout: Some(15),
@@ -3699,6 +3720,8 @@ impl NewSandbox {
 impl std::fmt::Display for NewSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping targetNodeInstance in query parameter serialization
+
             // Skipping executionLease in query parameter serialization
             Some("templateID".to_string()),
             Some(self.template_id.to_string()),
@@ -3755,6 +3778,7 @@ impl std::str::FromStr for NewSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub target_node_instance: Vec<models::NodeLaunchTarget>,
             pub execution_lease: Vec<models::ExecutionLease>,
             pub template_id: Vec<String>,
             pub timeout: Vec<u32>,
@@ -3790,6 +3814,11 @@ impl std::str::FromStr for NewSandbox {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "targetNodeInstance" => intermediate_rep.target_node_instance.push(
+                        <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "executionLease" => intermediate_rep.execution_lease.push(
                         <models::ExecutionLease as std::str::FromStr>::from_str(val)
@@ -3868,6 +3897,7 @@ impl std::str::FromStr for NewSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(NewSandbox {
+            target_node_instance: intermediate_rep.target_node_instance.into_iter().next(),
             execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             template_id: intermediate_rep
                 .template_id
@@ -4138,9 +4168,7 @@ impl std::str::FromStr for Node {
             let val = match string_iter.next() {
                 Some(x) => x,
                 None => {
-                    return std::result::Result::Err(
-                        "Missing value while parsing Node".to_string(),
-                    );
+                    return std::result::Result::Err("Missing value while parsing Node".to_string());
                 }
             };
 
@@ -5195,6 +5223,181 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NodeDrainReq
     }
 }
 
+/// Exact runtime service incarnation selected before dispatch. A mismatch is rejected before launch side effects. This is not a funding or authorization grant.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct NodeLaunchTarget {
+    #[serde(rename = "nodeID")]
+    #[validate(length(min = 1), custom(function = "check_xss_string"))]
+    pub node_id: String,
+
+    #[serde(rename = "clusterID")]
+    pub cluster_id: uuid::Uuid,
+
+    #[serde(rename = "serviceInstanceID")]
+    pub service_instance_id: uuid::Uuid,
+}
+
+impl NodeLaunchTarget {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(
+        node_id: String,
+        cluster_id: uuid::Uuid,
+        service_instance_id: uuid::Uuid,
+    ) -> NodeLaunchTarget {
+        NodeLaunchTarget {
+            node_id,
+            cluster_id,
+            service_instance_id,
+        }
+    }
+}
+
+/// Converts the NodeLaunchTarget value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for NodeLaunchTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            Some("nodeID".to_string()),
+            Some(self.node_id.to_string()),
+            // Skipping clusterID in query parameter serialization
+
+            // Skipping serviceInstanceID in query parameter serialization
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a NodeLaunchTarget value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for NodeLaunchTarget {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub node_id: Vec<String>,
+            pub cluster_id: Vec<uuid::Uuid>,
+            pub service_instance_id: Vec<uuid::Uuid>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing NodeLaunchTarget".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "nodeID" => intermediate_rep.node_id.push(
+                        <String as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "clusterID" => intermediate_rep.cluster_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "serviceInstanceID" => intermediate_rep.service_instance_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing NodeLaunchTarget".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(NodeLaunchTarget {
+            node_id: intermediate_rep
+                .node_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "nodeID missing in NodeLaunchTarget".to_string())?,
+            cluster_id: intermediate_rep
+                .cluster_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "clusterID missing in NodeLaunchTarget".to_string())?,
+            service_instance_id: intermediate_rep
+                .service_instance_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "serviceInstanceID missing in NodeLaunchTarget".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<NodeLaunchTarget> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<NodeLaunchTarget>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<NodeLaunchTarget>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for NodeLaunchTarget - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NodeLaunchTarget> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <NodeLaunchTarget as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into NodeLaunchTarget - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
 /// Node metrics
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
@@ -5538,6 +5741,11 @@ impl std::str::FromStr for NodeStatus {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct ResumedSandbox {
+    #[serde(rename = "targetNodeInstance")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_node_instance: Option<models::NodeLaunchTarget>,
+
     #[serde(rename = "executionLease")]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5554,6 +5762,7 @@ impl ResumedSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> ResumedSandbox {
         ResumedSandbox {
+            target_node_instance: None,
             execution_lease: None,
             timeout: Some(15),
         }
@@ -5566,6 +5775,8 @@ impl ResumedSandbox {
 impl std::fmt::Display for ResumedSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping targetNodeInstance in query parameter serialization
+
             // Skipping executionLease in query parameter serialization
             self.timeout
                 .as_ref()
@@ -5591,6 +5802,7 @@ impl std::str::FromStr for ResumedSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub target_node_instance: Vec<models::NodeLaunchTarget>,
             pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
         }
@@ -5615,6 +5827,11 @@ impl std::str::FromStr for ResumedSandbox {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
+                    "targetNodeInstance" => intermediate_rep.target_node_instance.push(
+                        <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
                     "executionLease" => intermediate_rep.execution_lease.push(
                         <models::ExecutionLease as std::str::FromStr>::from_str(val)
                             .map_err(|x| x.to_string())?,
@@ -5637,6 +5854,7 @@ impl std::str::FromStr for ResumedSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(ResumedSandbox {
+            target_node_instance: intermediate_rep.target_node_instance.into_iter().next(),
             execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep.timeout.into_iter().next(),
         })
@@ -6647,6 +6865,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<SandboxDetai
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxForkRequest {
+    #[serde(rename = "targetNodeInstance")]
+    #[validate(nested)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_node_instance: Option<models::NodeLaunchTarget>,
+
     #[serde(rename = "executionLease")]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -6669,6 +6892,7 @@ impl SandboxForkRequest {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> SandboxForkRequest {
         SandboxForkRequest {
+            target_node_instance: None,
             execution_lease: None,
             timeout: None,
             count: Some(1),
@@ -6682,6 +6906,8 @@ impl SandboxForkRequest {
 impl std::fmt::Display for SandboxForkRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping targetNodeInstance in query parameter serialization
+
             // Skipping executionLease in query parameter serialization
             self.timeout
                 .as_ref()
@@ -6710,6 +6936,7 @@ impl std::str::FromStr for SandboxForkRequest {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub target_node_instance: Vec<models::NodeLaunchTarget>,
             pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
             pub count: Vec<u32>,
@@ -6734,6 +6961,11 @@ impl std::str::FromStr for SandboxForkRequest {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "targetNodeInstance" => intermediate_rep.target_node_instance.push(
+                        <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "executionLease" => intermediate_rep.execution_lease.push(
                         <models::ExecutionLease as std::str::FromStr>::from_str(val)
@@ -6761,6 +6993,7 @@ impl std::str::FromStr for SandboxForkRequest {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(SandboxForkRequest {
+            target_node_instance: intermediate_rep.target_node_instance.into_iter().next(),
             execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep.timeout.into_iter().next(),
             count: intermediate_rep.count.into_iter().next(),

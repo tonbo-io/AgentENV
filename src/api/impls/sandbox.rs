@@ -489,6 +489,9 @@ impl Sandboxes<()> for ApiImpl {
         _claims: &Self::Claims,
         body: &models::NewColdSandbox,
     ) -> Result<SandboxesColdPostResponse, ()> {
+        if let Err(error) = self.check_launch_target(body.target_node_instance.as_ref()) {
+            return Ok(SandboxesColdPostResponse::Status409_Conflict(error));
+        }
         let image_resolver = self.image_resolver();
         let timer = SandboxStageTimer::new("create_cold");
         // TODO: Move cold-start image resolution into an async create operation
@@ -667,6 +670,9 @@ impl Sandboxes<()> for ApiImpl {
         _claims: &Self::Claims,
         body: &models::NewSandbox,
     ) -> Result<SandboxesPostResponse, ()> {
+        if let Err(error) = self.check_launch_target(body.target_node_instance.as_ref()) {
+            return Ok(SandboxesPostResponse::Status409_Conflict(error));
+        }
         if has_cluster_placement(body.placement.as_ref()) {
             return Ok(SandboxesPostResponse::Status400_BadRequest(Self::error(
                 400,
@@ -923,6 +929,14 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdForkPostPathParams,
         body: &Option<models::SandboxForkRequest>,
     ) -> Result<SandboxesSandboxIdForkPostResponse, ()> {
+        if let Err(error) = self.check_launch_target(
+            body.as_ref()
+                .and_then(|body| body.target_node_instance.as_ref()),
+        ) {
+            return Ok(SandboxesSandboxIdForkPostResponse::Status409_Conflict(
+                error,
+            ));
+        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdForkPostResponse::Status404_NotFound(
@@ -1473,6 +1487,11 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdResumePostPathParams,
         body: &models::ResumedSandbox,
     ) -> Result<SandboxesSandboxIdResumePostResponse, ()> {
+        if let Err(error) = self.check_launch_target(body.target_node_instance.as_ref()) {
+            return Ok(SandboxesSandboxIdResumePostResponse::Status409_Conflict(
+                error,
+            ));
+        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdResumePostResponse::Status404_NotFound(

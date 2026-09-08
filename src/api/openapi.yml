@@ -676,10 +676,27 @@ components:
             minLength: 1
             maxLength: 200
 
+    NodeLaunchTarget:
+      type: object
+      description: Exact runtime service incarnation selected before dispatch. A mismatch is rejected before launch side effects. This is not a funding or authorization grant.
+      required: [nodeID, clusterID, serviceInstanceID]
+      properties:
+        nodeID:
+          type: string
+          minLength: 1
+        clusterID:
+          type: string
+          format: uuid
+        serviceInstanceID:
+          type: string
+          format: uuid
+
     NewSandbox:
       required:
         - templateID
       properties:
+        targetNodeInstance:
+          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         templateID:
@@ -723,6 +740,8 @@ components:
 
     ResumedSandbox:
       properties:
+        targetNodeInstance:
+          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         timeout:
@@ -736,6 +755,8 @@ components:
       required:
         - image
       properties:
+        targetNodeInstance:
+          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         image:
@@ -843,6 +864,8 @@ components:
     SandboxForkRequest:
       type: object
       properties:
+        targetNodeInstance:
+          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         timeout:
@@ -1657,6 +1680,8 @@ paths:
           $ref: "#/components/responses/401"
         "400":
           $ref: "#/components/responses/400"
+        "409":
+          $ref: "#/components/responses/409"
         "500":
           $ref: "#/components/responses/500"
 
@@ -1696,6 +1721,8 @@ paths:
           $ref: "#/components/responses/401"
         "400":
           $ref: "#/components/responses/400"
+        "409":
+          $ref: "#/components/responses/409"
         "500":
           $ref: "#/components/responses/500"
 
