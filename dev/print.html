@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b330e121.js";
+            window.path_to_searchindex_js = "searchindex-46f897ca.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c868df7a.js"></script>
@@ -4462,6 +4462,9 @@ boot) that watches for these per-instance files and executes them after resume.<
 <h2 id="pressure-aware-placement-consumers"><a class="header" href="#pressure-aware-placement-consumers">Pressure-aware placement consumers</a></h2>
 <p>The gateway accepts an exact <code>placement.nodeID</code> alongside the existing <code>differentNodeFrom</code> and <code>snapshotCompatibleWith</code> constraints. A required node is filtered by ordinary resource admission and compatibility; it never falls back to another node. <code>/nodes</code> includes <code>reportedAtUnixMs</code> and an opaque <code>snapshotCompatibilityKey</code>. The key and Scheduler compatibility filtering share one implementation; an empty key means incomplete identity. Authenticated Sandbox control responses carry gateway-owned <code>x-agentenv-node-id</code>, including usage responses, so an external policy controller can associate a runtime meter with the physical placement that served it. Application proxy responses do not acquire this control-plane contract.</p>
 <p>These are placement and observation mechanisms. Host-pressure thresholds, sustained observation windows, migration admission, accounting, and cooldown belong to the owning product controller. Unit tests must cover exact-node rejection after resource filtering and compatibility-domain changes before deploying a controller that relies on these fields.</p>
+<h2 id="exact-node-launch-target"><a class="header" href="#exact-node-launch-target">Exact node launch target</a></h2>
+<p>Cold create, snapshot create, explicit resume and fork accept <code>targetNodeInstance</code> with <code>nodeID</code>, <code>clusterID</code> and <code>serviceInstanceID</code>. When supplied, the runtime rejects missing local identity, zero UUIDs or any mismatch with HTTP 409 before image or snapshot resolution and guest operations. This precondition fences a selected service incarnation; it does not provide business authorization, funding, cleanup acknowledgement or cross-node admission authority.</p>
+<p>The existing Cloud SQL orchestrator and gateway callers still omit this field. That compatibility must be removed from managed execution when the Kubernetes execution-authority handoff replaces those callers; the Kubernetes dispatcher must always supply its durably recorded placement identity. Qualification must exercise stale service IDs after restart on cold/warm create, resume and fork, confirm no new admission or guest side effect, and then verify an exact current target can launch normally in isolated EKS. Unit identity checks alone do not qualify this handoff.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="template-builder-and-testing"><a class="header" href="#template-builder-and-testing">Template Builder and Testing</a></h1>
 <p>This document explains how the current template-facing build API maps onto the
