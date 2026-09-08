@@ -1655,7 +1655,7 @@ mod tests {
 
     #[tokio::test]
     async fn retiring_route_closes_http_transport_while_response_body_is_unpolled() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -1683,7 +1683,7 @@ mod tests {
 
     #[tokio::test]
     async fn retiring_route_closes_unpolled_websocket_transport() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();

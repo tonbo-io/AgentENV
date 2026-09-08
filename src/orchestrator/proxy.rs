@@ -98,10 +98,11 @@ impl ProxyRouteTable {
         target: ProxyTarget,
         version: u64,
     ) -> ProxyRoute {
-        let route = ProxyRoute::new(target, version);
-        if let Some(old) = self.routes.insert(sandbox_id, route.clone()) {
-            old.target.connections.begin_retire();
+        let mut route = ProxyRoute::new(target, version);
+        if let Some(old) = self.routes.remove(&sandbox_id) {
+            route.target.connections = Arc::new(RouteConnections::after(old.target.connections));
         }
+        self.routes.insert(sandbox_id, route.clone());
         route
     }
 

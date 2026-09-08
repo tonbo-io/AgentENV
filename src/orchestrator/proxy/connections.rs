@@ -2,7 +2,7 @@
 //! registered socket, and waits for in-flight connect futures to release their
 //! sockets before the runtime may release its guest network address.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     net::{Shutdown, SocketAddr},
     pin::Pin,
@@ -27,6 +27,7 @@ struct State {
 #[derive(Debug)]
 pub(crate) struct RouteConnections {
     state: Mutex<State>,
+    predecessors: Mutex<Vec<Arc<RouteConnections>>>,
     retired: watch::Sender<bool>,
     changed: Notify,
 }
@@ -35,6 +36,7 @@ impl Default for RouteConnections {
     fn default() -> Self {
         Self {
             state: Mutex::new(State::default()),
+            predecessors: Mutex::new(Vec::new()),
             retired: watch::channel(false).0,
             changed: Notify::new(),
         }
@@ -46,7 +48,39 @@ fn retired_error() -> io::Error {
 }
 
 impl RouteConnections {
+    /// A replacement inherits every outstanding transport obligation. Publishing
+    /// its address cannot let a new connect overtake an old pending connect.
+    pub(crate) fn after(previous: Arc<Self>) -> Self {
+        previous.begin_retire();
+        Self {
+            predecessors: Mutex::new(vec![previous]),
+            ..Self::default()
+        }
+    }
+
+    fn all_predecessors(&self) -> Vec<Arc<Self>> {
+        let mut pending = self.predecessors.lock().unwrap().clone();
+        let mut seen = HashSet::new();
+        let mut ancestors = Vec::new();
+        while let Some(previous) = pending.pop() {
+            if seen.insert(Arc::as_ptr(&previous) as usize) {
+                pending.extend(previous.predecessors.lock().unwrap().iter().cloned());
+                ancestors.push(previous);
+            }
+        }
+        ancestors
+    }
+
+    async fn wait_predecessors(&self) -> io::Result<()> {
+        for previous in self.all_predecessors() {
+            previous.wait_own_retirement().await?;
+        }
+        self.predecessors.lock().unwrap().clear();
+        Ok(())
+    }
+
     pub(crate) async fn connect(self: &Arc<Self>, addr: SocketAddr) -> io::Result<RouteStream> {
+        self.wait_predecessors().await?;
         let mut retired = self.retired.subscribe();
         {
             let mut state = self.state.lock().unwrap();
@@ -92,6 +126,13 @@ impl RouteConnections {
     }
 
     pub(crate) fn begin_retire(&self) {
+        self.retire_own_sockets();
+        for previous in self.all_predecessors() {
+            previous.retire_own_sockets();
+        }
+    }
+
+    fn retire_own_sockets(&self) {
         let mut state = self.state.lock().unwrap();
         state.retired = true;
         state.shutdown_error = None;
@@ -110,6 +151,11 @@ impl RouteConnections {
     }
 
     pub(crate) async fn wait_retired(&self) -> io::Result<()> {
+        self.wait_own_retirement().await?;
+        self.wait_predecessors().await
+    }
+
+    async fn wait_own_retirement(&self) -> io::Result<()> {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
@@ -268,6 +314,34 @@ mod tests {
             assert_eq!(state.pending, 0);
             assert!(state.sockets.is_empty());
         }
+    }
+    #[tokio::test]
+    async fn repeated_replacement_retains_old_pending_connection_obligations() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let original = Arc::new(RouteConnections::default());
+        original.state.lock().unwrap().pending = 1;
+        let pending = PendingConnect(original.clone());
+        let intermediate = Arc::new(RouteConnections::after(original));
+        let current = Arc::new(RouteConnections::after(intermediate));
+        let connecting = current.clone();
+        let mut connection = tokio::spawn(async move { connecting.connect(addr).await });
+        assert!(timeout(Duration::from_millis(20), &mut connection)
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err());
+        drop(pending);
+        let stream = timeout(Duration::from_secs(1), connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(current.predecessors.lock().unwrap().is_empty());
+        current.begin_retire();
+        current.wait_retired().await.unwrap();
+        drop(stream);
     }
 }
 
