@@ -6,6 +6,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
+use futures::FutureExt;
 use tokio::sync::{broadcast, oneshot, watch, Mutex, OnceCell, RwLock};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, trace, warn};
@@ -1477,6 +1478,76 @@ where
             );
         }
         resumed
+    }
+
+    /// Publish retained paused artifacts under the same activation fence for the
+    /// entire publication. Cancellation of the HTTP caller must not release the
+    /// source files while the repository writer still consumes them.
+    pub async fn with_paused_snapshot<T, Fut>(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        activation: uuid::Uuid,
+        publish: impl FnOnce(SnapshotCaptureResult) -> Fut + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+    {
+        if activation.is_nil() {
+            return Err(OrchestratorError::ActivationConflict(sandbox_id));
+        }
+        let this = Arc::clone(self);
+        self.run_cancellation_safe("publish_paused_snapshot", sandbox_id, async move {
+            this.ensure_accepting_lifecycle_operations()?;
+            this.store
+                .transition_state(
+                    &sandbox_id,
+                    SandboxState::Snapshotting,
+                    &[SandboxState::Paused],
+                    Some(Some(activation)),
+                )
+                .await?;
+            let outcome = std::panic::AssertUnwindSafe(async {
+                let metadata = this
+                    .store
+                    .get(&sandbox_id)
+                    .await?
+                    .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?;
+                let paused = metadata.paused_state.as_ref().ok_or_else(|| {
+                    OrchestratorError::InternalError("paused state is missing".into())
+                })?;
+                let captured_snapshot = this
+                    .factory
+                    .capture_paused_state(paused.as_ref())
+                    .map_err(|error| {
+                        OrchestratorError::InternalError(format!(
+                            "capture paused artifacts: {error:#}"
+                        ))
+                    })?;
+                Ok(publish(SnapshotCaptureResult {
+                    metadata,
+                    captured_snapshot,
+                })
+                .await)
+            })
+            .catch_unwind()
+            .await;
+            this.store
+                .transition_state(
+                    &sandbox_id,
+                    SandboxState::Paused,
+                    &[SandboxState::Snapshotting],
+                    Some(Some(activation)),
+                )
+                .await?;
+            match outcome {
+                Ok(result) => result,
+                Err(_) => Err(OrchestratorError::InternalError(
+                    "paused snapshot publisher panicked".into(),
+                )),
+            }
+        })
+        .await
     }
 
     /// Captures a snapshot of a running sandbox.

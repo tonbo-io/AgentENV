@@ -107,9 +107,10 @@ impl SnapshotManager {
         if let Some(existing) = self.repository.get(&metadata.id.to_string()).await? {
             if matches!(
                 &metadata.source,
-                SnapshotPublishSource::Sandbox { source_sandbox_id }
+                SnapshotPublishSource::Sandbox { source_sandbox_id, source_activation_id }
                     if existing.matches_committed_sandbox_publication(
                         source_sandbox_id,
+                        *source_activation_id,
                         metadata.alias.as_ref(),
                     )
             ) {
@@ -323,32 +324,78 @@ mod tests {
     }
 
     #[test]
+    fn paused_publication_identity_survives_serialization_and_rejects_other_activations() {
+        let activation = uuid::Uuid::from_u128(7);
+        let mut record = SnapshotRecord::mock_ready(crate::snapshot::CommittedSnapshot::mock());
+        record.source = SnapshotSource::Sandbox {
+            source_sandbox_id: "sandbox".into(),
+            source_activation_id: Some(activation),
+        };
+        let record: SnapshotRecord =
+            serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
+        assert!(record.matches_committed_sandbox_publication(
+            "sandbox",
+            Some(activation),
+            record.alias.as_ref()
+        ));
+        for wrong in [None, Some(uuid::Uuid::from_u128(8))] {
+            assert!(!record.matches_committed_sandbox_publication(
+                "sandbox",
+                wrong,
+                record.alias.as_ref()
+            ));
+        }
+        // Existing committed snapshots remain readable, but cannot stand in for
+        // an activation-attributed paused publication.
+        let source: SnapshotSource =
+            serde_json::from_value(serde_json::json!({"Sandbox":{"source_sandbox_id":"sandbox"}}))
+                .unwrap();
+        assert!(matches!(
+            source,
+            SnapshotSource::Sandbox {
+                source_activation_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn captured_publication_replay_requires_the_same_committed_identity() {
         let source_sandbox_id = "sandbox-a".to_string();
         let alias = SnapshotAlias::parse("relocation").expect("valid alias");
         let metadata = SnapshotPublishMetadata {
             alias: Some(alias.clone()),
             source: SnapshotPublishSource::Sandbox {
+                source_activation_id: None,
                 source_sandbox_id: source_sandbox_id.clone(),
             },
             ..SnapshotPublishMetadata::mock()
         };
         let mut existing = SnapshotRecord::mock_ready(crate::snapshot::CommittedSnapshot::mock());
         existing.alias = Some(alias);
-        existing.source = SnapshotSource::Sandbox { source_sandbox_id };
+        existing.source = SnapshotSource::Sandbox {
+            source_sandbox_id,
+            source_activation_id: None,
+        };
 
-        assert!(
-            existing.matches_committed_sandbox_publication("sandbox-a", metadata.alias.as_ref())
-        );
+        assert!(existing.matches_committed_sandbox_publication(
+            "sandbox-a",
+            None,
+            metadata.alias.as_ref()
+        ));
 
-        assert!(
-            !existing.matches_committed_sandbox_publication("sandbox-b", metadata.alias.as_ref())
-        );
+        assert!(!existing.matches_committed_sandbox_publication(
+            "sandbox-b",
+            None,
+            metadata.alias.as_ref()
+        ));
 
         existing.committed = None;
-        assert!(
-            !existing.matches_committed_sandbox_publication("sandbox-a", metadata.alias.as_ref())
-        );
+        assert!(!existing.matches_committed_sandbox_publication(
+            "sandbox-a",
+            None,
+            metadata.alias.as_ref()
+        ));
     }
 
     async fn seed_built_snapshot(manager: &SnapshotManager, snapshot_id: SnapshotId, alias: &str) {

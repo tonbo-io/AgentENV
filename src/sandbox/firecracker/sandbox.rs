@@ -877,21 +877,6 @@ impl FirecrackerSandbox {
         });
         snapshot_common.rootfs_virtual_size = Some(rootfs_virtual_size);
 
-        let tools_drive_path = snapshot_common
-            .resolved_tools_drive_path(ConfigManager::global_config())
-            .context("resolve tools drive for snapshot publication")?;
-
-        let manifest = FirecrackerSnapshotManifest::new(
-            vm_state_path.clone(),
-            mem_overlaybd_config.image_config_path.clone(),
-            mem_virtual_size,
-            base_rootfs_path,
-            rootfs_virtual_size,
-            tools_drive_path,
-            &snapshot_extra_drives,
-        )
-        .context("build firecracker snapshot manifest")?;
-
         let snapshot = FirecrackerSnapshotConfig {
             common: snapshot_common,
             vm_state_path,
@@ -899,6 +884,8 @@ impl FirecrackerSandbox {
             mem_virtual_size,
             managed_snapshot_root: None,
         };
+        let manifest = FirecrackerSnapshotManifest::from_snapshot_config(&snapshot)
+            .context("build firecracker snapshot manifest")?;
 
         debug!(
             vm_state_path = %snapshot.vm_state_path.display(),

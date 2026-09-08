@@ -5360,3 +5360,148 @@ async fn cancelled_terminal_command_keeps_killing_fence_until_physical_stop() ->
     assert_eq!(behavior.stop_calls(), 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn paused_publication_rejects_running_and_stale_sources_and_never_resumes_on_failure(
+) -> Result<()> {
+    let behavior = Arc::new(MockBehavior::new());
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior.clone())).await;
+    let id = SandboxId::new();
+    orchestrator
+        .clone()
+        .create_sandbox_inner(id, create_request(Some(60), &[]))
+        .await?;
+    let activation = uuid::Uuid::now_v7();
+    let mut metadata = orchestrator.store.get(&id).await?.unwrap();
+    metadata.execution_lease = Some(runtime_policy::ExecutionLease {
+        activation_id: activation,
+        operation_id: uuid::Uuid::now_v7(),
+        sequence: 0,
+        expires_at_unix_ms: u64::MAX,
+    });
+    orchestrator.store.update(metadata).await?;
+    assert!(orchestrator
+        .with_paused_snapshot::<(), _>(id, activation, |_| async {
+            panic!("running source must not publish")
+        })
+        .await
+        .is_err());
+    orchestrator
+        .pause_sandbox_for_activation(id, Some(activation))
+        .await?;
+    for wrong in [uuid::Uuid::nil(), uuid::Uuid::now_v7()] {
+        assert!(matches!(
+            orchestrator
+                .with_paused_snapshot::<(), _>(id, wrong, |_| async {
+                    panic!("stale source must not publish")
+                })
+                .await,
+            Err(OrchestratorError::ActivationConflict(_))
+        ));
+    }
+    let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for operation in [
+        MockOperation::Start,
+        MockOperation::Resume,
+        MockOperation::BuildFromSnapshot,
+    ] {
+        let effects = effects.clone();
+        behavior.set_on_operation(
+            operation,
+            Arc::new(move || {
+                effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+    }
+    let failed = orchestrator
+        .with_paused_snapshot(id, activation, |_| async {
+            Err::<(), _>("repository unavailable")
+        })
+        .await?;
+    assert_eq!(failed, Err("repository unavailable"));
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Paused
+    );
+    assert!(orchestrator
+        .with_paused_snapshot::<(), _>(id, activation, |_| async { panic!("publisher panic") })
+        .await
+        .is_err());
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Paused
+    );
+    assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 0);
+    orchestrator
+        .delete_sandbox_for_activation(id, Some(activation))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_paused_publication_keeps_source_fenced_until_repository_finishes() -> Result<()>
+{
+    let orchestrator = make_orchestrator_with_factory(MockBackendFactory::new()).await;
+    let id = SandboxId::new();
+    orchestrator
+        .clone()
+        .create_sandbox_inner(id, create_request(Some(60), &[]))
+        .await?;
+    let activation = uuid::Uuid::now_v7();
+    let mut metadata = orchestrator.store.get(&id).await?.unwrap();
+    metadata.execution_lease = Some(runtime_policy::ExecutionLease {
+        activation_id: activation,
+        operation_id: uuid::Uuid::now_v7(),
+        sequence: 0,
+        expires_at_unix_ms: u64::MAX,
+    });
+    orchestrator.store.update(metadata).await?;
+    orchestrator
+        .pause_sandbox_for_activation(id, Some(activation))
+        .await?;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let gate = release.clone();
+    let owner = orchestrator.clone();
+    let request = tokio::spawn(async move {
+        owner
+            .with_paused_snapshot(id, activation, move |_| async move {
+                signal.notify_one();
+                gate.notified().await;
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("publisher entered");
+    request.abort();
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Snapshotting
+    );
+    let owner = orchestrator.clone();
+    let mut deletion = tokio::spawn(async move {
+        owner
+            .delete_sandbox_for_activation(id, Some(activation))
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut deletion)
+            .await
+            .is_err(),
+        "delete must wait while the publisher consumes source files"
+    );
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Snapshotting
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), deletion)
+        .await
+        .expect("delete finishes after publication")
+        .expect("delete task")?;
+    assert!(orchestrator.store.get(&id).await?.is_none());
+    Ok(())
+}

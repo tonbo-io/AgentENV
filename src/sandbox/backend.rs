@@ -356,6 +356,16 @@ pub trait SandboxBackendFactory: Send + Sync + 'static {
         launch_config: SandboxLaunchConfig,
     ) -> Result<Box<dyn SandboxBackend>>;
 
+    /// Prepare immutable artifacts from a retained paused state without building
+    /// or starting a guest. The caller must hold the paused lifecycle fence until
+    /// publication finishes so persisted artifacts cannot be removed meanwhile.
+    fn capture_paused_state(
+        &self,
+        _state: &dyn PausedSandboxState,
+    ) -> Result<CapturedSandboxSnapshot> {
+        anyhow::bail!("backend does not support paused snapshot publication")
+    }
+
     /// Decode backend-specific paused state loaded from persistence.
     fn decode_paused_state(
         &self,
