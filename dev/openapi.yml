@@ -764,6 +764,16 @@ components:
 
     ResumedSandbox:
       properties:
+        expectedSourceActivationID:
+          type: string
+          format: uuid
+          description: >
+            Exact nonzero activation of the retained paused runtime. Fenced
+            resume rejects running or transitional instances instead of updating
+            their timeout. After an uncertain response, observe the target
+            executionLease activation before deciding whether to retry.
+            Optional only for legacy SDK and SQL lifecycle callers until the
+            Kubernetes execution handoff retires those callers.
         targetNodeInstance:
           $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
