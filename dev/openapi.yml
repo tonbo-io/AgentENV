@@ -46,6 +46,30 @@ components:
       required: true
       schema:
         type: string
+    expectedNodeID:
+      name: expectedNodeID
+      in: query
+      required: false
+      description: Exact runtime node identity. Supply together with expectedClusterID, expectedServiceInstanceID and expectedActivationID; incomplete or mismatched targets are rejected before lifecycle work.
+      schema:
+        type: string
+        minLength: 1
+    expectedClusterID:
+      name: expectedClusterID
+      in: query
+      required: false
+      description: Cluster incarnation of the expected runtime node.
+      schema:
+        type: string
+        format: uuid
+    expectedServiceInstanceID:
+      name: expectedServiceInstanceID
+      in: query
+      required: false
+      description: Process incarnation of the expected runtime node. A replacement process rejects a delayed lifecycle request even when the endpoint is reused.
+      schema:
+        type: string
+        format: uuid
     expectedActivationID:
       name: expectedActivationID
       in: query
@@ -1833,6 +1857,9 @@ paths:
       parameters:
         - $ref: "#/components/parameters/sandboxID"
         - $ref: "#/components/parameters/expectedActivationID"
+        - $ref: "#/components/parameters/expectedNodeID"
+        - $ref: "#/components/parameters/expectedClusterID"
+        - $ref: "#/components/parameters/expectedServiceInstanceID"
         - name: terminalCommand
           in: query
           required: false
@@ -1871,6 +1898,9 @@ paths:
       parameters:
         - $ref: "#/components/parameters/sandboxID"
         - $ref: "#/components/parameters/expectedActivationID"
+        - $ref: "#/components/parameters/expectedNodeID"
+        - $ref: "#/components/parameters/expectedClusterID"
+        - $ref: "#/components/parameters/expectedServiceInstanceID"
       responses:
         "204":
           description: The sandbox was paused successfully and can be resumed
