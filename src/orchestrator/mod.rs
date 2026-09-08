@@ -20,6 +20,7 @@ pub use persistence::{
     SandboxPersistenceError, SandboxPersister,
 };
 pub use proxy::{ProxyLookupResult, ProxyTarget};
+pub(crate) use proxy::{RouteConnections, RouteConnector, RouteStream};
 pub use service::Orchestrator;
 pub use store::{
     InMemoryMetadataStore, MetadataStore, NewTimeout, SandboxListFilter, SandboxMetadata,

@@ -2732,14 +2732,21 @@ where
     ) {
         // Withdraw traffic without forgetting the runtime. A failed stop must
         // remain visible to drain/inventory instead of looking like an empty node.
-        if stage.should_detach_proxy_route() {
+        let removed_route = if stage.should_detach_proxy_route() {
             let sandboxes = self.sandboxes.read().await;
             if sandboxes
                 .get(&plan.sandbox_id())
                 .is_some_and(|current| Arc::ptr_eq(current, &handle))
             {
-                self.proxy_routes.write().await.remove(&plan.sandbox_id());
+                self.proxy_routes.write().await.remove(&plan.sandbox_id())
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(route) = removed_route.as_ref() {
+            route.wait_retired().await;
         }
 
         // Stop the sandbox.
@@ -2825,14 +2832,15 @@ where
 
         sandboxes.remove(sandbox_id);
 
-        if detach_proxy_route {
-            let removed_route = self.proxy_routes.write().await.remove(sandbox_id);
-            if let Some(route) = removed_route.as_ref() {
-                debug!(version = route.version(), "removed runtime proxy route");
-            }
-        }
-
+        let removed_route = if detach_proxy_route {
+            self.proxy_routes.write().await.remove(sandbox_id)
+        } else {
+            None
+        };
         drop(sandboxes);
+        if let Some(route) = removed_route.as_ref() {
+            route.wait_retired().await;
+        }
         true
     }
 
@@ -2932,6 +2940,9 @@ where
         }
 
         drop(sandboxes);
+        if let Some(route) = removed_route.as_ref() {
+            route.wait_retired().await;
+        }
         (handle, removed_route)
     }
 

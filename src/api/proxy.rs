@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, future::Future, time::Duration};
+use std::{error::Error as StdError, future::Future, sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
@@ -18,19 +18,16 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
-    rt::TokioExecutor,
-};
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use tokio::{sync::watch, time::timeout};
 use tokio_tungstenite::{
-    connect_async,
+    client_async,
     tungstenite::{
         self,
         client::IntoClientRequest,
         protocol::{frame::coding::CloseCode, Message as TungsteniteMessage},
     },
-    MaybeTlsStream, WebSocketStream,
+    WebSocketStream,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -39,8 +36,8 @@ use crate::{
     cfg::ConfigManager,
     observability::prometheus::HttpRouteSource,
     orchestrator::{
-        NewTimeout, OrchestratorError, ProxyLookupResult, ProxyTarget, SandboxMetadata,
-        SandboxState,
+        NewTimeout, OrchestratorError, ProxyLookupResult, ProxyTarget, RouteConnections,
+        RouteConnector, RouteStream, SandboxMetadata, SandboxState,
     },
     types::SandboxId,
 };
@@ -49,7 +46,7 @@ use crate::{
 use crate::api::impls::auth::{API_KEY_HEADER, ENVD_ACCESS_TOKEN_HEADER};
 
 /// Shared outbound HTTP client for the client-facing reverse proxy.
-pub(crate) type ProxyClient = Client<HttpConnector, Body>;
+pub(crate) type ProxyClient = Client<RouteConnector, Body>;
 
 #[derive(Clone)]
 pub(crate) struct ProxyClients {
@@ -95,12 +92,15 @@ fn native_grpc_request(request: &Request) -> bool {
         && (media_type.len() == GRPC_MEDIA_TYPE.len()
             || media_type.as_bytes()[GRPC_MEDIA_TYPE.len()] == b'+')
 }
-type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type UpstreamWebSocket = WebSocketStream<RouteStream>;
+#[cfg(test)]
+use tokio_tungstenite::connect_async;
 
 struct ResolvedProxyRequest {
     sandbox_id: SandboxId,
     upstream_uri: Uri,
     original_host: Option<HeaderValue>,
+    connections: Arc<RouteConnections>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,21 +171,19 @@ fn auto_resume_min_sandbox_timeout() -> Duration {
     })
 }
 
-pub(crate) fn build_proxy_clients() -> ProxyClients {
-    let mut connector = HttpConnector::new();
-    // Proxied requests and responses are small, so Nagle only ever adds a
-    // delayed-ACK wait to them.
-    connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(PROXY_CONNECT_TIMEOUT));
-    // Interaction IPs are reused across sandbox runtime generations. Hyper keys
-    // its idle pool by authority, so a pooled connection can retain a stale VM flow.
+#[cfg(test)]
+fn build_proxy_clients() -> ProxyClients {
+    build_route_proxy_clients(Arc::new(RouteConnections::default()))
+}
+
+fn build_route_proxy_clients(connections: Arc<RouteConnections>) -> ProxyClients {
+    let connector = RouteConnector {
+        connections,
+        timeout: PROXY_CONNECT_TIMEOUT,
+    };
     let http1 = Client::builder(TokioExecutor::new())
         .pool_max_idle_per_host(0)
-        .build(connector);
-
-    let mut connector = HttpConnector::new();
-    connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(PROXY_CONNECT_TIMEOUT));
+        .build(connector.clone());
     let http2 = Client::builder(TokioExecutor::new())
         .http2_only(true)
         .pool_max_idle_per_host(0)
@@ -371,7 +369,7 @@ async fn proxy_request(
         return proxy_websocket_request(websocket_upgrade, parts, resolved).await;
     }
 
-    proxy_http_request(api_impl, parts, body, resolved).await
+    proxy_http_request(parts, body, resolved).await
 }
 
 fn strip_proxy_prefix(path: &str) -> &str {
@@ -472,7 +470,6 @@ pub(crate) fn effective_envd_port(metadata: &SandboxMetadata) -> u16 {
 
 /// Proxies a standard HTTP request to the resolved upstream URI and returns the response.
 async fn proxy_http_request(
-    api_impl: &ApiImpl,
     mut parts: http::request::Parts,
     body: Body,
     resolved: ResolvedProxyRequest,
@@ -481,6 +478,7 @@ async fn proxy_http_request(
         sandbox_id,
         upstream_uri,
         original_host,
+        connections,
     } = resolved;
 
     sanitize_request_headers(&mut parts.headers);
@@ -521,7 +519,7 @@ async fn proxy_http_request(
     let (body, activity_rx) = track_request_body_activity(body);
     let upstream_request = Request::from_parts(parts, body);
     let upstream_response_result = match wait_for_upstream_response_headers_with_activity_timeout(
-        api_impl.proxy_clients().request(upstream_request),
+        build_route_proxy_clients(connections).request(upstream_request),
         activity_rx,
     )
     .await
@@ -664,6 +662,7 @@ async fn proxy_websocket_request(
         sandbox_id,
         upstream_uri,
         original_host,
+        connections,
     } = resolved;
 
     sanitize_websocket_request_headers(&mut parts.headers);
@@ -689,7 +688,23 @@ async fn proxy_websocket_request(
 
     let (upstream_websocket, upstream_response) = match timeout(
         PROXY_RESPONSE_HEADER_TIMEOUT,
-        connect_async(upstream_request),
+        async {
+            let addr = upstream_uri
+                .authority()
+                .ok_or_else(|| {
+                    tungstenite::Error::Io(std::io::Error::other("missing route authority"))
+                })?
+                .as_str()
+                .parse()
+                .map_err(|_| {
+                    tungstenite::Error::Io(std::io::Error::other("invalid route authority"))
+                })?;
+            let stream = connections
+                .connect(addr)
+                .await
+                .map_err(tungstenite::Error::Io)?;
+            client_async(upstream_request, stream).await
+        },
     )
     .await
     {
@@ -853,6 +868,7 @@ async fn resolve_proxy_request(
         sandbox_id,
         upstream_uri,
         original_host: parts.headers.get(header::HOST).cloned(),
+        connections: target.connections,
     })
 }
 
@@ -1637,6 +1653,56 @@ mod tests {
         second_response.into_body().collect().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn retiring_route_closes_http_transport_while_response_body_is_unpolled() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request_head(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nx")
+                .await
+                .unwrap();
+            let mut byte = [0];
+            timeout(Duration::from_secs(1), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        let route = Arc::new(RouteConnections::default());
+        let client = build_route_proxy_clients(route.clone());
+        let response = client.request(empty_proxy_request(address)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        route.begin_retire();
+        route.wait_retired().await.unwrap();
+        assert_eq!(origin.await.unwrap(), 0);
+        assert!(client.request(empty_proxy_request(address)).await.is_err());
+        drop(response);
+    }
+
+    #[tokio::test]
+    async fn retiring_route_closes_unpolled_websocket_transport() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            timeout(Duration::from_secs(1), websocket.next())
+                .await
+                .unwrap()
+        });
+        let route = Arc::new(RouteConnections::default());
+        let stream = route.connect(address).await.unwrap();
+        let (websocket, _) = client_async(format!("ws://{address}/"), stream)
+            .await
+            .unwrap();
+        route.begin_retire();
+        route.wait_retired().await.unwrap();
+        assert!(!matches!(origin.await.unwrap(), Some(Ok(_))));
+        drop(websocket);
+    }
+
     async fn spawn_upstream(router: axum::Router) -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2100,10 +2166,7 @@ mod tests {
 
     #[test]
     fn build_upstream_uri_preserves_path_and_query() {
-        let target = ProxyTarget {
-            ip: std::net::Ipv4Addr::LOCALHOST,
-            activation_id: None,
-        };
+        let target = ProxyTarget::new(std::net::Ipv4Addr::LOCALHOST, None);
 
         let uri =
             build_upstream_uri_with_scheme("http", &target, 8080, "echo/test", Some("foo=bar"))
