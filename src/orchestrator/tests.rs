@@ -5510,3 +5510,93 @@ async fn cancelled_paused_publication_keeps_source_fenced_until_repository_finis
     assert!(orchestrator.store.get(&id).await?.is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn fenced_resume_rejects_stale_source_and_never_renews_running_instance() -> Result<()> {
+    let (orchestrator, starts) = creation_test_with_start_counter().await;
+    let id = SandboxId::new();
+    orchestrator
+        .clone()
+        .create_sandbox_inner(id, create_request(Some(60), &[]))
+        .await?;
+    let source = Uuid::now_v7();
+    let mut metadata = orchestrator.store.get(&id).await?.unwrap();
+    metadata.execution_lease = Some(runtime_policy::ExecutionLease {
+        activation_id: source,
+        operation_id: Uuid::now_v7(),
+        sequence: 0,
+        expires_at_unix_ms: u64::MAX,
+    });
+    orchestrator.store.update(metadata).await?;
+    let before = orchestrator.store.get(&id).await?.unwrap();
+    assert!(matches!(
+        orchestrator
+            .resume_sandbox_from_activation(
+                id,
+                Some(source),
+                NewTimeout::Set(Duration::from_secs(900))
+            )
+            .await,
+        Err(OrchestratorError::InvalidSandboxState {
+            state: SandboxState::Running,
+            ..
+        })
+    ));
+    let after = orchestrator.store.get(&id).await?.unwrap();
+    assert_eq!(after.timeout, before.timeout);
+    assert_eq!(after.expires_at, before.expires_at);
+    orchestrator
+        .pause_sandbox_for_activation(id, Some(source))
+        .await?;
+    let starts_before = starts.load(std::sync::atomic::Ordering::SeqCst);
+    for stale in [Uuid::nil(), Uuid::now_v7()] {
+        assert!(matches!(
+            orchestrator
+                .resume_sandbox_from_activation(id, Some(stale), NewTimeout::UseExisting)
+                .await,
+            Err(OrchestratorError::ActivationConflict(_))
+        ));
+        let retained = orchestrator.store.get(&id).await?.unwrap();
+        assert_eq!(retained.state, SandboxState::Paused);
+        assert_eq!(retained.execution_lease.unwrap().activation_id, source);
+        assert!(retained.paused_state.is_some());
+        assert_eq!(
+            starts.load(std::sync::atomic::Ordering::SeqCst),
+            starts_before
+        );
+    }
+    // Simulate a completed successor activation leaving another paused state.
+    // The old source must also fail at the store CAS, despite identical state.
+    let successor = Uuid::now_v7();
+    let mut retained = orchestrator.store.get(&id).await?.unwrap();
+    retained.execution_lease.as_mut().unwrap().activation_id = successor;
+    orchestrator.store.update(retained).await?;
+    assert!(matches!(
+        orchestrator
+            .store
+            .transition_state(
+                &id,
+                SandboxState::Resuming,
+                &[SandboxState::Paused],
+                Some(Some(source)),
+            )
+            .await,
+        Err(StoreError::ActivationConflict { .. })
+    ));
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Paused
+    );
+    let resumed = orchestrator
+        .resume_sandbox_from_activation(
+            id,
+            Some(successor),
+            NewTimeout::Set(Duration::from_secs(60)),
+        )
+        .await?;
+    assert_eq!(resumed.state, SandboxState::Running);
+    orchestrator
+        .delete_sandbox_for_activation(id, resumed.execution_lease.map(|lease| lease.activation_id))
+        .await?;
+    Ok(())
+}

@@ -1646,8 +1646,9 @@ impl Sandboxes<()> for ApiImpl {
         match timer
             .time(
                 "resume",
-                self.orchestrator.resume_sandbox(
+                self.orchestrator.resume_sandbox_from_activation(
                     sandbox_id,
+                    body.expected_source_activation_id,
                     body.execution_lease
                         .as_ref()
                         .map(execution_lease)
@@ -1666,6 +1667,11 @@ impl Sandboxes<()> for ApiImpl {
             Err(OrchestratorError::SandboxNotFound(id)) => {
                 return Ok(SandboxesSandboxIdResumePostResponse::Status404_NotFound(
                     sandbox_not_found(id),
+                ));
+            }
+            Err(OrchestratorError::ActivationConflict(_)) => {
+                return Ok(SandboxesSandboxIdResumePostResponse::Status409_Conflict(
+                    Self::error(409, "sandbox source activation changed".to_string()),
                 ));
             }
             Err(OrchestratorError::InvalidSandboxState { state, .. }) => {

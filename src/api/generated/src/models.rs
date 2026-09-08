@@ -5963,6 +5963,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<PausedSandbo
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct ResumedSandbox {
+    /// Exact nonzero activation of the retained paused runtime. Fenced resume rejects running or transitional instances instead of updating their timeout. After an uncertain response, observe the target executionLease activation before deciding whether to retry. Optional only for legacy SDK and SQL lifecycle callers until the Kubernetes execution handoff retires those callers.
+    #[serde(rename = "expectedSourceActivationID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_source_activation_id: Option<uuid::Uuid>,
+
     #[serde(rename = "targetNodeInstance")]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5984,6 +5989,7 @@ impl ResumedSandbox {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new() -> ResumedSandbox {
         ResumedSandbox {
+            expected_source_activation_id: None,
             target_node_instance: None,
             execution_lease: None,
             timeout: Some(15),
@@ -5997,6 +6003,8 @@ impl ResumedSandbox {
 impl std::fmt::Display for ResumedSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            // Skipping expectedSourceActivationID in query parameter serialization
+
             // Skipping targetNodeInstance in query parameter serialization
 
             // Skipping executionLease in query parameter serialization
@@ -6024,6 +6032,7 @@ impl std::str::FromStr for ResumedSandbox {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub expected_source_activation_id: Vec<uuid::Uuid>,
             pub target_node_instance: Vec<models::NodeLaunchTarget>,
             pub execution_lease: Vec<models::ExecutionLease>,
             pub timeout: Vec<u32>,
@@ -6048,6 +6057,13 @@ impl std::str::FromStr for ResumedSandbox {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "expectedSourceActivationID" => {
+                        intermediate_rep.expected_source_activation_id.push(
+                            <uuid::Uuid as std::str::FromStr>::from_str(val)
+                                .map_err(|x| x.to_string())?,
+                        )
+                    }
                     #[allow(clippy::redundant_clone)]
                     "targetNodeInstance" => intermediate_rep.target_node_instance.push(
                         <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
@@ -6076,6 +6092,10 @@ impl std::str::FromStr for ResumedSandbox {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(ResumedSandbox {
+            expected_source_activation_id: intermediate_rep
+                .expected_source_activation_id
+                .into_iter()
+                .next(),
             target_node_instance: intermediate_rep.target_node_instance.into_iter().next(),
             execution_lease: intermediate_rep.execution_lease.into_iter().next(),
             timeout: intermediate_rep.timeout.into_iter().next(),

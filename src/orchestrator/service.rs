@@ -1347,9 +1347,27 @@ where
         sandbox_id: SandboxId,
         timeout: NewTimeout,
     ) -> Result<SandboxMetadata> {
+        self.resume_sandbox_from_activation(sandbox_id, None, timeout)
+            .await
+    }
+
+    /// Resume only the named paused activation. A fenced request never joins a
+    /// different operation or renews an already running instance. After an
+    /// uncertain response, callers must observe the funded target activation.
+    /// None preserves the legacy SDK/SQL caller until Kubernetes handoff.
+    pub async fn resume_sandbox_from_activation(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        expected_source_activation: Option<uuid::Uuid>,
+        timeout: NewTimeout,
+    ) -> Result<SandboxMetadata> {
+        if expected_source_activation.is_some_and(|id| id.is_nil()) {
+            return Err(OrchestratorError::ActivationConflict(sandbox_id));
+        }
         let this = Arc::clone(self);
         self.run_cancellation_safe("resume", sandbox_id, async move {
-            this.resume_sandbox_inner(sandbox_id, timeout).await
+            this.resume_sandbox_inner(sandbox_id, expected_source_activation, timeout)
+                .await
         })
         .await
     }
@@ -1362,6 +1380,7 @@ where
     async fn resume_sandbox_inner(
         self: Arc<Self>,
         sandbox_id: SandboxId,
+        expected_source_activation: Option<uuid::Uuid>,
         timeout: NewTimeout,
     ) -> Result<SandboxMetadata> {
         let _admission = self
@@ -1376,6 +1395,18 @@ where
             .get(&sandbox_id)
             .await?
             .ok_or(OrchestratorError::SandboxNotFound(sandbox_id))?;
+
+        if let Some(expected) = expected_source_activation {
+            if metadata.execution_lease.map(|lease| lease.activation_id) != Some(expected) {
+                return Err(OrchestratorError::ActivationConflict(sandbox_id));
+            }
+            if metadata.state != SandboxState::Paused {
+                return Err(OrchestratorError::InvalidSandboxState {
+                    sandbox_id,
+                    state: metadata.state,
+                });
+            }
+        }
 
         // If another resume is in progress, wait for it to complete and
         // re-evaluate the resulting stable state.
@@ -1410,11 +1441,22 @@ where
 
         match self
             .store
-            .update_state_if_state(&sandbox_id, SandboxState::Resuming, &[SandboxState::Paused])
+            .transition_state(
+                &sandbox_id,
+                SandboxState::Resuming,
+                &[SandboxState::Paused],
+                Some(metadata.execution_lease.map(|lease| lease.activation_id)),
+            )
             .await
         {
             Ok(_) => {}
             Err(StoreError::StateConflict { actual_state, .. }) => {
+                if expected_source_activation.is_some() {
+                    return Err(OrchestratorError::InvalidSandboxState {
+                        sandbox_id,
+                        state: actual_state,
+                    });
+                }
                 return match actual_state {
                     SandboxState::Running => {
                         // Another task already completed the resume.
