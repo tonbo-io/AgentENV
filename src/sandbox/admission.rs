@@ -180,12 +180,28 @@ impl NodeAdmission {
             {
                 bail!("sandbox already owns a runtime admission");
             }
-            ledger.budget.admit(
-                id,
-                reservation,
-                available.saturating_sub(self.reserve_memory),
-                disk_available,
-            )?;
+            let ledger_available = ledger.budget.available_memory();
+            let host_available = available.saturating_sub(self.reserve_memory);
+            let released_entries = ledger
+                .entries
+                .values()
+                .filter(|entry| entry.released)
+                .count();
+            ledger
+                .budget
+                .admit(id, reservation, host_available, disk_available)
+                .inspect_err(|error| {
+                    warn!(
+                        %error,
+                        %sandbox,
+                        activation_id = %id,
+                        requested_memory_bytes = reservation.memory_bytes,
+                        ledger_available_bytes = ledger_available,
+                        host_available_bytes = host_available,
+                        released_entries,
+                        "node admission rejected"
+                    );
+                })?;
             let configured = configure_leaf(&leaf, reservation.memory_bytes, resources.cpu_count);
             if let Err(error) = configured {
                 ledger.budget.reservations.remove(&id);
