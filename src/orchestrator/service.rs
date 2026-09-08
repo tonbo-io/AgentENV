@@ -2227,10 +2227,15 @@ where
                 }
             })?;
         }
+        let mut applied = true;
         let update_result = self
             .store
             .update_if_state(&sandbox_id, &[SandboxState::Running], |metadata| {
-                metadata.update_timeout(timeout);
+                if let NewTimeout::Funded(lease) = timeout {
+                    applied = metadata.update_funded_timeout_if_current(lease);
+                } else {
+                    metadata.update_timeout(timeout);
+                }
             })
             .await
             .map_err(|err| match err {
@@ -2243,6 +2248,9 @@ where
                 }
                 other => OrchestratorError::from(other),
             })?;
+        if !applied {
+            return Err(OrchestratorError::ActivationConflict(sandbox_id));
+        }
         Ok(update_result.current)
     }
 

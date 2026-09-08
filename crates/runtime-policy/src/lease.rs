@@ -19,6 +19,18 @@ pub fn unix_millis(now: SystemTime) -> Result<u64> {
 }
 
 impl ExecutionLease {
+    /// Validate identity and ordering independently from deadline enforcement.
+    /// Metadata publication reuses the watchdog's exact successor contract.
+    pub fn validate_successor(&self, next: Self) -> Result<()> {
+        if next.activation_id != self.activation_id || next.sequence < self.sequence {
+            bail!("execution lease lost its activation fence");
+        }
+        if next.sequence == self.sequence && next != *self {
+            bail!("execution lease replay changed its payload");
+        }
+        Ok(())
+    }
+
     pub fn remaining(&self, now: SystemTime) -> Result<Duration> {
         let remaining = self.expires_at_unix_ms.saturating_sub(unix_millis(now)?);
         if remaining == 0 || self.activation_id.is_nil() || self.operation_id.is_nil() {
@@ -58,13 +70,8 @@ impl LeaseState {
         if self.expired(wall, mono) {
             bail!("expired execution cannot be renewed");
         }
-        if lease.activation_id != self.lease.activation_id || lease.sequence < self.lease.sequence {
-            bail!("execution lease lost its activation fence");
-        }
+        self.lease.validate_successor(lease)?;
         if lease.sequence == self.lease.sequence {
-            if lease != self.lease {
-                bail!("execution lease replay changed its payload");
-            }
             return Ok(());
         }
         let mut next = Self::new(lease, wall, mono)?;
