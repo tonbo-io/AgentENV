@@ -144,6 +144,19 @@ pub struct SandboxesSandboxIdDeleteQueryParams {
     #[serde(rename = "expectedActivationID")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_activation_id: Option<uuid::Uuid>,
+    /// Exact runtime node identity. Supply together with expectedClusterID, expectedServiceInstanceID and expectedActivationID; incomplete or mismatched targets are rejected before lifecycle work.
+    #[serde(rename = "expectedNodeID")]
+    #[validate(length(min = 1))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_node_id: Option<String>,
+    /// Cluster incarnation of the expected runtime node.
+    #[serde(rename = "expectedClusterID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_cluster_id: Option<uuid::Uuid>,
+    /// Process incarnation of the expected runtime node. A replacement process rejects a delayed lifecycle request even when the endpoint is reused.
+    #[serde(rename = "expectedServiceInstanceID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_service_instance_id: Option<uuid::Uuid>,
     /// Absolute guest executable path, without arguments, run only after the expected activation acquires terminal deletion. Requires expectedActivationID. Best effort, bounded to 30 seconds; physical deletion continues on command failure or timeout. Paused sandboxes are never resumed to execute it.
     #[serde(rename = "terminalCommand")]
     #[validate(
@@ -189,6 +202,19 @@ pub struct SandboxesSandboxIdPausePostQueryParams {
     #[serde(rename = "expectedActivationID")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_activation_id: Option<uuid::Uuid>,
+    /// Exact runtime node identity. Supply together with expectedClusterID, expectedServiceInstanceID and expectedActivationID; incomplete or mismatched targets are rejected before lifecycle work.
+    #[serde(rename = "expectedNodeID")]
+    #[validate(length(min = 1))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_node_id: Option<String>,
+    /// Cluster incarnation of the expected runtime node.
+    #[serde(rename = "expectedClusterID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_cluster_id: Option<uuid::Uuid>,
+    /// Process incarnation of the expected runtime node. A replacement process rejects a delayed lifecycle request even when the endpoint is reused.
+    #[serde(rename = "expectedServiceInstanceID")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_service_instance_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
