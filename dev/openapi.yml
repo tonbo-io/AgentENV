@@ -46,6 +46,14 @@ components:
       required: true
       schema:
         type: string
+    expectedActivationID:
+      name: expectedActivationID
+      in: query
+      required: false
+      description: Expected funded activation identity. A mismatch returns conflict without modifying the sandbox. Omission temporarily retains ID-only callers during lifecycle authority migration.
+      schema:
+        type: string
+        format: uuid
     sandboxID:
       name: sandboxID
       in: path
@@ -1323,6 +1331,46 @@ components:
           type: string
           description: CPU architecture of the node
 
+    ActivationRevocationRequest:
+      type: object
+      additionalProperties: false
+      required: [clusterID, serviceInstanceID, sandboxID, activationID]
+      properties:
+        clusterID:
+          type: string
+          format: uuid
+        serviceInstanceID:
+          type: string
+          format: uuid
+        sandboxID:
+          type: string
+          format: uuid
+        activationID:
+          type: string
+          format: uuid
+    ActivationRevocationObservation:
+      type: object
+      additionalProperties: false
+      description: Admission history on this exact node only. NeverAdmitted prevents future first admission here; PreviouslyAdmitted requires physical reconciliation and proves neither running nor stopped. Neither is a cross-node fence or a host cleanup receipt.
+      required: [nodeID, clusterID, serviceInstanceID, sandboxID, activationID, disposition]
+      properties:
+        nodeID:
+          type: string
+        clusterID:
+          type: string
+          format: uuid
+        serviceInstanceID:
+          type: string
+          format: uuid
+        sandboxID:
+          type: string
+          format: uuid
+        activationID:
+          type: string
+          format: uuid
+        disposition:
+          type: string
+          enum: [NeverAdmitted, PreviouslyAdmitted]
     NodeDrainRequest:
       type: object
       additionalProperties: false
@@ -1741,9 +1789,12 @@ paths:
           AdminTeamAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
+        - $ref: "#/components/parameters/expectedActivationID"
       responses:
         "204":
           description: The sandbox was killed successfully
+        "409":
+          $ref: "#/components/responses/409"
         "404":
           $ref: "#/components/responses/404"
         "401":
@@ -1765,6 +1816,7 @@ paths:
           AdminTeamAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
+        - $ref: "#/components/parameters/expectedActivationID"
       responses:
         "204":
           description: The sandbox was paused successfully and can be resumed
@@ -2613,6 +2665,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NodeDrainObservation"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "409":
+          description: Node instance mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /nodes/{nodeID}/activation-revocations:
+    post:
+      summary: Prevent first admission of an activation
+      description: Serialize with local execution admission and persist denial before acknowledging NeverAdmitted. Already admitted activations return PreviouslyAdmitted without implying physical stop. Requests must address the exact node service incarnation.
+      tags: [admin]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/nodeID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivationRevocationRequest"
+      responses:
+        "200":
+          description: Durable admission disposition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivationRevocationObservation"
+        "400":
+          $ref: "#/components/responses/400"
         "401":
           $ref: "#/components/responses/401"
         "404":

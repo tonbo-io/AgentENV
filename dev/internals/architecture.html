@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7f277afa.js";
+            window.path_to_searchindex_js = "../searchindex-b330e121.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c868df7a.js"></script>
@@ -454,6 +454,11 @@ services/                       # distributed control plane (Go)
 <h3 id="network-cleanup-ownership"><a class="header" href="#network-cleanup-ownership">Network cleanup ownership</a></h3>
 <p>A failed slot cleanup retains the slot handle and its allocated bitmap bit in the network manager. It cannot return to the warm pool or be allocated to another guest. Partial network setup failures use the same cleanup path. Pool maintenance retries retained slots without blocking refill solely because an older cleanup failed; shutdown also retries them and reports failures. Only successful cleanup releases the bit. Cleanup runs outside the pending-list mutex.</p>
 <p>This ownership is process-local. It is not durable orphan recovery or a host termination acknowledgement; restart reconciliation, active-slot accounting and complete physical cleanup proof remain required.</p>
+<h3 id="lifecycle-activation-preconditions"><a class="header" href="#lifecycle-activation-preconditions">Lifecycle activation preconditions</a></h3>
+<p>The orchestrator’s pause and delete transitions compare the expected funded activation with current metadata under the same store write lock that acquires the transitional state. Unfunded execution is an exact <code>None</code> identity, not a wildcard. Delete retries retain the original expected activation across waits; a later resume cannot silently become the deletion target. Expiry and shutdown workers pass the activation from their observed metadata. Concurrent pause completion also validates activation before reporting success.</p>
+<p>The pause and delete HTTP endpoints accept <code>expectedActivationID</code> from the caller and return 409 on mismatch. They dispatch through <code>pause_sandbox_for_activation</code> and <code>delete_sandbox_for_activation</code>. Calls omitting this parameter still observe activation at arrival and cannot distinguish a request delayed before API arrival. Pending KE-04 Cloud/controller integration must supply the precondition and qualify response-loss and stale-request behavior before execution-authority cutover. The current ID-only API and its Cloud lifecycle callers remain the named temporary consumers, removed when KE-04–08 integrate the explicit precondition. These checks neither grant execution nor prove physical cleanup.</p>
+<h3 id="unadmitted-activation-revocation"><a class="header" href="#unadmitted-activation-revocation">Unadmitted activation revocation</a></h3>
+<p>Node admission can durably prevent a never-admitted activation from acquiring execution, using its existing synchronous activation registry and the same claim lock as acquire. A revoked-before-admission record returns <code>NeverAdmitted</code> on replay, including after reopening the store. Existing sandbox-ID values remain admission history and return <code>PreviouslyAdmitted</code>; that result proves neither runtime presence nor physical stop. Records bind the activation to the exact sandbox identity. The revocation task retains the claim lock through the write after caller cancellation. <code>POST /nodes/{nodeID}/activation-revocations</code> carries cluster, service-instance, sandbox and activation identities, rejecting a different node incarnation before accessing admission. The response echoes those identities and the admission disposition. This API is addressed directly to the selected node, like the existing drain client. Concurrent acquire/revoke qualification and Cloud recovery consumption remain pending; this internal primitive alone is not a cleanup receipt or a cross-node fence.</p>
 
                     </main>
 
