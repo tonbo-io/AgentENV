@@ -417,6 +417,20 @@ impl SandboxBackend for FirecrackerSandbox {
         FirecrackerSandbox::resume(self).await
     }
 
+    async fn terminal_command(&mut self, command: &str) -> Result<()> {
+        let envd = self
+            .envd_instance
+            .as_ref()
+            .context("Sandbox is not running")?;
+        let output = Executor::new(envd).run_command(command, &[]).await?;
+        anyhow::ensure!(
+            output.exit_code == 0,
+            "terminal command exited {}",
+            output.exit_code
+        );
+        Ok(())
+    }
+
     async fn stop(&mut self) -> Result<()> {
         FirecrackerSandbox::stop(self).await
     }

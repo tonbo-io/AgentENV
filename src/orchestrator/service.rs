@@ -1017,6 +1017,22 @@ where
         .await
     }
 
+    /// Guest shutdown is part of the same activation-fenced, cancellation-safe
+    /// terminal operation as physical deletion, never a separate unfenced exec.
+    pub async fn delete_sandbox_with_terminal_command(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        activation: uuid::Uuid,
+        command: String,
+    ) -> Result<()> {
+        let this = Arc::clone(self);
+        self.run_cancellation_safe("delete", sandbox_id, async move {
+            this.delete_sandbox_inner_with_command(sandbox_id, Some(activation), Some(command))
+                .await
+        })
+        .await
+    }
+
     #[tracing::instrument(
         name = "delete_sandbox",
         skip(self),
@@ -1026,6 +1042,16 @@ where
         self: &Arc<Self>,
         sandbox_id: SandboxId,
         activation: Option<uuid::Uuid>,
+    ) -> Result<()> {
+        self.delete_sandbox_inner_with_command(sandbox_id, activation, None)
+            .await
+    }
+
+    async fn delete_sandbox_inner_with_command(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        activation: Option<uuid::Uuid>,
+        command: Option<String>,
     ) -> Result<()> {
         info!("deleting sandbox");
 
@@ -1122,6 +1148,27 @@ where
         if let Some(handle) = handle {
             let stop_result = {
                 let mut sandbox = handle.lock().await;
+                if previous_state == SandboxState::Running {
+                    if let Some(command) = command.as_deref() {
+                        // Killing was acquired with the expected activation and
+                        // persisted before any guest command. Resume cannot race
+                        // this bounded best-effort shutdown phase.
+                        match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            sandbox.terminal_command(command),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                warn!(%error, "terminal guest command failed; continuing physical deletion")
+                            }
+                            Err(_) => warn!(
+                                "terminal guest command timed out; continuing physical deletion"
+                            ),
+                        }
+                    }
+                }
                 sandbox.stop().await
             };
 

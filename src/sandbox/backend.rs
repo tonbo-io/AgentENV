@@ -305,6 +305,12 @@ pub trait SandboxBackend: Send + 'static {
         spec: &[SandboxForkSpec],
     ) -> SandboxCaptureResult<Vec<SandboxForkResult>>;
 
+    /// Run a terminal guest command after the orchestrator has fenced deletion.
+    /// The caller bounds elapsed time and still performs physical stop on error.
+    async fn terminal_command(&mut self, _command: &str) -> Result<()> {
+        anyhow::bail!("backend does not support terminal guest commands")
+    }
+
     /// Stop the sandbox and release all associated system resources.
     ///
     /// Idempotent: calling `stop` more than once must not return an error.
