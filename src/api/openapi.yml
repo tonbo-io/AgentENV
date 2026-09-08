@@ -34,6 +34,15 @@ components:
       name: X-Team-ID
 
   parameters:
+    ExecutionProxyTargetHeader:
+      name: x-agentenv-execution-target
+      in: header
+      required: false
+      description: JSON execution target for incarnation-fenced guest proxy requests. Required for funded routes. It identifies the receiver and activation but does not authorize access. Requests carrying this target never auto-resume. Unfunded standalone SDK routes may omit it.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExecutionProxyTarget"
     templateID:
       name: templateID
       in: path
@@ -699,6 +708,17 @@ components:
             type: string
             minLength: 1
             maxLength: 200
+
+    ExecutionProxyTarget:
+      type: object
+      additionalProperties: false
+      required: [node, activationID]
+      properties:
+        node:
+          $ref: "#/components/schemas/NodeLaunchTarget"
+        activationID:
+          type: string
+          format: uuid
 
     NodeLaunchTarget:
       type: object

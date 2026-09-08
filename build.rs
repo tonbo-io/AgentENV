@@ -2,6 +2,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/api/openapi.yml");
+    let spec: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("src/api/openapi.yml")).expect("valid API contract");
+    let header = spec["components"]["parameters"]["ExecutionProxyTargetHeader"]["name"]
+        .as_str()
+        .expect("execution proxy header in API contract");
+    assert!(!header.is_empty() && header.bytes().all(|c| c.is_ascii_lowercase() || c == b'-'));
+    println!("cargo:rustc-env=AENV_EXECUTION_PROXY_HEADER={header}");
+
     println!("cargo:rerun-if-changed=services/api/proto/scheduler.proto");
     println!("cargo:rerun-if-env-changed=AENV_GIT_COMMIT");
     emit_git_rerun_inputs();

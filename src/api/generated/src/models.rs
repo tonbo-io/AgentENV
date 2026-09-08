@@ -2541,6 +2541,161 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ExecutionLea
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
+pub struct ExecutionProxyTarget {
+    #[serde(rename = "node")]
+    #[validate(nested)]
+    pub node: models::NodeLaunchTarget,
+
+    #[serde(rename = "activationID")]
+    pub activation_id: uuid::Uuid,
+}
+
+impl ExecutionProxyTarget {
+    #[allow(clippy::new_without_default, clippy::too_many_arguments)]
+    pub fn new(node: models::NodeLaunchTarget, activation_id: uuid::Uuid) -> ExecutionProxyTarget {
+        ExecutionProxyTarget {
+            node,
+            activation_id,
+        }
+    }
+}
+
+/// Converts the ExecutionProxyTarget value to the Query Parameters representation (style=form, explode=false)
+/// specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde serializer
+impl std::fmt::Display for ExecutionProxyTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: Vec<Option<String>> = vec![
+            // Skipping node in query parameter serialization
+
+            // Skipping activationID in query parameter serialization
+
+        ];
+
+        write!(
+            f,
+            "{}",
+            params.into_iter().flatten().collect::<Vec<_>>().join(",")
+        )
+    }
+}
+
+/// Converts Query Parameters representation (style=form, explode=false) to a ExecutionProxyTarget value
+/// as specified in https://swagger.io/docs/specification/serialization/
+/// Should be implemented in a serde deserializer
+impl std::str::FromStr for ExecutionProxyTarget {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        /// An intermediate representation of the struct to use for parsing.
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct IntermediateRep {
+            pub node: Vec<models::NodeLaunchTarget>,
+            pub activation_id: Vec<uuid::Uuid>,
+        }
+
+        let mut intermediate_rep = IntermediateRep::default();
+
+        // Parse into intermediate representation
+        let mut string_iter = s.split(',');
+        let mut key_result = string_iter.next();
+
+        while key_result.is_some() {
+            let val = match string_iter.next() {
+                Some(x) => x,
+                None => {
+                    return std::result::Result::Err(
+                        "Missing value while parsing ExecutionProxyTarget".to_string(),
+                    );
+                }
+            };
+
+            if let Some(key) = key_result {
+                #[allow(clippy::match_single_binding)]
+                match key {
+                    #[allow(clippy::redundant_clone)]
+                    "node" => intermediate_rep.node.push(
+                        <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    #[allow(clippy::redundant_clone)]
+                    "activationID" => intermediate_rep.activation_id.push(
+                        <uuid::Uuid as std::str::FromStr>::from_str(val)
+                            .map_err(|x| x.to_string())?,
+                    ),
+                    _ => {
+                        return std::result::Result::Err(
+                            "Unexpected key while parsing ExecutionProxyTarget".to_string(),
+                        );
+                    }
+                }
+            }
+
+            // Get the next key
+            key_result = string_iter.next();
+        }
+
+        // Use the intermediate representation to return the struct
+        std::result::Result::Ok(ExecutionProxyTarget {
+            node: intermediate_rep
+                .node
+                .into_iter()
+                .next()
+                .ok_or_else(|| "node missing in ExecutionProxyTarget".to_string())?,
+            activation_id: intermediate_rep
+                .activation_id
+                .into_iter()
+                .next()
+                .ok_or_else(|| "activationID missing in ExecutionProxyTarget".to_string())?,
+        })
+    }
+}
+
+// Methods for converting between header::IntoHeaderValue<ExecutionProxyTarget> and HeaderValue
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<header::IntoHeaderValue<ExecutionProxyTarget>> for HeaderValue {
+    type Error = String;
+
+    fn try_from(
+        hdr_value: header::IntoHeaderValue<ExecutionProxyTarget>,
+    ) -> std::result::Result<Self, Self::Error> {
+        let hdr_value = hdr_value.to_string();
+        match HeaderValue::from_str(&hdr_value) {
+            std::result::Result::Ok(value) => std::result::Result::Ok(value),
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Invalid header value for ExecutionProxyTarget - value: {hdr_value} is invalid {e}"#
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ExecutionProxyTarget> {
+    type Error = String;
+
+    fn try_from(hdr_value: HeaderValue) -> std::result::Result<Self, Self::Error> {
+        match hdr_value.to_str() {
+            std::result::Result::Ok(value) => {
+                match <ExecutionProxyTarget as std::str::FromStr>::from_str(value) {
+                    std::result::Result::Ok(value) => {
+                        std::result::Result::Ok(header::IntoHeaderValue(value))
+                    }
+                    std::result::Result::Err(err) => std::result::Result::Err(format!(
+                        r#"Unable to convert header value '{value}' into ExecutionProxyTarget - {err}"#
+                    )),
+                }
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(format!(
+                r#"Unable to convert header: {hdr_value:?} to string: {e}"#
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct ListedSandbox {
     /// Identifier of the template from which is the sandbox created
     #[serde(rename = "templateID")]

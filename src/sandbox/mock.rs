@@ -68,6 +68,7 @@ pub enum MockAction {
 
 #[derive(Default)]
 pub struct MockBehavior {
+    configured_executions: Mutex<Option<Vec<Option<runtime_policy::ExecutionLease>>>>,
     actions: Mutex<HashMap<MockOperation, VecDeque<MockAction>>>,
     on_operation: Mutex<HashMap<MockOperation, Arc<dyn Fn() + Send + Sync>>>,
     runtime_info: Mutex<SandboxRuntimeInfo>,
@@ -80,6 +81,20 @@ pub struct MockBehavior {
 impl MockBehavior {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Opt in to recording execution configuration for control-plane unit tests.
+    /// This mock never executes a guest and does not qualify node enforcement.
+    pub fn record_execution_configuration(&self) {
+        *self.configured_executions.lock().unwrap() = Some(Vec::new());
+    }
+
+    pub fn configured_executions(&self) -> Vec<Option<runtime_policy::ExecutionLease>> {
+        self.configured_executions
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default()
     }
 
     pub fn push_action(&self, operation: MockOperation, action: MockAction) {
@@ -269,6 +284,22 @@ impl MockSandboxBackend {
 
 #[async_trait]
 impl SandboxBackend for MockSandboxBackend {
+    fn configure_execution(
+        &mut self,
+        _resources: crate::types::SandboxResources,
+        lease: Option<runtime_policy::ExecutionLease>,
+    ) -> Result<()> {
+        let mut configured = self.behavior.configured_executions.lock().unwrap();
+        if let Some(recorded) = configured.as_mut() {
+            recorded.push(lease);
+            return Ok(());
+        }
+        if lease.is_some() {
+            anyhow::bail!("backend does not enforce funded execution");
+        }
+        Ok(())
+    }
+
     async fn start(&mut self) -> Result<()> {
         self.behavior.apply_async(MockOperation::Start).await
     }

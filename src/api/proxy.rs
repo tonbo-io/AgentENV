@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, future::Future, time::Duration};
+use std::{error::Error as StdError, future::Future, sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
@@ -18,19 +18,16 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
-    rt::TokioExecutor,
-};
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use tokio::{sync::watch, time::timeout};
 use tokio_tungstenite::{
-    connect_async,
+    client_async,
     tungstenite::{
         self,
         client::IntoClientRequest,
         protocol::{frame::coding::CloseCode, Message as TungsteniteMessage},
     },
-    MaybeTlsStream, WebSocketStream,
+    WebSocketStream,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -39,8 +36,8 @@ use crate::{
     cfg::ConfigManager,
     observability::prometheus::HttpRouteSource,
     orchestrator::{
-        NewTimeout, OrchestratorError, ProxyLookupResult, ProxyTarget, SandboxMetadata,
-        SandboxState,
+        NewTimeout, OrchestratorError, ProxyLookupResult, ProxyTarget, RouteConnections,
+        RouteConnector, RouteStream, SandboxMetadata, SandboxState,
     },
     types::SandboxId,
 };
@@ -49,7 +46,7 @@ use crate::{
 use crate::api::impls::auth::{API_KEY_HEADER, ENVD_ACCESS_TOKEN_HEADER};
 
 /// Shared outbound HTTP client for the client-facing reverse proxy.
-pub(crate) type ProxyClient = Client<HttpConnector, Body>;
+pub(crate) type ProxyClient = Client<RouteConnector, Body>;
 
 #[derive(Clone)]
 pub(crate) struct ProxyClients {
@@ -95,12 +92,15 @@ fn native_grpc_request(request: &Request) -> bool {
         && (media_type.len() == GRPC_MEDIA_TYPE.len()
             || media_type.as_bytes()[GRPC_MEDIA_TYPE.len()] == b'+')
 }
-type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type UpstreamWebSocket = WebSocketStream<RouteStream>;
+#[cfg(test)]
+use tokio_tungstenite::connect_async;
 
 struct ResolvedProxyRequest {
     sandbox_id: SandboxId,
     upstream_uri: Uri,
     original_host: Option<HeaderValue>,
+    connections: Arc<RouteConnections>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +111,8 @@ struct HostProxyRoute {
 
 #[derive(Debug)]
 enum ProxyRequestError {
+    InvalidExecutionTarget,
+    ExecutionTargetConflict,
     MissingSandboxId,
     InvalidSandboxId,
     MissingTargetPort,
@@ -125,6 +127,7 @@ enum ProxyRequestError {
     InternalServerError,
 }
 
+const EXECUTION_TARGET_HEADER: &str = env!("AENV_EXECUTION_PROXY_HEADER");
 const PROXY_ROUTE: &str = "/proxy";
 const ENVD_STREAM_INPUT_PATH: &str = "/process.Process/StreamInput";
 /// Header carrying the target sandbox chosen by the client.
@@ -168,21 +171,19 @@ fn auto_resume_min_sandbox_timeout() -> Duration {
     })
 }
 
-pub(crate) fn build_proxy_clients() -> ProxyClients {
-    let mut connector = HttpConnector::new();
-    // Proxied requests and responses are small, so Nagle only ever adds a
-    // delayed-ACK wait to them.
-    connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(PROXY_CONNECT_TIMEOUT));
-    // Interaction IPs are reused across sandbox runtime generations. Hyper keys
-    // its idle pool by authority, so a pooled connection can retain a stale VM flow.
+#[cfg(test)]
+fn build_proxy_clients() -> ProxyClients {
+    build_route_proxy_clients(Arc::new(RouteConnections::default()))
+}
+
+fn build_route_proxy_clients(connections: Arc<RouteConnections>) -> ProxyClients {
+    let connector = RouteConnector {
+        connections,
+        timeout: PROXY_CONNECT_TIMEOUT,
+    };
     let http1 = Client::builder(TokioExecutor::new())
         .pool_max_idle_per_host(0)
-        .build(connector);
-
-    let mut connector = HttpConnector::new();
-    connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(PROXY_CONNECT_TIMEOUT));
+        .build(connector.clone());
     let http2 = Client::builder(TokioExecutor::new())
         .http2_only(true)
         .pool_max_idle_per_host(0)
@@ -368,7 +369,7 @@ async fn proxy_request(
         return proxy_websocket_request(websocket_upgrade, parts, resolved).await;
     }
 
-    proxy_http_request(api_impl, parts, body, resolved).await
+    proxy_http_request(parts, body, resolved).await
 }
 
 fn strip_proxy_prefix(path: &str) -> &str {
@@ -469,7 +470,6 @@ pub(crate) fn effective_envd_port(metadata: &SandboxMetadata) -> u16 {
 
 /// Proxies a standard HTTP request to the resolved upstream URI and returns the response.
 async fn proxy_http_request(
-    api_impl: &ApiImpl,
     mut parts: http::request::Parts,
     body: Body,
     resolved: ResolvedProxyRequest,
@@ -478,6 +478,7 @@ async fn proxy_http_request(
         sandbox_id,
         upstream_uri,
         original_host,
+        connections,
     } = resolved;
 
     sanitize_request_headers(&mut parts.headers);
@@ -518,7 +519,7 @@ async fn proxy_http_request(
     let (body, activity_rx) = track_request_body_activity(body);
     let upstream_request = Request::from_parts(parts, body);
     let upstream_response_result = match wait_for_upstream_response_headers_with_activity_timeout(
-        api_impl.proxy_clients().request(upstream_request),
+        build_route_proxy_clients(connections).request(upstream_request),
         activity_rx,
     )
     .await
@@ -661,6 +662,7 @@ async fn proxy_websocket_request(
         sandbox_id,
         upstream_uri,
         original_host,
+        connections,
     } = resolved;
 
     sanitize_websocket_request_headers(&mut parts.headers);
@@ -686,7 +688,23 @@ async fn proxy_websocket_request(
 
     let (upstream_websocket, upstream_response) = match timeout(
         PROXY_RESPONSE_HEADER_TIMEOUT,
-        connect_async(upstream_request),
+        async {
+            let addr = upstream_uri
+                .authority()
+                .ok_or_else(|| {
+                    tungstenite::Error::Io(std::io::Error::other("missing route authority"))
+                })?
+                .as_str()
+                .parse()
+                .map_err(|_| {
+                    tungstenite::Error::Io(std::io::Error::other("invalid route authority"))
+                })?;
+            let stream = connections
+                .connect(addr)
+                .await
+                .map_err(tungstenite::Error::Io)?;
+            client_async(upstream_request, stream).await
+        },
     )
     .await
     {
@@ -772,52 +790,69 @@ async fn resolve_proxy_request(
     let sandbox_id = parse_sandbox_id_header(&parts.headers)?;
     let target_port = parse_target_port_header(&parts.headers)?;
 
+    let execution = parse_execution_target(&parts.headers)?;
     let mut auto_resume_attempted = false;
-    let target = loop {
-        match api_impl.orchestrator().proxy_lookup_for(&sandbox_id).await {
-            Ok(ProxyLookupResult::Ready(target)) => break target,
-            Ok(ProxyLookupResult::NotFound) => {
-                return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
-            }
-            Ok(ProxyLookupResult::Paused { auto_resume: true }) => {
-                if auto_resume_attempted {
+    let target = if let Some(execution) = execution {
+        api_impl
+            .check_launch_target(Some(&execution.node))
+            .map_err(|_| ProxyRequestError::ExecutionTargetConflict)?;
+        api_impl
+            .orchestrator()
+            .proxy_lookup_for_activation(&sandbox_id, execution.activation_id)
+            .await
+            .map_err(|_| ProxyRequestError::ExecutionTargetConflict)?
+    } else {
+        loop {
+            match api_impl.orchestrator().proxy_lookup_for(&sandbox_id).await {
+                Ok(ProxyLookupResult::Ready(target)) => {
+                    if target.activation_id.is_some() {
+                        return Err(ProxyRequestError::ExecutionTargetConflict);
+                    }
+                    break target;
+                }
+                Ok(ProxyLookupResult::NotFound) => {
+                    return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
+                }
+                Ok(ProxyLookupResult::Paused { auto_resume: true }) => {
+                    if auto_resume_attempted {
+                        return Err(ProxyRequestError::AutoResumeFailed(sandbox_id));
+                    }
+                    try_auto_resume(api_impl, sandbox_id).await?;
+                    auto_resume_attempted = true;
+                    continue;
+                }
+                Ok(ProxyLookupResult::Paused { auto_resume: false }) => {
+                    return Err(ProxyRequestError::SandboxUnavailable(
+                        sandbox_id,
+                        SandboxState::Paused,
+                    ))
+                }
+                Ok(ProxyLookupResult::Unavailable(_)) | Ok(ProxyLookupResult::RouteMissing)
+                    if auto_resume_attempted =>
+                {
+                    return Err(ProxyRequestError::AutoResumeFailed(sandbox_id))
+                }
+                Ok(ProxyLookupResult::Unavailable(state)) => {
+                    return Err(ProxyRequestError::SandboxUnavailable(sandbox_id, state))
+                }
+                Ok(ProxyLookupResult::RouteMissing) => {
+                    return Err(ProxyRequestError::MissingRuntimeRoute(sandbox_id))
+                }
+                Err(OrchestratorError::SandboxNotFound(_)) => {
+                    return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
+                }
+                Err(err) if auto_resume_attempted => {
+                    warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %err,
+                        "failed to resolve proxy target after auto-resume"
+                    );
                     return Err(ProxyRequestError::AutoResumeFailed(sandbox_id));
                 }
-                try_auto_resume(api_impl, sandbox_id).await?;
-                auto_resume_attempted = true;
-                continue;
-            }
-            Ok(ProxyLookupResult::Paused { auto_resume: false }) => {
-                return Err(ProxyRequestError::SandboxUnavailable(
-                    sandbox_id,
-                    SandboxState::Paused,
-                ))
-            }
-            Ok(ProxyLookupResult::Unavailable(_)) | Ok(ProxyLookupResult::RouteMissing)
-                if auto_resume_attempted =>
-            {
-                return Err(ProxyRequestError::AutoResumeFailed(sandbox_id))
-            }
-            Ok(ProxyLookupResult::Unavailable(state)) => {
-                return Err(ProxyRequestError::SandboxUnavailable(sandbox_id, state))
-            }
-            Ok(ProxyLookupResult::RouteMissing) => {
-                return Err(ProxyRequestError::MissingRuntimeRoute(sandbox_id))
-            }
-            Err(OrchestratorError::SandboxNotFound(_)) => {
-                return Err(ProxyRequestError::SandboxNotFound(sandbox_id))
-            }
-            Err(err) if auto_resume_attempted => {
-                warn!(
-                    sandbox_id = %sandbox_id,
-                    error = %err,
-                    "failed to resolve proxy target after auto-resume"
-                );
-                return Err(ProxyRequestError::AutoResumeFailed(sandbox_id));
-            }
-            Err(err) => {
-                warn!(sandbox_id = %sandbox_id, error = %err, "failed to resolve proxy target");
-                return Err(ProxyRequestError::InternalServerError);
+                Err(err) => {
+                    warn!(sandbox_id = %sandbox_id, error = %err, "failed to resolve proxy target");
+                    return Err(ProxyRequestError::InternalServerError);
+                }
             }
         }
     };
@@ -833,7 +868,27 @@ async fn resolve_proxy_request(
         sandbox_id,
         upstream_uri,
         original_host: parts.headers.get(header::HOST).cloned(),
+        connections: target.connections,
     })
+}
+
+fn parse_execution_target(
+    headers: &HeaderMap,
+) -> Result<Option<agentenv_http_server::models::ExecutionProxyTarget>, ProxyRequestError> {
+    let mut values = headers.get_all(EXECUTION_TARGET_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ProxyRequestError::InvalidExecutionTarget);
+    }
+    let target: agentenv_http_server::models::ExecutionProxyTarget =
+        serde_json::from_slice(value.as_bytes())
+            .map_err(|_| ProxyRequestError::InvalidExecutionTarget)?;
+    if target.activation_id.is_nil() {
+        return Err(ProxyRequestError::InvalidExecutionTarget);
+    }
+    Ok(Some(target))
 }
 
 async fn try_auto_resume(
@@ -892,6 +947,13 @@ pub(crate) fn sandbox_not_found_response(sandbox_id: SandboxId) -> Response<Body
 
 fn proxy_error_response(error: &ProxyRequestError) -> Response<Body> {
     let (status, message) = match error {
+        ProxyRequestError::InvalidExecutionTarget => {
+            (StatusCode::BAD_REQUEST, "invalid execution target")
+        }
+        ProxyRequestError::ExecutionTargetConflict => (
+            StatusCode::CONFLICT,
+            "execution target does not match current runtime",
+        ),
         ProxyRequestError::MissingSandboxId => {
             (StatusCode::BAD_REQUEST, "missing sandbox routing header")
         }
@@ -933,7 +995,9 @@ fn proxy_error_response(error: &ProxyRequestError) -> Response<Body> {
     }
 
     match error {
-        ProxyRequestError::MissingSandboxId
+        ProxyRequestError::InvalidExecutionTarget
+        | ProxyRequestError::ExecutionTargetConflict
+        | ProxyRequestError::MissingSandboxId
         | ProxyRequestError::InvalidSandboxId
         | ProxyRequestError::MissingTargetPort
         | ProxyRequestError::InvalidTargetPort
@@ -1023,6 +1087,7 @@ fn build_upstream_uri_with_scheme(
 fn sanitize_request_headers(headers: &mut HeaderMap) {
     // These headers are only for the control-plane hop between the client and
     // AgentENV. Upstream sandbox services should not see them.
+    headers.remove(EXECUTION_TARGET_HEADER);
     headers.remove(SANDBOX_ID_HEADER);
     headers.remove(E2B_SANDBOX_ID_HEADER);
     headers.remove(TARGET_PORT_HEADER);
@@ -1310,7 +1375,7 @@ mod tests {
         template::TemplateBuilder,
     };
 
-    const TEST_API_KEY: &str =
+    pub(super) const TEST_API_KEY: &str =
         "e2b_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
@@ -1588,6 +1653,56 @@ mod tests {
         second_response.into_body().collect().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn retiring_route_closes_http_transport_while_response_body_is_unpolled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request_head(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nx")
+                .await
+                .unwrap();
+            let mut byte = [0];
+            timeout(Duration::from_secs(1), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        let route = Arc::new(RouteConnections::default());
+        let client = build_route_proxy_clients(route.clone());
+        let response = client.request(empty_proxy_request(address)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        route.begin_retire();
+        route.wait_retired().await.unwrap();
+        assert_eq!(origin.await.unwrap(), 0);
+        assert!(client.request(empty_proxy_request(address)).await.is_err());
+        drop(response);
+    }
+
+    #[tokio::test]
+    async fn retiring_route_closes_unpolled_websocket_transport() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            timeout(Duration::from_secs(1), websocket.next())
+                .await
+                .unwrap()
+        });
+        let route = Arc::new(RouteConnections::default());
+        let stream = route.connect(address).await.unwrap();
+        let (websocket, _) = client_async(format!("ws://{address}/"), stream)
+            .await
+            .unwrap();
+        route.begin_retire();
+        route.wait_retired().await.unwrap();
+        assert!(!matches!(origin.await.unwrap(), Some(Ok(_))));
+        drop(websocket);
+    }
+
     async fn spawn_upstream(router: axum::Router) -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1833,7 +1948,7 @@ mod tests {
         build_api_with_node_identity(domains, api_key, None).await
     }
 
-    async fn build_api_with_node_identity(
+    pub(super) async fn build_api_with_node_identity(
         domains: Vec<String>,
         api_key: &str,
         identity: Option<crate::identity::NodeIdentity>,
@@ -1879,7 +1994,11 @@ mod tests {
     ) -> axum::Router {
         let api = build_api().await;
         api.orchestrator()
-            .set_proxy_target_for_test(*sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST), state)
+            .set_proxy_target_for_test(
+                *sandbox_id,
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
+                state,
+            )
             .await;
         api.orchestrator()
             .set_auto_resume_for_test(sandbox_id, auto_resume)
@@ -1905,7 +2024,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 *sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -1925,7 +2044,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 *sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -2047,9 +2166,7 @@ mod tests {
 
     #[test]
     fn build_upstream_uri_preserves_path_and_query() {
-        let target = ProxyTarget {
-            ip: std::net::Ipv4Addr::LOCALHOST,
-        };
+        let target = ProxyTarget::new(std::net::Ipv4Addr::LOCALHOST, None);
 
         let uri =
             build_upstream_uri_with_scheme("http", &target, 8080, "echo/test", Some("foo=bar"))
@@ -2212,7 +2329,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -2267,7 +2384,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Running,
             )
             .await;
@@ -2421,7 +2538,7 @@ mod tests {
         api.orchestrator()
             .set_proxy_target_for_test(
                 sandbox_id,
-                ProxyTarget::new(Ipv4Addr::LOCALHOST),
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, None),
                 crate::orchestrator::SandboxState::Paused,
             )
             .await;
@@ -3274,5 +3391,123 @@ mod tests {
             response.body().as_deref(),
             Some(b"upstream denied websocket".as_slice())
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_target_tests {
+    use super::tests::{build_api_with_node_identity, TEST_API_KEY};
+    use super::*;
+    use std::net::Ipv4Addr;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn proxy_receiver_requires_current_node_and_activation_for_funded_routes() {
+        let cluster = Uuid::new_v4();
+        let service = Uuid::new_v4();
+        let activation = Uuid::new_v4();
+        let id = SandboxId::new();
+        let api = build_api_with_node_identity(
+            Vec::new(),
+            TEST_API_KEY,
+            Some(crate::identity::NodeIdentity {
+                id: "node-a".into(),
+                cluster_id: cluster,
+                service_instance_id: service.to_string(),
+                commit: "test".into(),
+                version: "test".into(),
+            }),
+        )
+        .await;
+        api.orchestrator()
+            .set_proxy_target_for_test(
+                id,
+                ProxyTarget::new(Ipv4Addr::LOCALHOST, Some(activation)),
+                SandboxState::Running,
+            )
+            .await;
+        let target = serde_json::json!({"node":{
+            "nodeID":"node-a", "clusterID":cluster, "serviceInstanceID":service
+        }, "activationID":activation});
+        let request_parts = |target: Option<&serde_json::Value>| {
+            let mut request = Request::builder()
+                .uri("/process.Process/Start")
+                .header(SANDBOX_ID_HEADER, id.to_string())
+                .header(TARGET_PORT_HEADER, "49983");
+            if let Some(target) = target {
+                request = request.header(EXECUTION_TARGET_HEADER, target.to_string());
+            }
+            request.body(Body::empty()).unwrap().into_parts().0
+        };
+        for websocket in [false, true] {
+            let resolved = resolve_proxy_request(
+                &api,
+                "process.Process/Start",
+                &request_parts(Some(&target)),
+                websocket,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolved.sandbox_id, id);
+            assert!(matches!(
+                resolve_proxy_request(&api, "x", &request_parts(None), websocket).await,
+                Err(ProxyRequestError::ExecutionTargetConflict)
+            ));
+            for key in ["nodeID", "clusterID", "serviceInstanceID", "activationID"] {
+                let mut stale = target.clone();
+                if key == "activationID" {
+                    stale[key] = serde_json::json!(Uuid::new_v4());
+                } else {
+                    stale["node"][key] = serde_json::json!(Uuid::new_v4().to_string());
+                }
+                assert!(
+                    matches!(
+                        resolve_proxy_request(&api, "x", &request_parts(Some(&stale)), websocket)
+                            .await,
+                        Err(ProxyRequestError::ExecutionTargetConflict)
+                    ),
+                    "stale {key}"
+                );
+            }
+        }
+        // Removing the published route must not recover it from metadata or resume.
+        api.orchestrator().remove_proxy_route_for_test(&id).await;
+        assert!(matches!(
+            resolve_proxy_request(&api, "x", &request_parts(Some(&target)), false).await,
+            Err(ProxyRequestError::ExecutionTargetConflict)
+        ));
+    }
+
+    #[test]
+    fn execution_header_rejects_ambiguous_and_malformed_input_and_is_not_forwarded() {
+        let mut headers = HeaderMap::new();
+        for invalid in ["", "null", "{}", "not-json"] {
+            headers.insert(
+                EXECUTION_TARGET_HEADER,
+                HeaderValue::from_str(invalid).unwrap(),
+            );
+            assert!(matches!(
+                parse_execution_target(&headers),
+                Err(ProxyRequestError::InvalidExecutionTarget)
+            ));
+        }
+        let valid = serde_json::json!({"node": {"nodeID":"node", "clusterID":Uuid::new_v4(),
+            "serviceInstanceID":Uuid::new_v4()}, "activationID":Uuid::new_v4()})
+        .to_string();
+        headers.insert(
+            EXECUTION_TARGET_HEADER,
+            HeaderValue::from_str(&valid).unwrap(),
+        );
+        assert!(parse_execution_target(&headers).unwrap().is_some());
+        headers.append(
+            EXECUTION_TARGET_HEADER,
+            HeaderValue::from_str(&valid).unwrap(),
+        );
+        assert!(matches!(
+            parse_execution_target(&headers),
+            Err(ProxyRequestError::InvalidExecutionTarget)
+        ));
+        sanitize_request_headers(&mut headers);
+        assert!(!headers.contains_key(EXECUTION_TARGET_HEADER));
     }
 }

@@ -852,7 +852,7 @@ async fn assert_metrics_snapshot<S, F, P>(
 async fn proxy_target_for_only_returns_running_routes() {
     let orchestrator = make_orchestrator().await;
     let sandbox_id = SandboxId::new();
-    let target = ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 42));
+    let target = ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 42), None);
 
     orchestrator
         .upsert_proxy_route(sandbox_id, target.clone())
@@ -867,7 +867,7 @@ async fn proxy_target_for_only_returns_running_routes() {
 async fn restore_proxy_route_republishes_running_target() {
     let orchestrator = make_orchestrator().await;
     let sandbox_id = SandboxId::new();
-    let target = ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 77));
+    let target = ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 77), None);
 
     orchestrator
         .upsert_proxy_route(sandbox_id, target.clone())
@@ -982,7 +982,7 @@ async fn failed_launch_stop_retains_inventory_until_cleanup_succeeds() {
         .await
         .insert(sandbox_id, Arc::clone(&handle));
     orchestrator
-        .upsert_proxy_route(sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST))
+        .upsert_proxy_route(sandbox_id, ProxyTarget::new(Ipv4Addr::LOCALHOST, None))
         .await;
     orchestrator
         .cleanup_failed_launch(
@@ -1066,7 +1066,7 @@ async fn stale_handle_cannot_republish_running_proxy_route() {
         .upsert_proxy_route_if_current_handle(
             sandbox_id,
             &stale_handle,
-            ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 99)),
+            ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 99), None),
         )
         .await;
 
@@ -1088,7 +1088,7 @@ async fn cleanup_failed_launch_does_not_remove_replacement_runtime_state() {
     let replacement_handle: SandboxHandle = Arc::new(Mutex::new(Box::new(
         MockSandboxBackend::new(Arc::new(MockBehavior::new())),
     )));
-    let replacement_target = ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 42));
+    let replacement_target = ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 42), None);
 
     orchestrator
         .store
@@ -5598,5 +5598,93 @@ async fn fenced_resume_rejects_stale_source_and_never_renews_running_instance() 
     orchestrator
         .delete_sandbox_for_activation(id, resumed.execution_lease.map(|lease| lease.activation_id))
         .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn funded_proxy_routes_follow_launch_pause_and_resume_activation() -> Result<()> {
+    let behavior = Arc::new(MockBehavior::new());
+    behavior.record_execution_configuration();
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior.clone())).await;
+    let source = Uuid::now_v7();
+    let successor = Uuid::now_v7();
+    let lease = |activation_id| runtime_policy::ExecutionLease {
+        activation_id,
+        operation_id: Uuid::now_v7(),
+        sequence: 0,
+        expires_at_unix_ms: (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64)
+            + 600_000,
+    };
+    let mut request = create_request(None, &[]);
+    request.execution_lease = Some(lease(source));
+    let created = orchestrator.create_sandbox(request).await?;
+    let id = created.id;
+    assert_eq!(
+        orchestrator
+            .proxy_lookup_for_activation(&id, source)
+            .await?
+            .activation_id,
+        Some(source)
+    );
+    for stale in [Uuid::nil(), successor] {
+        assert!(matches!(
+            orchestrator.proxy_lookup_for_activation(&id, stale).await,
+            Err(OrchestratorError::ActivationConflict(_))
+        ));
+    }
+    orchestrator
+        .pause_sandbox_for_activation(id, Some(source))
+        .await?;
+    assert!(matches!(
+        orchestrator.proxy_lookup_for_activation(&id, source).await,
+        Err(OrchestratorError::ActivationConflict(_))
+    ));
+    let mut paused = orchestrator.store.get(&id).await?.unwrap();
+    paused.auto_resume = true;
+    orchestrator.store.update(paused).await?;
+    assert_eq!(
+        orchestrator.proxy_lookup_for(&id).await?,
+        ProxyLookupResult::Paused { auto_resume: false }
+    );
+    // A lookup cannot resume the retained VM as a side effect.
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Paused
+    );
+    orchestrator
+        .resume_sandbox_from_activation(id, Some(source), NewTimeout::Funded(lease(successor)))
+        .await?;
+    assert_eq!(
+        orchestrator
+            .proxy_lookup_for_activation(&id, successor)
+            .await?
+            .activation_id,
+        Some(successor)
+    );
+    assert!(matches!(
+        orchestrator.proxy_lookup_for_activation(&id, source).await,
+        Err(OrchestratorError::ActivationConflict(_))
+    ));
+    assert_eq!(
+        behavior
+            .configured_executions()
+            .into_iter()
+            .map(|lease| lease.unwrap().activation_id)
+            .collect::<Vec<_>>(),
+        vec![source, successor]
+    );
+    orchestrator
+        .delete_sandbox_for_activation(id, Some(successor))
+        .await?;
+    assert!(matches!(
+        orchestrator
+            .proxy_lookup_for_activation(&id, successor)
+            .await,
+        Err(OrchestratorError::ActivationConflict(_))
+    ));
     Ok(())
 }

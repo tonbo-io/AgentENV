@@ -123,6 +123,7 @@ tar = "0.4"
 openssl-sys = { version = "0.9", optional = true }
 
 [build-dependencies]
+serde_yaml = "0.9"
 tonic-prost-build = "0.14.2"
 
 [profile.dev.package.sha2]
