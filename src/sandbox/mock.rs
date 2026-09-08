@@ -53,6 +53,7 @@ pub enum MockOperation {
     Fork,
     ForkChild,
     Stop,
+    TerminalCommand,
     UpdateNetwork,
 }
 
@@ -346,6 +347,12 @@ impl SandboxBackend for MockSandboxBackend {
                     })
             })
             .collect())
+    }
+
+    async fn terminal_command(&mut self, _command: &str) -> Result<()> {
+        self.behavior
+            .apply_async(MockOperation::TerminalCommand)
+            .await
     }
 
     async fn stop(&mut self) -> Result<()> {

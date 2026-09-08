@@ -894,13 +894,30 @@ impl Sandboxes<()> for ApiImpl {
                 sandbox_not_found(path_id),
             ));
         };
-        let result = match query_params.expected_activation_id {
-            Some(activation) => {
-                self.orchestrator
-                    .delete_sandbox_for_activation(sandbox_id, Some(activation))
-                    .await
+        let result = if let Some(command) = query_params.terminal_command.as_ref() {
+            let Some(activation) = query_params
+                .expected_activation_id
+                .filter(|id| !id.is_nil())
+            else {
+                return Ok(SandboxesSandboxIdDeleteResponse::Status400_BadRequest(
+                    Self::error(
+                        400,
+                        "terminalCommand requires a nonzero expectedActivationID",
+                    ),
+                ));
+            };
+            self.orchestrator
+                .delete_sandbox_with_terminal_command(sandbox_id, activation, command.clone())
+                .await
+        } else {
+            match query_params.expected_activation_id {
+                Some(activation) => {
+                    self.orchestrator
+                        .delete_sandbox_for_activation(sandbox_id, Some(activation))
+                        .await
+                }
+                None => self.orchestrator.delete_sandbox(sandbox_id).await,
             }
-            None => self.orchestrator.delete_sandbox(sandbox_id).await,
         };
         match result {
             Ok(_) => {

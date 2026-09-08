@@ -118,6 +118,8 @@ pub enum SandboxesSandboxIdCustomExtensionParamsPatchResponse {
 #[must_use]
 #[allow(clippy::large_enum_variant)]
 pub enum SandboxesSandboxIdDeleteResponse {
+    /// Bad request
+    Status400_BadRequest(models::Error),
     /// The sandbox was killed successfully
     Status204_TheSandboxWasKilledSuccessfully,
     /// Conflict

@@ -5227,3 +5227,136 @@ async fn stale_lifecycle_activation_preserves_current_runtime() -> Result<()> {
     assert!(orchestrator.store.get(&id).await?.is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn terminal_command_requires_activation_and_never_resumes_paused_guest() -> Result<()> {
+    for paused in [false, true] {
+        let behavior = Arc::new(MockBehavior::new());
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (operation, label) in [
+            (MockOperation::TerminalCommand, "command"),
+            (MockOperation::Stop, "stop"),
+        ] {
+            let events = events.clone();
+            behavior.set_on_operation(
+                operation,
+                Arc::new(move || events.lock().unwrap().push(label)),
+            );
+        }
+        let orchestrator =
+            make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior.clone()))
+                .await;
+        let id = SandboxId::new();
+        orchestrator
+            .clone()
+            .create_sandbox_inner(id, create_request(Some(60), &[]))
+            .await?;
+        let activation = uuid::Uuid::now_v7();
+        let mut metadata = orchestrator.store.get(&id).await?.unwrap();
+        metadata.execution_lease = Some(runtime_policy::ExecutionLease {
+            activation_id: activation,
+            operation_id: uuid::Uuid::now_v7(),
+            sequence: 0,
+            expires_at_unix_ms: u64::MAX,
+        });
+        orchestrator.store.update(metadata).await?;
+        if paused {
+            orchestrator
+                .pause_sandbox_for_activation(id, Some(activation))
+                .await?;
+        }
+        events.lock().unwrap().clear();
+        assert!(matches!(
+            orchestrator
+                .delete_sandbox_with_terminal_command(
+                    id,
+                    uuid::Uuid::now_v7(),
+                    "/fixture-stop".into()
+                )
+                .await,
+            Err(OrchestratorError::ActivationConflict(_))
+        ));
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(
+            orchestrator.store.get(&id).await?.unwrap().state,
+            if paused {
+                SandboxState::Paused
+            } else {
+                SandboxState::Running
+            }
+        );
+        behavior.push_action(
+            MockOperation::TerminalCommand,
+            MockAction::Fail {
+                message: "guest shutdown failed".into(),
+            },
+        );
+        orchestrator
+            .delete_sandbox_with_terminal_command(id, activation, "/fixture-stop".into())
+            .await?;
+        assert!(orchestrator.store.get(&id).await?.is_none());
+        assert_eq!(
+            *events.lock().unwrap(),
+            if paused {
+                vec![]
+            } else {
+                vec!["command", "stop"]
+            }
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_terminal_command_keeps_killing_fence_until_physical_stop() -> Result<()> {
+    let behavior = Arc::new(MockBehavior::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    behavior.set_on_operation(
+        MockOperation::TerminalCommand,
+        Arc::new(move || signal.notify_one()),
+    );
+    behavior.push_action(
+        MockOperation::TerminalCommand,
+        MockAction::SucceedAfter(Duration::from_millis(100)),
+    );
+    let orchestrator =
+        make_orchestrator_with_factory(MockBackendFactory::with_behavior(behavior.clone())).await;
+    let id = SandboxId::new();
+    orchestrator
+        .clone()
+        .create_sandbox_inner(id, create_request(Some(60), &[]))
+        .await?;
+    let activation = uuid::Uuid::now_v7();
+    let mut metadata = orchestrator.store.get(&id).await?.unwrap();
+    metadata.execution_lease = Some(runtime_policy::ExecutionLease {
+        activation_id: activation,
+        operation_id: uuid::Uuid::now_v7(),
+        sequence: 0,
+        expires_at_unix_ms: u64::MAX,
+    });
+    orchestrator.store.update(metadata).await?;
+    let owner = orchestrator.clone();
+    let request = tokio::spawn(async move {
+        owner
+            .delete_sandbox_with_terminal_command(id, activation, "/fixture-stop".into())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("shutdown command entered");
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Killing
+    );
+    request.abort();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while orchestrator.store.get(&id).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("owned deletion finishes after caller cancellation");
+    assert_eq!(behavior.stop_calls(), 1);
+    Ok(())
+}

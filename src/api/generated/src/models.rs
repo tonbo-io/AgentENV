@@ -144,6 +144,18 @@ pub struct SandboxesSandboxIdDeleteQueryParams {
     #[serde(rename = "expectedActivationID")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_activation_id: Option<uuid::Uuid>,
+    /// Absolute guest executable path, without arguments, run only after the expected activation acquires terminal deletion. Requires expectedActivationID. Best effort, bounded to 30 seconds; physical deletion continues on command failure or timeout. Paused sandboxes are never resumed to execute it.
+    #[serde(rename = "terminalCommand")]
+    #[validate(
+                        length(min = 1, max = 1024),
+                          regex(path = *RE_SANDBOXESSANDBOXIDDELETEQUERYPARAMS_TERMINAL_COMMAND),
+              )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_command: Option<String>,
+}
+
+lazy_static::lazy_static! {
+    static ref RE_SANDBOXESSANDBOXIDDELETEQUERYPARAMS_TERMINAL_COMMAND: regex::Regex = regex::Regex::new("^/").unwrap();
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
