@@ -1817,7 +1817,18 @@ paths:
       parameters:
         - $ref: "#/components/parameters/sandboxID"
         - $ref: "#/components/parameters/expectedActivationID"
+        - name: terminalCommand
+          in: query
+          required: false
+          description: Absolute guest executable path, without arguments, run only after the expected activation acquires terminal deletion. Requires expectedActivationID. Best effort, bounded to 30 seconds; physical deletion continues on command failure or timeout. Paused sandboxes are never resumed to execute it.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+            pattern: '^/'
       responses:
+        "400":
+          $ref: "#/components/responses/400"
         "204":
           description: The sandbox was killed successfully
         "409":
