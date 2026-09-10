@@ -3504,7 +3504,13 @@ mod execution_target_tests {
     #[test]
     fn execution_header_rejects_ambiguous_and_malformed_input_and_is_not_forwarded() {
         let mut headers = HeaderMap::new();
-        for invalid in ["", "null", "{}", "not-json", "{\"node\":{\"nodeID\":\"n\"}}"] {
+        for invalid in [
+            "",
+            "null",
+            "{}",
+            "not-json",
+            "{\"node\":{\"nodeID\":\"n\"}}",
+        ] {
             headers.insert(
                 EXECUTION_TARGET_HEADER,
                 HeaderValue::from_str(invalid).unwrap(),
