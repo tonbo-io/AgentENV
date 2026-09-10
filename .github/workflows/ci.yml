@@ -78,8 +78,9 @@ jobs:
         run: make clippy
 
   unit-tests:
-    # Ubuntu 24.04's Linux 6.17 kernel can crash in ublk ADD_DEV.
-    runs-on: ubuntu-22.04
+    # ublk_drv loads on Depot's Ubuntu 24.04 image (kernel 6.12); the 22.04
+    # image does not ship it.
+    runs-on: depot-ubuntu-24.04-8
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-ci-setup

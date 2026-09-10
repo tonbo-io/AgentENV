@@ -8,7 +8,7 @@ on:
 jobs:
   validate-version:
     name: Validate release version
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-8
     steps:
       - uses: actions/checkout@v6
 
@@ -51,19 +51,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: depot-ubuntu-22.04-8
             target: ''
             features: --features vendored-openssl
             asset_name: aenv-linux-x86_64
-          - os: ubuntu-22.04-arm
+          - os: depot-ubuntu-22.04-arm-8
             target: ''
             features: --features vendored-openssl
             asset_name: aenv-linux-aarch64
-          - os: macos-15
+          - os: depot-macos-15
             target: x86_64-apple-darwin
             features: ''
             asset_name: aenv-darwin-x86_64
-          - os: macos-15
+          - os: depot-macos-15
             target: aarch64-apple-darwin
             features: ''
             asset_name: aenv-darwin-aarch64
@@ -112,10 +112,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: depot-ubuntu-22.04-8
             arch: x86_64
             modes: kvm pvm
-          - os: ubuntu-22.04-arm
+          - os: depot-ubuntu-22.04-arm-8
             arch: aarch64
             modes: kvm
     timeout-minutes: 30
@@ -200,7 +200,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-cli, build-server]
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-8
     permissions:
       contents: write
       pull-requests: read
@@ -265,10 +265,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: depot-ubuntu-24.04-8
             arch: amd64
             platform: linux/amd64
-          - os: ubuntu-24.04-arm
+          - os: depot-ubuntu-24.04-arm-8
             arch: arm64
             platform: linux/arm64
     permissions:
@@ -307,7 +307,7 @@ jobs:
   docker-publish-kvm-manifest:
     name: Publish multi-architecture KVM Docker image
     needs: docker-publish-kvm-images
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-8
     permissions:
       packages: write
     timeout-minutes: 30
@@ -345,7 +345,7 @@ jobs:
   docker-publish-pvm:
     name: Build and push PVM Docker image (amd64)
     needs: release
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-8
     permissions:
       contents: read
       packages: write

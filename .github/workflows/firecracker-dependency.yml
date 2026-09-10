@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   source:
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-4
     outputs:
       repository: ${{ steps.source.outputs.repository }}
       commit: ${{ steps.source.outputs.commit }}
@@ -44,9 +44,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04-arm
+          - runner: depot-ubuntu-24.04-arm-8
             arch: aarch64
-          - runner: ubuntu-24.04
+          - runner: depot-ubuntu-24.04-8
             arch: x86_64
     steps:
       - uses: actions/checkout@v6
@@ -100,7 +100,7 @@ jobs:
   publish:
     needs: [source, build]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'tonbo-io/AgentENV'
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04-4
     permissions:
       contents: write
     steps:
