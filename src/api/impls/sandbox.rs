@@ -512,9 +512,6 @@ impl Sandboxes<()> for ApiImpl {
         _claims: &Self::Claims,
         body: &models::NewColdSandbox,
     ) -> Result<SandboxesColdPostResponse, ()> {
-        if let Err(error) = self.check_launch_target(body.target_node_instance.as_ref()) {
-            return Ok(SandboxesColdPostResponse::Status409_Conflict(error));
-        }
         let image_resolver = self.image_resolver();
         let timer = SandboxStageTimer::new("create_cold");
         // TODO: Move cold-start image resolution into an async create operation
@@ -693,9 +690,6 @@ impl Sandboxes<()> for ApiImpl {
         _claims: &Self::Claims,
         body: &models::NewSandbox,
     ) -> Result<SandboxesPostResponse, ()> {
-        if let Err(error) = self.check_launch_target(body.target_node_instance.as_ref()) {
-            return Ok(SandboxesPostResponse::Status409_Conflict(error));
-        }
         if has_cluster_placement(body.placement.as_ref()) {
             return Ok(SandboxesPostResponse::Status400_BadRequest(Self::error(
                 400,
@@ -911,14 +905,6 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdDeletePathParams,
         query_params: &models::SandboxesSandboxIdDeleteQueryParams,
     ) -> Result<SandboxesSandboxIdDeleteResponse, ()> {
-        if let Err(error) = self.check_lifecycle_target(
-            query_params.expected_node_id.as_deref(),
-            query_params.expected_cluster_id,
-            query_params.expected_service_instance_id,
-            query_params.expected_activation_id,
-        ) {
-            return Ok(SandboxesSandboxIdDeleteResponse::Status409_Conflict(error));
-        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdDeleteResponse::Status404_NotFound(
@@ -977,14 +963,6 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdForkPostPathParams,
         body: &Option<models::SandboxForkRequest>,
     ) -> Result<SandboxesSandboxIdForkPostResponse, ()> {
-        if let Err(error) = self.check_launch_target(
-            body.as_ref()
-                .and_then(|body| body.target_node_instance.as_ref()),
-        ) {
-            return Ok(SandboxesSandboxIdForkPostResponse::Status409_Conflict(
-                error,
-            ));
-        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdForkPostResponse::Status404_NotFound(
@@ -1280,16 +1258,6 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdPausePostPathParams,
         query_params: &models::SandboxesSandboxIdPausePostQueryParams,
     ) -> Result<SandboxesSandboxIdPausePostResponse, ()> {
-        if let Err(error) = self.check_lifecycle_target(
-            query_params.expected_node_id.as_deref(),
-            query_params.expected_cluster_id,
-            query_params.expected_service_instance_id,
-            query_params.expected_activation_id,
-        ) {
-            return Ok(SandboxesSandboxIdPausePostResponse::Status409_Conflict(
-                error,
-            ));
-        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdPausePostResponse::Status404_NotFound(
@@ -1629,11 +1597,6 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdResumePostPathParams,
         body: &models::ResumedSandbox,
     ) -> Result<SandboxesSandboxIdResumePostResponse, ()> {
-        if let Err(error) = self.check_launch_target(body.target_node_instance.as_ref()) {
-            return Ok(SandboxesSandboxIdResumePostResponse::Status409_Conflict(
-                error,
-            ));
-        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdResumePostResponse::Status404_NotFound(
@@ -1699,23 +1662,6 @@ impl Sandboxes<()> for ApiImpl {
         path_params: &models::SandboxesSandboxIdTimeoutPostPathParams,
         body: &Option<models::SandboxTimeoutRequest>,
     ) -> Result<SandboxesSandboxIdTimeoutPostResponse, ()> {
-        let target = body
-            .as_ref()
-            .and_then(|body| body.target_node_instance.as_ref());
-        let activation = body
-            .as_ref()
-            .and_then(|body| body.execution_lease.as_ref())
-            .map(|lease| lease.activation_id);
-        if let Err(error) = self.check_lifecycle_target(
-            target.map(|target| target.node_id.as_str()),
-            target.map(|target| target.cluster_id),
-            target.map(|target| target.service_instance_id),
-            activation,
-        ) {
-            return Ok(SandboxesSandboxIdTimeoutPostResponse::Status409_Conflict(
-                error,
-            ));
-        }
         let path_id = &path_params.sandbox_id;
         let Ok(sandbox_id) = SandboxId::parse_str(path_id) else {
             return Ok(SandboxesSandboxIdTimeoutPostResponse::Status404_NotFound(

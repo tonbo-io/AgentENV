@@ -612,8 +612,3 @@ The gateway accepts an exact `placement.nodeID` alongside the existing `differen
 
 These are placement and observation mechanisms. Host-pressure thresholds, sustained observation windows, migration admission, accounting, and cooldown belong to the owning product controller. Unit tests must cover exact-node rejection after resource filtering and compatibility-domain changes before deploying a controller that relies on these fields.
 
-## Exact node launch target
-
-Cold create, snapshot create, explicit resume and fork accept `targetNodeInstance` with `nodeID`, `clusterID` and `serviceInstanceID`. When supplied, the runtime rejects missing local identity, zero UUIDs or any mismatch with HTTP 409 before image or snapshot resolution and guest operations. This precondition fences a selected service incarnation; it does not provide business authorization, funding, cleanup acknowledgement or cross-node admission authority.
-
-The existing Cloud SQL orchestrator and gateway callers still omit this field. That compatibility must be removed from managed execution when the Kubernetes execution-authority handoff replaces those callers; the Kubernetes dispatcher must always supply its durably recorded placement identity. Qualification must exercise stale service IDs after restart on cold/warm create, resume and fork, confirm no new admission or guest side effect, and then verify an exact current target can launch normally in isolated EKS. Unit identity checks alone do not qualify this handoff.

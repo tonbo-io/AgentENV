@@ -1,7 +1,6 @@
 mod admin;
 mod attached_drives;
 pub(crate) mod auth;
-mod launch_target;
 mod pagination;
 mod sandbox;
 mod snapshots;
