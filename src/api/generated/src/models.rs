@@ -2544,7 +2544,8 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ExecutionLea
 pub struct ExecutionProxyTarget {
     #[serde(rename = "node")]
     #[validate(nested)]
-    pub node: models::NodeLaunchTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<models::NodeLaunchTarget>,
 
     #[serde(rename = "activationID")]
     pub activation_id: uuid::Uuid,
@@ -2552,9 +2553,9 @@ pub struct ExecutionProxyTarget {
 
 impl ExecutionProxyTarget {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
-    pub fn new(node: models::NodeLaunchTarget, activation_id: uuid::Uuid) -> ExecutionProxyTarget {
+    pub fn new(activation_id: uuid::Uuid) -> ExecutionProxyTarget {
         ExecutionProxyTarget {
-            node,
+            node: None,
             activation_id,
         }
     }
@@ -2638,11 +2639,7 @@ impl std::str::FromStr for ExecutionProxyTarget {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(ExecutionProxyTarget {
-            node: intermediate_rep
-                .node
-                .into_iter()
-                .next()
-                .ok_or_else(|| "node missing in ExecutionProxyTarget".to_string())?,
+            node: intermediate_rep.node.into_iter().next(),
             activation_id: intermediate_rep
                 .activation_id
                 .into_iter()

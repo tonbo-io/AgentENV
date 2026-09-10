@@ -793,8 +793,10 @@ async fn resolve_proxy_request(
     let execution = parse_execution_target(&parts.headers)?;
     let mut auto_resume_attempted = false;
     let target = if let Some(execution) = execution {
+        // The activation is the fence. A node target, when the caller
+        // projected one, must also name this exact service incarnation.
         api_impl
-            .check_launch_target(Some(&execution.node))
+            .check_launch_target(execution.node.as_ref())
             .map_err(|_| ProxyRequestError::ExecutionTargetConflict)?;
         api_impl
             .orchestrator()
@@ -3439,6 +3441,7 @@ mod execution_target_tests {
             }
             request.body(Body::empty()).unwrap().into_parts().0
         };
+        let activation_only = serde_json::json!({"activationID": activation});
         for websocket in [false, true] {
             let resolved = resolve_proxy_request(
                 &api,
@@ -3449,6 +3452,26 @@ mod execution_target_tests {
             .await
             .unwrap();
             assert_eq!(resolved.sandbox_id, id);
+            // The activation alone fences the request; the node pin is optional.
+            let resolved = resolve_proxy_request(
+                &api,
+                "process.Process/Start",
+                &request_parts(Some(&activation_only)),
+                websocket,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolved.sandbox_id, id);
+            assert!(matches!(
+                resolve_proxy_request(
+                    &api,
+                    "x",
+                    &request_parts(Some(&serde_json::json!({"activationID": Uuid::new_v4()}))),
+                    websocket
+                )
+                .await,
+                Err(ProxyRequestError::ExecutionTargetConflict)
+            ));
             assert!(matches!(
                 resolve_proxy_request(&api, "x", &request_parts(None), websocket).await,
                 Err(ProxyRequestError::ExecutionTargetConflict)
@@ -3481,7 +3504,7 @@ mod execution_target_tests {
     #[test]
     fn execution_header_rejects_ambiguous_and_malformed_input_and_is_not_forwarded() {
         let mut headers = HeaderMap::new();
-        for invalid in ["", "null", "{}", "not-json"] {
+        for invalid in ["", "null", "{}", "not-json", "{\"node\":{\"nodeID\":\"n\"}}"] {
             headers.insert(
                 EXECUTION_TARGET_HEADER,
                 HeaderValue::from_str(invalid).unwrap(),
