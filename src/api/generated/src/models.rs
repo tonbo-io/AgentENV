@@ -2542,11 +2542,6 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ExecutionLea
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct ExecutionProxyTarget {
-    #[serde(rename = "node")]
-    #[validate(nested)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node: Option<models::NodeLaunchTarget>,
-
     #[serde(rename = "activationID")]
     pub activation_id: uuid::Uuid,
 }
@@ -2554,10 +2549,7 @@ pub struct ExecutionProxyTarget {
 impl ExecutionProxyTarget {
     #[allow(clippy::new_without_default, clippy::too_many_arguments)]
     pub fn new(activation_id: uuid::Uuid) -> ExecutionProxyTarget {
-        ExecutionProxyTarget {
-            node: None,
-            activation_id,
-        }
+        ExecutionProxyTarget { activation_id }
     }
 }
 
@@ -2567,8 +2559,6 @@ impl ExecutionProxyTarget {
 impl std::fmt::Display for ExecutionProxyTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
-            // Skipping node in query parameter serialization
-
             // Skipping activationID in query parameter serialization
 
         ];
@@ -2592,7 +2582,6 @@ impl std::str::FromStr for ExecutionProxyTarget {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
-            pub node: Vec<models::NodeLaunchTarget>,
             pub activation_id: Vec<uuid::Uuid>,
         }
 
@@ -2616,11 +2605,6 @@ impl std::str::FromStr for ExecutionProxyTarget {
                 #[allow(clippy::match_single_binding)]
                 match key {
                     #[allow(clippy::redundant_clone)]
-                    "node" => intermediate_rep.node.push(
-                        <models::NodeLaunchTarget as std::str::FromStr>::from_str(val)
-                            .map_err(|x| x.to_string())?,
-                    ),
-                    #[allow(clippy::redundant_clone)]
                     "activationID" => intermediate_rep.activation_id.push(
                         <uuid::Uuid as std::str::FromStr>::from_str(val)
                             .map_err(|x| x.to_string())?,
@@ -2639,7 +2623,6 @@ impl std::str::FromStr for ExecutionProxyTarget {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(ExecutionProxyTarget {
-            node: intermediate_rep.node.into_iter().next(),
             activation_id: intermediate_rep
                 .activation_id
                 .into_iter()

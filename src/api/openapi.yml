@@ -38,7 +38,7 @@ components:
       name: x-agentenv-execution-target
       in: header
       required: false
-      description: JSON execution target for activation-fenced guest proxy requests. Required for funded routes. It names the activation the caller acts under, optionally pinned to an exact node service incarnation, but does not authorize access. Requests carrying this target never auto-resume. Unfunded standalone SDK routes may omit it.
+      description: JSON execution target for activation-fenced guest proxy requests. Required for funded routes. It names the activation the caller acts under but does not authorize access. Requests carrying this target never auto-resume. Unfunded standalone SDK routes may omit it.
       content:
         application/json:
           schema:
@@ -712,11 +712,9 @@ components:
     ExecutionProxyTarget:
       type: object
       additionalProperties: false
-      description: The activation a guest proxy request is addressed to. The activation is the fence; the optional node target additionally pins the exact node service incarnation for callers that projected a placement, and a mismatch is rejected before the guest is reached.
+      description: The activation a guest proxy request is addressed to. Routing to the owning node is the gateway's and scheduler's business; the activation is the fence that keeps a delayed request out of a later incarnation of the same runtime identity.
       required: [activationID]
       properties:
-        node:
-          $ref: "#/components/schemas/NodeLaunchTarget"
         activationID:
           type: string
           format: uuid
