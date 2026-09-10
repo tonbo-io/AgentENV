@@ -367,7 +367,6 @@ async fn snapshot_oss_publish_compresses_raw_layers_when_enabled() -> Result<()>
                 runtime_versions: test_runtime_versions(),
                 virtualization_mode: ConfigManager::global_config().virtualization_mode,
                 image_configs: agentenv::types::ImageConfigs::new(),
-                volume_snapshots: Vec::new(),
                 custom_extension_params: None,
             },
             manifest,
