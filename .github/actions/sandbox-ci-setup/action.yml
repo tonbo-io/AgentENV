@@ -134,6 +134,10 @@ runs:
           "${CARGO_TARGET_DIR:-${GITHUB_WORKSPACE}/target}/debug/server" \
           --setup-host --runtime-user "$USER" --runtime-group "$(id -gn)"
 
+    - name: Put /tmp on a 512-byte-sector filesystem for direct I/O tests
+      shell: bash
+      run: scripts/ci/provide-512-sector-scratch.sh
+
     - name: Verify sandbox host prerequisites
       shell: bash
       run: |

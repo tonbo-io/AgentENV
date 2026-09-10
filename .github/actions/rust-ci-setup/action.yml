@@ -126,6 +126,10 @@ runs:
       shell: bash
       run: make ${{ inputs.ci_deps_target }}
 
+    - name: Put /tmp on a 512-byte-sector filesystem for direct I/O tests
+      shell: bash
+      run: scripts/ci/provide-512-sector-scratch.sh
+
     - name: Save CI deps to local cache (self-hosted)
       if: ${{ inputs.install_ci_deps == 'true' && steps.local-cache.outputs.present == 'true' }}
       shell: bash

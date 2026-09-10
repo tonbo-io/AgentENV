@@ -576,51 +576,90 @@ async fn microvm_can_access_internet() -> Result<()> {
     Ok(())
 }
 
+/// Public TCP/53 listeners the policy probes may target. The guest is always
+/// allowed to reach the host's own nameserver on port 53, so a probe target
+/// that happens to be that resolver would be reachable under every policy;
+/// the first three candidates that are not host resolvers are used.
+fn egress_probe_targets() -> Result<[String; 3]> {
+    const CANDIDATES: [&str; 5] = ["8.8.8.8", "1.1.1.1", "1.0.0.1", "8.8.4.4", "9.9.9.9"];
+    let mut resolvers = Vec::new();
+    for path in ["/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"] {
+        if let Ok(contents) = fs::read_to_string(path) {
+            for line in contents.lines() {
+                let mut parts = line.split_whitespace();
+                if parts.next() == Some("nameserver") {
+                    if let Some(address) = parts.next() {
+                        resolvers.push(address.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let mut targets = CANDIDATES
+        .iter()
+        .filter(|candidate| !resolvers.iter().any(|resolver| resolver == *candidate))
+        .map(|candidate| (*candidate).to_string());
+    let (Some(a), Some(b), Some(c)) = (targets.next(), targets.next(), targets.next()) else {
+        bail!("fewer than three probe targets remain after excluding host resolvers {resolvers:?}");
+    };
+    Ok([a, b, c])
+}
+
+/// The /24 that contains `address`, as a CIDR string.
+fn slash_24(address: &str) -> Result<String> {
+    let octets: Vec<&str> = address.split('.').collect();
+    let [a, b, c, _] = octets.as_slice() else {
+        bail!("not an IPv4 address: {address}");
+    };
+    Ok(format!("{a}.{b}.{c}.0/24"))
+}
+
 #[tokio::test]
 async fn microvm_network_policy_controls_egress() -> Result<()> {
     common::setup().await;
+    let [first, second, third] = egress_probe_targets()?;
     let mut sandbox_config = common::default_sandbox_config()?;
     sandbox_config.common.network_policy = Some(SandboxNetworkPolicy::new(
         true,
         BaseSandboxNetworkPolicy::Deny,
-        SandboxNetworkEgressPolicy::new(Some(vec!["8.8.8.8".to_string()]), None)?,
+        SandboxNetworkEgressPolicy::new(Some(vec![first.clone()]), None)?,
     ));
 
     let mut sandbox = FirecrackerSandbox::new(sandbox_config)?;
     sandbox.start().await?;
 
-    assert_tcp_connect(&mut sandbox, "8.8.8.8/53", true).await?;
-    assert_tcp_connect(&mut sandbox, "1.1.1.1/53", false).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{first}/53"), true).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{second}/53"), false).await?;
 
     sandbox
         .update_network_policy(Some(SandboxNetworkPolicy::new(
             true,
             BaseSandboxNetworkPolicy::Deny,
-            SandboxNetworkEgressPolicy::new(Some(vec!["1.1.1.1".to_string()]), None)?,
+            SandboxNetworkEgressPolicy::new(Some(vec![second.clone()]), None)?,
         )))
         .await?;
 
-    assert_tcp_connect(&mut sandbox, "8.8.8.8/53", false).await?;
-    assert_tcp_connect(&mut sandbox, "1.1.1.1/53", true).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{first}/53"), false).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{second}/53"), true).await?;
 
     sandbox
         .update_network_policy(Some(SandboxNetworkPolicy::new(
             true,
             BaseSandboxNetworkPolicy::Allow,
             SandboxNetworkEgressPolicy::new(
-                Some(vec!["8.8.8.8".to_string()]),
-                Some(vec!["8.8.8.0/24".to_string(), "1.1.1.1".to_string()]),
+                Some(vec![first.clone()]),
+                Some(vec![slash_24(&first)?, second.clone()]),
             )?,
         )))
         .await?;
 
-    assert_tcp_connect(&mut sandbox, "8.8.8.8/53", true).await?;
-    assert_tcp_connect(&mut sandbox, "1.1.1.1/53", false).await?;
-    assert_tcp_connect(&mut sandbox, "1.0.0.1/53", true).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{first}/53"), true).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{second}/53"), false).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{third}/53"), true).await?;
 
     sandbox.update_network_policy(None).await?;
-    assert_tcp_connect(&mut sandbox, "8.8.8.8/53", true).await?;
-    assert_tcp_connect(&mut sandbox, "1.1.1.1/53", true).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{first}/53"), true).await?;
+    assert_tcp_connect(&mut sandbox, &format!("{second}/53"), true).await?;
     assert_tcp_connect(&mut sandbox, "10.255.255.254/80", false).await?;
 
     sandbox
