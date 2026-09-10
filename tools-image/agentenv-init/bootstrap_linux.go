@@ -204,7 +204,9 @@ func configureGuestFiles(cmdline string) error {
 			return err
 		}
 	}
-	if _, err := os.Stat("/etc/hosts"); errors.Is(err, os.ErrNotExist) {
+	// Some images ship an empty /etc/hosts rather than none at all; both
+	// leave localhost unresolvable, so treat them the same way.
+	if info, err := os.Stat("/etc/hosts"); errors.Is(err, os.ErrNotExist) || (err == nil && info.Size() == 0) {
 		if err := os.WriteFile("/etc/hosts", []byte("127.0.0.1 localhost\n::1 localhost\n"), 0o644); err != nil {
 			return fmt.Errorf("write /etc/hosts: %w", err)
 		}
