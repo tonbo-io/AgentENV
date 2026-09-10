@@ -3834,6 +3834,48 @@ async fn resume_rejects_paused_sandbox_from_other_virtualization_mode_without_mu
 }
 
 #[tokio::test]
+async fn auto_evict_revalidates_expiry_after_listing() -> Result<()> {
+    setup();
+
+    for timeout_action in [SandboxTimeoutAction::Pause, SandboxTimeoutAction::Delete] {
+        let cutoff = std::time::SystemTime::now();
+        let sandbox_id = SandboxId::new();
+        // Inject a renewal immediately before auto-eviction's first metadata
+        // CAS. At that point the expired candidate has already been listed, so
+        // the eviction entry point must revalidate expiry under the lock.
+        let store = RaceBeforeUpdateStore::new(Duration::from_secs(60));
+        store
+            .add(SandboxMetadata {
+                id: sandbox_id,
+                state: SandboxState::Running,
+                created_at: cutoff,
+                timeout: Some(Duration::from_secs(1)),
+                expires_at: cutoff.checked_sub(Duration::from_secs(1)),
+                timeout_action,
+                ..Default::default()
+            })
+            .await?;
+
+        let orchestrator = make_orchestrator_without_background(store);
+        let evicted = orchestrator.evict_expired_sandboxes().await?;
+        assert!(
+            evicted.is_empty(),
+            "renewed sandbox must not be reported as evicted for {timeout_action:?}"
+        );
+
+        let metadata = orchestrator
+            .get_sandbox(&sandbox_id)
+            .await?
+            .expect("renewed sandbox metadata should remain");
+        assert_eq!(metadata.state, SandboxState::Running);
+        assert_eq!(metadata.timeout, Some(Duration::from_secs(60)));
+        assert!(!metadata.is_expired(std::time::SystemTime::now()));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn auto_evict_expired_sandbox() -> anyhow::Result<()> {
     setup();
     let orchestrator = make_orchestrator().await;

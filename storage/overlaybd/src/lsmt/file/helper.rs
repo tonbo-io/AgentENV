@@ -9,7 +9,7 @@ use std::io::{self, ErrorKind};
 use std::mem::size_of;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, IntoBytes};
 
 use crate::io::virtual_file::VirtualFile;
-use crate::lsmt::format::{DiskSegmentMapping, HeaderTrailer};
+use crate::lsmt::format::{DiskSegmentMapping, HeaderTrailer, NO_PHYSICAL_OFFSET};
 use crate::lsmt::index::{compress_raw_index, ReadOnlyIndex, Segment, SegmentMapping};
 use storage_util::{AlignedBuffer, CompactWriter};
 
@@ -405,6 +405,10 @@ pub(super) fn deserialize_premerged_mappings(
             "premerged artifact contains empty mapping"
         );
         ensure!(
+            mapping.zeroed || mapping.has_physical_range(),
+            "data mapping has no physical offset"
+        );
+        ensure!(
             usize::from(mapping.tag) < layer_count,
             "premerged artifact layer tag out of range"
         );
@@ -472,50 +476,165 @@ pub(super) fn decode_premerged_index_artifact(
     )))
 }
 
+/// Growth in artifact bytes that amortizes one full-dir prune scan.
+const PREMERGED_INDEX_PRUNE_SCAN_FRACTION: u64 = 8;
+
+/// Per-cache-dir growth accounting and scan serialization.
+pub(super) struct PremergedIndexPruneState {
+    account: StdMutex<PremergedIndexScanAccount>,
+}
+
+struct PremergedIndexScanAccount {
+    bytes_since_scan: u64,
+    scan_in_progress: bool,
+    initial_scan_done: bool,
+}
+
+pub(super) async fn premerged_index_prune_state(cache_dir: &Path) -> Arc<PremergedIndexPruneState> {
+    static STATES: OnceLock<Mutex<HashMap<PathBuf, Arc<PremergedIndexPruneState>>>> =
+        OnceLock::new();
+    STATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .await
+        .entry(cache_dir.to_path_buf())
+        .or_insert_with(|| {
+            Arc::new(PremergedIndexPruneState {
+                account: StdMutex::new(PremergedIndexScanAccount {
+                    bytes_since_scan: 0,
+                    scan_in_progress: false,
+                    initial_scan_done: false,
+                }),
+            })
+        })
+        .clone()
+}
+
+impl PremergedIndexPruneState {
+    /// Charge `written_bytes` and elect the single caller that runs the next scan.
+    /// The first charge on a fresh state always elects one seed scan, so a
+    /// cache dir already over budget at process start gets validated.
+    pub(super) fn elect_scan(&self, written_bytes: u64, max_dir_bytes: u64) -> bool {
+        let threshold = (max_dir_bytes / PREMERGED_INDEX_PRUNE_SCAN_FRACTION).max(1);
+        let mut account = self.account.lock().unwrap_or_else(|err| err.into_inner());
+        account.bytes_since_scan = account.bytes_since_scan.saturating_add(written_bytes);
+        if account.scan_in_progress {
+            return false;
+        }
+        let elected = !account.initial_scan_done || account.bytes_since_scan >= threshold;
+        if elected {
+            account.initial_scan_done = true;
+            account.bytes_since_scan = 0;
+            account.scan_in_progress = true;
+        }
+        elected
+    }
+
+    /// End the scan; returns true when growth charged while it ran crosses
+    /// the trigger and a follow-up scan should run.
+    pub(super) fn scan_finished(&self, max_dir_bytes: u64) -> bool {
+        let threshold = (max_dir_bytes / PREMERGED_INDEX_PRUNE_SCAN_FRACTION).max(1);
+        let mut account = self.account.lock().unwrap_or_else(|err| err.into_inner());
+        account.scan_in_progress = false;
+        if account.bytes_since_scan >= threshold {
+            account.bytes_since_scan = 0;
+            account.scan_in_progress = true;
+            return true;
+        }
+        false
+    }
+
+    /// Release a failed scan; concurrent charges are kept so the next write
+    /// re-elects.
+    pub(super) fn scan_aborted(&self) {
+        let mut account = self.account.lock().unwrap_or_else(|err| err.into_inner());
+        account.scan_in_progress = false;
+    }
+}
+
+/// One blocking task for the whole scan: async `tokio::fs` would cost a
+/// blocking-pool round-trip per directory entry.
 async fn prune_premerged_index_dir(dir: &Path, max_dir_bytes: u64) -> Result<()> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || prune_premerged_index_dir_blocking(&dir, max_dir_bytes))
+        .await
+        .context("join premerged index cache prune task")?
+}
+
+struct PremergedArtifactEntry {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+/// Delete oldest premerged index artifacts until `dir` fits `max_dir_bytes`.
+fn prune_premerged_index_dir_blocking(dir: &Path, max_dir_bytes: u64) -> Result<()> {
     let mut entries = Vec::new();
     let mut total = 0u64;
-    let mut reader = tokio::fs::read_dir(dir).await?;
-
-    while let Some(entry) = reader.next_entry().await? {
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("read premerged index cache dir {}", dir.display()))?
+    {
+        let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|v| v.to_str()) != Some(PREMERGED_INDEX_EXT) {
             continue;
         }
-        let metadata = entry.metadata().await?;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            // Entries deleted concurrently with the scan only shrink it.
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("stat {}", path.display()));
+            }
+        };
         if !metadata.is_file() {
             continue;
         }
         let len = metadata.len();
         let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
         total = total.saturating_add(len);
-        entries.push((path, len, modified));
+        entries.push(PremergedArtifactEntry {
+            path,
+            len,
+            modified,
+        });
     }
 
     if total <= max_dir_bytes {
         return Ok(());
     }
 
-    entries.sort_by_key(|(_, _, modified): &(PathBuf, u64, SystemTime)| *modified);
-    for (path, len, _) in entries {
+    entries.sort_by_key(|entry| entry.modified);
+    for entry in entries {
         if total <= max_dir_bytes {
             break;
         }
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => total = total.saturating_sub(len),
+        match std::fs::remove_file(&entry.path) {
+            Ok(()) => total = total.saturating_sub(entry.len),
+            // Already removed by someone else since the scan: those bytes
+            // left the dir too, so count them as freed.
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                total = total.saturating_sub(entry.len);
+            }
             Err(err) => {
-                tracing::warn!(?err, path = %path.display(), "remove premerged index artifact failed")
+                tracing::warn!(
+                    ?err,
+                    path = %entry.path.display(),
+                    "remove premerged index artifact failed"
+                )
             }
         }
     }
     Ok(())
 }
 
+/// Write the artifact atomically (tmp file + rename) and return its size in
+/// bytes so callers can account cache growth.
 async fn write_premerged_index_artifact(
     cache_dir: &Path,
     key: &PremergedIndexCacheKey,
     index: &ReadOnlyIndex,
-) -> Result<()> {
+) -> Result<u64> {
     let dir = cache_dir.join(PREMERGED_INDEX_DIR);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -550,7 +669,7 @@ async fn write_premerged_index_artifact(
         });
     }
 
-    Ok(())
+    Ok(artifact.len() as u64)
 }
 
 pub(super) async fn try_read_premerged_index_artifact(
@@ -582,6 +701,34 @@ pub(super) async fn try_read_premerged_index_artifact(
     }
 }
 
+/// Charge `written` artifact bytes for `cache_dir` and run prune scans
+/// while the growth trigger keeps electing.
+async fn prune_premerged_index_cache(cache_dir: &Path, written: u64, max_dir_bytes: u64) {
+    let state = premerged_index_prune_state(cache_dir).await;
+    if !state.elect_scan(written, max_dir_bytes) {
+        return;
+    }
+    let dir = cache_dir.join(PREMERGED_INDEX_DIR);
+    loop {
+        match prune_premerged_index_dir(&dir, max_dir_bytes).await {
+            Ok(()) => {
+                if !state.scan_finished(max_dir_bytes) {
+                    return;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    path = %dir.display(),
+                    "prune premerged index cache dir failed"
+                );
+                state.scan_aborted();
+                return;
+            }
+        }
+    }
+}
+
 pub(super) fn spawn_premerged_index_artifact_write(
     cache_dir: PathBuf,
     key: PremergedIndexCacheKey,
@@ -599,18 +746,15 @@ pub(super) fn spawn_premerged_index_artifact_write(
                 "write premerged index artifact failed"
             );
         }
-        let key_digest = key.digest_hex.clone();
+        // Release the merged index and the digest lock before the prune tail:
+        // the index can be hundreds of MB and the prune scan may pin it for
+        // the whole scan, while the held lock would block the next writer for
+        // the same digest.
+        drop(merged);
         drop(guard);
-        release_premerged_index_lock(&key_digest, &lock).await;
-        if write_result.is_ok() {
-            let dir = cache_dir.join(PREMERGED_INDEX_DIR);
-            if let Err(err) = prune_premerged_index_dir(&dir, max_dir_bytes).await {
-                tracing::warn!(
-                    ?err,
-                    path = %dir.display(),
-                    "prune premerged index cache dir failed"
-                );
-            }
+        release_premerged_index_lock(&key.digest_hex, &lock).await;
+        if let Ok(written) = write_result {
+            prune_premerged_index_cache(&cache_dir, written, max_dir_bytes).await;
         }
     });
 }
@@ -753,6 +897,20 @@ pub async fn create_mappings_from_sparse(
             cursor = end.max(start_offset);
             continue;
         }
+
+        // The block arithmetic below truncates, and `end` is clamped to the file
+        // size, so an extent boundary that is not a multiple of ALIGNMENT would
+        // silently drop the trailing partial block: it would read back as zeros
+        // with no error raised anywhere. Both platforms report extent boundaries
+        // at filesystem-block granularity, so in practice this only fires on a
+        // source whose *size* is not a multiple of ALIGNMENT — which is worth
+        // rejecting loudly rather than truncating.
+        ensure!(
+            begin.is_multiple_of(ALIGNMENT) && end.is_multiple_of(ALIGNMENT),
+            "unaligned data extent [{begin}, {end}) reported for a file scanned by \
+             create_mappings_from_sparse: extent boundaries must be multiples of \
+             {ALIGNMENT} bytes"
+        );
 
         let mut logical = (begin - start_offset) / ALIGNMENT;
         let mut physical = begin / ALIGNMENT;
@@ -899,6 +1057,10 @@ async fn load_index(
         if m.length() == 0 || m.offset() == u64::MAX {
             continue;
         }
+        ensure!(
+            m.zeroed || m.has_physical_range(),
+            "data mapping has no physical offset"
+        );
         if reset_tag {
             m.tag = 0;
         }
@@ -937,6 +1099,9 @@ fn compact_is_zero_block(_buf: &[u8]) -> bool {
     COMPACT_ZERO_DETECTION_ENABLED
 }
 
+/// Emit a contiguous run of blocks with the same zero/non-zero properties
+/// as one index segment, into `index`. Append non-zero blocks to the output
+/// data buffer, then prepare `segment` to accumulate the next run.
 fn push_compact_segment(
     chunk: &[u8],
     data: &mut Vec<u8>,
@@ -945,8 +1110,18 @@ fn push_compact_segment(
     segment: &mut SegmentMapping,
     index: &mut Vec<SegmentMapping>,
 ) {
+    // A zero record occupies no physical range in the destination, so it must
+    // not advance the data cursor. Save `next_moffset` before replacing the
+    // record's offset with the marker: it is the physical destination offset
+    // used for the next segment's data write.
+    let next_moffset = if zero_detected {
+        segment.moffset
+    } else {
+        segment.mend()
+    };
     if zero_detected {
         segment.zeroed = true;
+        segment.moffset = NO_PHYSICAL_OFFSET;
     } else {
         let begin = *prev_end_blocks * ALIGNMENT_USIZE;
         let len = segment.length() as usize * ALIGNMENT_USIZE;
@@ -956,7 +1131,6 @@ fn push_compact_segment(
     *prev_end_blocks += segment.length() as usize;
     index.push(*segment);
 
-    let next_moffset = segment.mend();
     let next_offset = segment.end();
     segment.zeroed = false;
     segment.segment.offset = next_offset;
@@ -1250,7 +1424,7 @@ pub async fn compact_to(
         for m in mappings {
             if m.zeroed {
                 let mut zero = *m;
-                zero.moffset = dest_moffset;
+                zero.moffset = NO_PHYSICAL_OFFSET;
                 compact_index.push(zero);
                 continue;
             }
@@ -1285,7 +1459,7 @@ pub async fn compact_to(
         for m in mappings {
             if m.zeroed {
                 let mut zero = *m;
-                zero.moffset = dest_moffset;
+                zero.moffset = NO_PHYSICAL_OFFSET;
                 compact_index.push(zero);
                 // NOTE: no need to advance dest_moffset, as this is a zero segement,
                 // does not occupy space in dset file.
@@ -1427,4 +1601,45 @@ pub async fn compact_to(
     writer.finalize().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detected_zero_does_not_advance_compact_data_cursor() {
+        let chunk = [0xAB; 2 * ALIGNMENT_USIZE];
+        let mut data = Vec::new();
+        let mut prev_end_blocks = 0;
+        let mut segment = SegmentMapping::new(0, 1, 8, false, 0);
+        let mut index = Vec::new();
+        push_compact_segment(
+            &chunk,
+            &mut data,
+            &mut prev_end_blocks,
+            true,
+            &mut segment,
+            &mut index,
+        );
+        assert!(data.is_empty());
+        assert_eq!(
+            index[0],
+            SegmentMapping::new(0, 1, NO_PHYSICAL_OFFSET, true, 0)
+        );
+        assert_eq!(segment, SegmentMapping::new(1, 0, 8, false, 0));
+
+        segment.segment.length = 1;
+        push_compact_segment(
+            &chunk,
+            &mut data,
+            &mut prev_end_blocks,
+            false,
+            &mut segment,
+            &mut index,
+        );
+        assert_eq!(data.as_slice(), &[0xAB; ALIGNMENT_USIZE]);
+        assert_eq!(index[1], SegmentMapping::new(1, 1, 8, false, 0));
+        assert_eq!(segment, SegmentMapping::new(2, 0, 9, false, 0));
+    }
 }
