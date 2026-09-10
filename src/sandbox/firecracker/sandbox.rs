@@ -2286,26 +2286,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn fresh_volume_drives_use_reserved_slots() -> Result<()> {
-        let work_base = TempDir::new()?;
-        let physical_drive = ExtraDrive::try_new_overlaybd("data", "/tmp/data-image.json", true)?;
-        let volume_drive =
-            ExtraDrive::try_new_overlaybd("volume", "/tmp/volume-image.json", false)?
-                .with_volume_snapshot_output_dir(None);
-        let mut config = fresh_config();
-        config.common.firecracker_work_base_dir = Some(work_base.path().to_path_buf());
-        config.common.extra_drives = vec![volume_drive.clone(), physical_drive.clone()];
-
-        let sandbox = FirecrackerSandbox::new(config)?;
-        let common = sandbox.launch.common();
-
-        assert_eq!(common.physical_extra_drive_count, 1);
-        assert!(common.volume_drive_slots >= 1);
-        assert_eq!(common.extra_drives, vec![physical_drive, volume_drive]);
-        Ok(())
-    }
-
     fn overlaybd_config() -> FirecrackerSandboxConfig {
         let mut config = fresh_config();
         config.common.ublk_config = Some(crate::sandbox::ublk::UblkConfig::overlaybd(

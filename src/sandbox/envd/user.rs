@@ -31,7 +31,7 @@ impl EnvdInstance {
             // envd requires a name even when Docker permits a UID without an
             // account. Add an identity without changing existing accounts.
             let script = format!("printf '\\n%s\\n' {} >> /etc/passwd", shell_quote(&entry));
-            let output = Executor::new(self.clone())
+            let output = Executor::new(self)
                 .with_root_user()
                 .run_command_with_opts(
                     "/agentenv/bin/busybox",
