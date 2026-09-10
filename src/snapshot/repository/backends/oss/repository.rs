@@ -1168,7 +1168,13 @@ impl OssSnapshotRepository {
                 e,
             )
         })?;
-        let upload = prepare_layer_upload(&canonical, self.publish_compression, None).await?;
+        // Publish compression recontainerizes OverlayBD layers as zfile. The
+        // tools drive is a plain ext4 image and is uploaded as-is.
+        let mode = match artifact {
+            OssUploadArtifact::ToolsDrive => OverlaybdCompactOutput::Raw,
+            _ => self.publish_compression,
+        };
+        let upload = prepare_layer_upload(&canonical, mode, None).await?;
         let uuid = overlaybd_layer_uuid(upload.path());
         self.upload_prepared_layer(upload, uuid, artifact).await
     }
