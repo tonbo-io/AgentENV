@@ -34,8 +34,8 @@ impl EnvdInstance {
             let output = Executor::new(self)
                 .with_root_user()
                 .run_command_with_opts(
-                    "/agentenv/bin/busybox",
-                    &["sh", "-c", &script],
+                    "/bin/sh",
+                    &["-c", &script],
                     &ProcessOpts::default()
                         .with_cwd("/")
                         .with_timeout(std::time::Duration::from_secs(10)),

@@ -71,8 +71,8 @@ async fn numeric_image_users_preserve_identity_after_start_and_resume() -> Resul
             }
             let output = sandbox
                 .run_command_with_opts(
-                    "/agentenv/bin/busybox",
-                    &["sh", "-c", "id -u; id -g; pwd"],
+                    "/bin/sh",
+                    &["-c", "id -u; id -g; pwd"],
                     &ProcessOpts::default().with_timeout(Duration::from_secs(10)),
                 )
                 .await?;

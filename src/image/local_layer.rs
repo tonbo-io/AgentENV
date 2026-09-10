@@ -20,7 +20,11 @@ pub(crate) struct LocalLayer {
 pub(crate) fn rootfs_layer_is_runtime_generated_delta(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some(SNAPSHOT_DELTA_LAYER_FILE | SELF_CONTAINED_BASE_LAYER_FILE)
+        Some(
+            SNAPSHOT_DELTA_LAYER_FILE
+                | SNAPSHOT_ZFILE_DELTA_LAYER_FILE
+                | SELF_CONTAINED_BASE_LAYER_FILE,
+        )
     )
 }
 
