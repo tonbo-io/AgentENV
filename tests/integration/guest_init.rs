@@ -11,6 +11,8 @@ async fn assert_guest_boot_fails_closed(
     expected_serial_log: &str,
 ) -> Result<()> {
     sandbox_config.common.runtime_policy.envd_timeout = Duration::from_secs(5);
+    // Serial output is only captured when Firecracker logging is enabled.
+    sandbox_config.common.firecracker_log_level = Some("Info".to_owned());
     let mut sandbox = FirecrackerSandbox::new(sandbox_config)?;
     let serial_log = sandbox.firecracker_stdout_path();
     let result = sandbox.start().await;
