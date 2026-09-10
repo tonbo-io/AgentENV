@@ -55,30 +55,6 @@ components:
       required: true
       schema:
         type: string
-    expectedNodeID:
-      name: expectedNodeID
-      in: query
-      required: false
-      description: Exact runtime node identity. Supply together with expectedClusterID, expectedServiceInstanceID and expectedActivationID; incomplete or mismatched targets are rejected before lifecycle work.
-      schema:
-        type: string
-        minLength: 1
-    expectedClusterID:
-      name: expectedClusterID
-      in: query
-      required: false
-      description: Cluster incarnation of the expected runtime node.
-      schema:
-        type: string
-        format: uuid
-    expectedServiceInstanceID:
-      name: expectedServiceInstanceID
-      in: query
-      required: false
-      description: Process incarnation of the expected runtime node. A replacement process rejects a delayed lifecycle request even when the endpoint is reused.
-      schema:
-        type: string
-        format: uuid
     expectedActivationID:
       name: expectedActivationID
       in: query
@@ -719,27 +695,10 @@ components:
           type: string
           format: uuid
 
-    NodeLaunchTarget:
-      type: object
-      description: Exact runtime service incarnation selected before dispatch. A mismatch is rejected before launch side effects. This is not a funding or authorization grant.
-      required: [nodeID, clusterID, serviceInstanceID]
-      properties:
-        nodeID:
-          type: string
-          minLength: 1
-        clusterID:
-          type: string
-          format: uuid
-        serviceInstanceID:
-          type: string
-          format: uuid
-
     NewSandbox:
       required:
         - templateID
       properties:
-        targetNodeInstance:
-          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         templateID:
@@ -793,8 +752,6 @@ components:
             executionLease activation before deciding whether to retry.
             Optional only for legacy SDK and SQL lifecycle callers until the
             Kubernetes execution handoff retires those callers.
-        targetNodeInstance:
-          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         timeout:
@@ -808,8 +765,6 @@ components:
       required:
         - image
       properties:
-        targetNodeInstance:
-          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         image:
@@ -882,10 +837,6 @@ components:
       required:
         - timeout
       properties:
-        targetNodeInstance:
-          description: Exact Node incarnation for funded renewal. Optional only for legacy SDK and SQL callers until Kubernetes lifecycle handoff; when supplied, executionLease is required.
-          allOf:
-            - $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         timeout:
@@ -937,8 +888,6 @@ components:
     SandboxForkRequest:
       type: object
       properties:
-        targetNodeInstance:
-          $ref: "#/components/schemas/NodeLaunchTarget"
         executionLease:
           $ref: "#/components/schemas/ExecutionLease"
         timeout:
@@ -1890,9 +1839,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/sandboxID"
         - $ref: "#/components/parameters/expectedActivationID"
-        - $ref: "#/components/parameters/expectedNodeID"
-        - $ref: "#/components/parameters/expectedClusterID"
-        - $ref: "#/components/parameters/expectedServiceInstanceID"
         - name: terminalCommand
           in: query
           required: false
@@ -1931,9 +1877,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/sandboxID"
         - $ref: "#/components/parameters/expectedActivationID"
-        - $ref: "#/components/parameters/expectedNodeID"
-        - $ref: "#/components/parameters/expectedClusterID"
-        - $ref: "#/components/parameters/expectedServiceInstanceID"
       responses:
         "204":
           description: The sandbox was paused successfully and can be resumed
