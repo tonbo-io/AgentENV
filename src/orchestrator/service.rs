@@ -1151,6 +1151,19 @@ where
             }
         };
 
+        self.delete_sandbox_impl(sandbox_id, previous_state, command)
+            .await
+    }
+
+    /// Deletes a sandbox whose metadata is already `Killing`, either by the
+    /// caller's activation-fenced transition or by an auto-eviction claim.
+    /// `previous_state` is restored if deletion cannot start.
+    async fn delete_sandbox_impl(
+        self: &Arc<Self>,
+        sandbox_id: SandboxId,
+        previous_state: SandboxState,
+        command: Option<String>,
+    ) -> Result<()> {
         let deleting = self
             .store
             .get(&sandbox_id)
@@ -1345,6 +1358,12 @@ where
             Err(err) => return Err(OrchestratorError::from(err)),
         }
 
+        self.pause_sandbox_impl(sandbox_id).await
+    }
+
+    /// Pauses a sandbox whose metadata is already `Pausing`, either by the
+    /// caller's activation-fenced transition or by an auto-eviction claim.
+    async fn pause_sandbox_impl(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
         self.capture_snapshot_leaving_source_paused(
             sandbox_id,
             SandboxState::Pausing,
@@ -2384,43 +2403,95 @@ where
             let funded_expired = metadata
                 .execution_lease
                 .is_some_and(|lease| lease.remaining(now).is_err());
-            let result = if dead || funded_expired {
-                self.delete_sandbox_inner(
-                    metadata.id,
-                    metadata.execution_lease.map(|lease| lease.activation_id),
-                )
-                .await
+            let claimed_state = if dead || funded_expired {
+                SandboxState::Killing
             } else {
                 match metadata.timeout_action {
-                    SandboxTimeoutAction::Pause => {
-                        self.pause_sandbox_inner(
-                            metadata.id,
-                            metadata.execution_lease.map(|lease| lease.activation_id),
-                        )
-                        .await
-                    }
-                    SandboxTimeoutAction::Delete => {
-                        self.delete_sandbox_inner(
-                            metadata.id,
-                            metadata.execution_lease.map(|lease| lease.activation_id),
-                        )
-                        .await
-                    }
+                    SandboxTimeoutAction::Pause => SandboxState::Pausing,
+                    SandboxTimeoutAction::Delete => SandboxState::Killing,
                 }
             };
-            if let Err(err) = result {
-                warn!(
+            let activation = metadata.execution_lease.map(|lease| lease.activation_id);
+            let result = match self
+                .claim_expired_running_sandbox(metadata.id, now, claimed_state, activation, dead)
+                .await
+            {
+                Ok(true) => match claimed_state {
+                    SandboxState::Pausing => self.pause_sandbox_impl(metadata.id).await,
+                    _ => {
+                        self.delete_sandbox_impl(metadata.id, SandboxState::Running, None)
+                            .await
+                    }
+                }
+                .map(|_| true),
+                Ok(false) => Ok(false),
+                Err(err) => Err(err),
+            };
+            match result {
+                Ok(true) => evicted_ids.push(metadata.id),
+                Ok(false) => continue,
+                Err(err) => warn!(
                     sandbox_id = %metadata.id,
                     action = ?metadata.timeout_action,
                     error = ?err,
                     "failed to auto-evict expired sandbox"
-                );
-                continue;
+                ),
             }
-            evicted_ids.push(metadata.id);
         }
 
         Ok(evicted_ids)
+    }
+
+    /// Atomically claims a `Running` sandbox for auto-eviction by moving it to
+    /// `claimed_state`. The expiry, the funded lease, and the activation are
+    /// re-checked under the store lock, so a keep-alive or lease renewal that
+    /// landed after the eviction pass listed the sandbox wins and the sandbox
+    /// stays `Running`. A dead runtime is claimed regardless of expiry because
+    /// no renewal can bring the process back.
+    async fn claim_expired_running_sandbox(
+        &self,
+        sandbox_id: SandboxId,
+        cutoff: SystemTime,
+        claimed_state: SandboxState,
+        activation: Option<uuid::Uuid>,
+        dead: bool,
+    ) -> Result<bool> {
+        match self
+            .store
+            .update_if_state(&sandbox_id, &[SandboxState::Running], |metadata| {
+                let same_activation =
+                    metadata.execution_lease.map(|lease| lease.activation_id) == activation;
+                let funded_expired = metadata
+                    .execution_lease
+                    .is_some_and(|lease| lease.remaining(cutoff).is_err());
+                if same_activation && (dead || funded_expired || metadata.is_expired(cutoff)) {
+                    metadata.state = claimed_state;
+                }
+            })
+            .await
+        {
+            Ok(update) if update.current.state == claimed_state => Ok(true),
+            Ok(update) => {
+                debug!(
+                    expires_at = ?update.current.expires_at,
+                    ?cutoff,
+                    "skipping auto-eviction because sandbox expiry or activation was updated"
+                );
+                Ok(false)
+            }
+            Err(StoreError::StateConflict { actual_state, .. }) => {
+                debug!(
+                    state = ?actual_state,
+                    "skipping auto-eviction because sandbox state changed"
+                );
+                Ok(false)
+            }
+            Err(StoreError::SandboxNotFound { .. }) => {
+                debug!("skipping auto-eviction because sandbox no longer exists");
+                Ok(false)
+            }
+            Err(err) => Err(OrchestratorError::from(err)),
+        }
     }
 
     /// Starts a background task that periodically evicts expired sandboxes.
