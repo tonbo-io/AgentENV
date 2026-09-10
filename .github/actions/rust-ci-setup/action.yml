@@ -126,7 +126,7 @@ runs:
       shell: bash
       run: make ${{ inputs.ci_deps_target }}
 
-    - name: Provide a 512-byte-sector scratch filesystem for direct I/O tests
+    - name: Put /tmp on a 512-byte-sector filesystem for direct I/O tests
       shell: bash
       run: scripts/ci/provide-512-sector-scratch.sh
 
