@@ -793,9 +793,8 @@ async fn resolve_proxy_request(
     let execution = parse_execution_target(&parts.headers)?;
     let mut auto_resume_attempted = false;
     let target = if let Some(execution) = execution {
-        api_impl
-            .check_launch_target(Some(&execution.node))
-            .map_err(|_| ProxyRequestError::ExecutionTargetConflict)?;
+        // Routing to the owning node is the gateway's business; the
+        // activation is the fence.
         api_impl
             .orchestrator()
             .proxy_lookup_for_activation(&sandbox_id, execution.activation_id)
@@ -882,8 +881,16 @@ fn parse_execution_target(
     if values.next().is_some() {
         return Err(ProxyRequestError::InvalidExecutionTarget);
     }
-    let target: agentenv_http_server::models::ExecutionProxyTarget =
+    // The schema is closed (`additionalProperties: false`): a target that
+    // names anything but the activation is not this contract.
+    let object: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(value.as_bytes())
+            .map_err(|_| ProxyRequestError::InvalidExecutionTarget)?;
+    if object.keys().any(|key| key != "activationID") {
+        return Err(ProxyRequestError::InvalidExecutionTarget);
+    }
+    let target: agentenv_http_server::models::ExecutionProxyTarget =
+        serde_json::from_value(serde_json::Value::Object(object))
             .map_err(|_| ProxyRequestError::InvalidExecutionTarget)?;
     if target.activation_id.is_nil() {
         return Err(ProxyRequestError::InvalidExecutionTarget);
@@ -3426,9 +3433,7 @@ mod execution_target_tests {
                 SandboxState::Running,
             )
             .await;
-        let target = serde_json::json!({"node":{
-            "nodeID":"node-a", "clusterID":cluster, "serviceInstanceID":service
-        }, "activationID":activation});
+        let target = serde_json::json!({"activationID":activation});
         let request_parts = |target: Option<&serde_json::Value>| {
             let mut request = Request::builder()
                 .uri("/process.Process/Start")
@@ -3449,26 +3454,24 @@ mod execution_target_tests {
             .await
             .unwrap();
             assert_eq!(resolved.sandbox_id, id);
+
             assert!(matches!(
                 resolve_proxy_request(&api, "x", &request_parts(None), websocket).await,
                 Err(ProxyRequestError::ExecutionTargetConflict)
             ));
-            for key in ["nodeID", "clusterID", "serviceInstanceID", "activationID"] {
-                let mut stale = target.clone();
-                if key == "activationID" {
-                    stale[key] = serde_json::json!(Uuid::new_v4());
-                } else {
-                    stale["node"][key] = serde_json::json!(Uuid::new_v4().to_string());
-                }
-                assert!(
-                    matches!(
-                        resolve_proxy_request(&api, "x", &request_parts(Some(&stale)), websocket)
-                            .await,
-                        Err(ProxyRequestError::ExecutionTargetConflict)
-                    ),
-                    "stale {key}"
-                );
-            }
+            let stale = serde_json::json!({"activationID": Uuid::new_v4()});
+            assert!(matches!(
+                resolve_proxy_request(&api, "x", &request_parts(Some(&stale)), websocket).await,
+                Err(ProxyRequestError::ExecutionTargetConflict)
+            ));
+            // A node pin is not part of the contract; the schema rejects it.
+            let pinned = serde_json::json!({"activationID": activation, "node": {
+                "nodeID":"node-a", "clusterID":cluster, "serviceInstanceID":service
+            }});
+            assert!(matches!(
+                resolve_proxy_request(&api, "x", &request_parts(Some(&pinned)), websocket).await,
+                Err(ProxyRequestError::InvalidExecutionTarget)
+            ));
         }
         // Removing the published route must not recover it from metadata or resume.
         api.orchestrator().remove_proxy_route_for_test(&id).await;
@@ -3481,7 +3484,13 @@ mod execution_target_tests {
     #[test]
     fn execution_header_rejects_ambiguous_and_malformed_input_and_is_not_forwarded() {
         let mut headers = HeaderMap::new();
-        for invalid in ["", "null", "{}", "not-json"] {
+        for invalid in [
+            "",
+            "null",
+            "{}",
+            "not-json",
+            "{\"node\":{\"nodeID\":\"n\"}}",
+        ] {
             headers.insert(
                 EXECUTION_TARGET_HEADER,
                 HeaderValue::from_str(invalid).unwrap(),
@@ -3491,9 +3500,7 @@ mod execution_target_tests {
                 Err(ProxyRequestError::InvalidExecutionTarget)
             ));
         }
-        let valid = serde_json::json!({"node": {"nodeID":"node", "clusterID":Uuid::new_v4(),
-            "serviceInstanceID":Uuid::new_v4()}, "activationID":Uuid::new_v4()})
-        .to_string();
+        let valid = serde_json::json!({"activationID":Uuid::new_v4()}).to_string();
         headers.insert(
             EXECUTION_TARGET_HEADER,
             HeaderValue::from_str(&valid).unwrap(),
