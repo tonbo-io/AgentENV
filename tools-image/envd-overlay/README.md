@@ -1,6 +1,6 @@
 # Recoverable process I/O
 
-This overlay extends the existing envd process service at the exact upstream commit in `../envd-source.env`. `../apply-envd-overlay.sh` verifies that commit, checks/applies `upstream.patch`, copies the new implementation and regenerates Go protobuf messages. Rust's `thirdparty/envd/build.rs` consumes the same `spec/process/process.proto`; do not keep a second process schema. Go generation uses pinned `protoc-gen-go` v1.28.1. Publish a new immutable tools drive before any consumer enables this mode; the base upstream commit alone does not identify an overlaid binary.
+This overlay extends the existing envd process service at the exact upstream commit in `../envd-source.env`. `../apply-envd-overlay.sh` verifies that commit, checks/applies `upstream.patch`, copies the new implementation and regenerates Go protobuf messages. Rust's `envd-protocol` crate consumes the same `spec/process/process.proto`; the existing envd client reexports those generated types and Cloud can depend on the protocol without the HTTP transport. Do not keep a second process schema or manually copied Rust message types. Rust generation uses a locked vendored protoc, so consumers do not require a host compiler installation. Go generation uses pinned `protoc-gen-go` v1.28.1. Publish a new immutable tools drive before any consumer enables this mode; the base upstream commit alone does not identify an overlaid binary.
 
 ## Protocol
 

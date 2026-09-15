@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+envd-protocol = { path = "protocol" }
 tonic = "0.14.2"
 prost = "0.14.3"
 prost-types = "0.14.3"
@@ -19,9 +20,6 @@ bytes = "1"
 anyhow = "1.0.100"
 http_client = { path = "./http-client" }
 reqwest = { version = "^0.13", default-features = false, features = ["json", "multipart", "stream"] }
-
-[build-dependencies]
-tonic-prost-build = "0.14.2"
 
 [dev-dependencies]
 futures-util = "0.3.31"

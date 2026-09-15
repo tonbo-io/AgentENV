@@ -6,7 +6,7 @@ pub use reqwest;
 macro_rules! impl_envd_client {
     ($module_name:ident, $proto_name:literal, $generated_client_mod:ident, $client_struct:ident) => {
         pub mod $module_name {
-            tonic::include_proto!($proto_name);
+            pub use envd_protocol::$module_name::*;
 
             use crate::transport::Channel;
             use $generated_client_mod::$client_struct as GeneratedClient;
