@@ -3,3 +3,7 @@
 !Makefile
 !agentenv-init/
 !agentenv-init/**
+!envd-source.env
+!apply-envd-overlay.sh
+!envd-overlay/
+!envd-overlay/**
