@@ -3,7 +3,7 @@ use aws_config::{meta::region::RegionProviderChain, BehaviorVersion};
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::Client as S3Client;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::ContainerAsync;
+use testcontainers::{ContainerAsync, ImageExt};
 use testcontainers_modules::minio::MinIO;
 
 pub const MINIO_USER: &str = "minioadmin";
@@ -21,7 +21,13 @@ pub struct MinioFixture {
 
 impl MinioFixture {
     pub async fn start() -> Result<Self> {
-        let container = MinIO::default().start().await?;
+        // Docker Hub removed this historical image. Keep the same release from
+        // the publisher's Quay registry, pinned to its multi-platform manifest.
+        let container = MinIO::default()
+            .with_name("quay.io/minio/minio")
+            .with_tag("RELEASE.2022-02-07T08-17-33Z@sha256:7dda745aefd6152f0d04fdd23377f9e52549df3fc4307f16b8bc562ae2b8119f")
+            .start()
+            .await?;
         let port = container.get_host_port_ipv4(9000).await?;
         let endpoint = format!("http://127.0.0.1:{port}");
         let client = build_s3_client(&endpoint).await;
