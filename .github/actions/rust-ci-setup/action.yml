@@ -26,6 +26,14 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Identify native cache ABI
+      id: native-cache
+      shell: bash
+      run: |
+        set -euo pipefail
+        abi=$( { uname -sm; cat /etc/os-release; getconf GNU_LIBC_VERSION; } | sha256sum | cut -d' ' -f1)
+        echo "abi=$abi" >> "$GITHUB_OUTPUT"
+
     - name: Compute CI deps cache version
       id: ci-deps-cache-version
       shell: bash
@@ -64,12 +72,13 @@ runs:
         CACHE_ROOT: ${{ inputs.cache_root }}
         REPO: ${{ github.repository }}
         CACHE_VERSION: ${{ steps.ci-deps-cache-version.outputs.cache_version }}
+        NATIVE_ABI: ${{ steps.native-cache.outputs.abi }}
       run: |
         set -euo pipefail
         repo_key="${REPO//\//-}"
         cargo_home="${CACHE_ROOT}/cargo-home"
-        cargo_target_dir="${CACHE_ROOT}/cargo-target/${repo_key}"
-        protoc_local_cache_dir="${CACHE_ROOT}/protoc/${CACHE_VERSION}"
+        cargo_target_dir="${CACHE_ROOT}/cargo-target/${repo_key}/${NATIVE_ABI}"
+        protoc_local_cache_dir="${CACHE_ROOT}/protoc/${NATIVE_ABI}/${CACHE_VERSION}"
 
         if [[ ! -d "$CACHE_ROOT" || ! -w "$CACHE_ROOT" ]]; then
           sudo mkdir -p "$CACHE_ROOT"
@@ -95,6 +104,8 @@ runs:
     - name: Restore Rust cache
       if: ${{ steps.local-cache.outputs.present != 'true' }}
       uses: Swatinem/rust-cache@v2
+      with:
+        key: native-${{ steps.native-cache.outputs.abi }}
 
     - name: Restore CI deps cache (protoc)
       id: ci-deps-cache
@@ -104,7 +115,7 @@ runs:
         path: |
           ~/.local/bin/protoc
           ~/.local/include/google/protobuf
-        key: ci-deps-protoc-${{ runner.os }}-${{ steps.ci-deps-cache-version.outputs.cache_version }}
+        key: ci-deps-protoc-${{ steps.native-cache.outputs.abi }}-${{ steps.ci-deps-cache-version.outputs.cache_version }}
 
     - name: Restore CI deps from local cache (self-hosted)
       if: ${{ inputs.install_ci_deps == 'true' && steps.local-cache.outputs.present == 'true' }}

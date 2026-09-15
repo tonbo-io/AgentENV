@@ -3133,6 +3133,34 @@ where
             .map_err(Into::into)
     }
 
+    /// Close only an empty or fully paused node. The inventory read is fenced
+    /// by the admission generation, so even a start that finishes before the
+    /// final check invalidates it. No asynchronous lock is held across fsync.
+    /// None means busy and this request made no admission or marker change.
+    pub async fn drain_node_if_idle(&self, drain_id: String) -> Result<Option<AdmissionStatus>> {
+        if self.admission.status().closed {
+            return self.drain_node(drain_id).await.map(Some);
+        }
+        let Some(epoch) = self.admission.idle_epoch() else {
+            return Ok(None);
+        };
+        if self
+            .store
+            .list()
+            .await?
+            .iter()
+            .any(|sandbox| sandbox.state != SandboxState::Paused)
+        {
+            return Ok(None);
+        }
+        let admission = self.admission.clone();
+        tokio::task::spawn_blocking(move || admission.drain_if_unchanged(&drain_id, epoch))
+            .await
+            .context("join conditional node drain")?
+            .context("persist conditional node drain")
+            .map_err(Into::into)
+    }
+
     pub fn node_operation_status(&self) -> OperationStatus {
         self.operations.status()
     }

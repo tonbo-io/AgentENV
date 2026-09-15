@@ -1421,6 +1421,9 @@ components:
       additionalProperties: false
       required: [clusterID, serviceInstanceID, drainID]
       properties:
+        onlyIfIdle:
+          type: boolean
+          description: When true, close admission only if the node has no running, starting or transitional guests. Fully paused guests are allowed but still require durable detach. A busy rejection does not close admission or create a drain marker. Replays of an already persisted drain still require the same drain ID. Omitted or false retains explicit unconditional drain for planned evacuation.
         clusterID:
           type: string
           format: uuid
@@ -2745,7 +2748,7 @@ paths:
   /nodes/{nodeID}/drain:
     post:
       summary: Persist node admission closure
-      description: Close create, resume and fork admission on the exact service instance. Retry the same drain ID to observe in-flight starts. A restarted process must be addressed using its new service instance ID. Drain is irreversible for this physical node; observations do not authorize instance termination.
+      description: Close create, resume and fork admission on the exact service instance. Use onlyIfIdle to atomically refuse a node that gained activity since observation; busy rejection has no admission side effect. Retry the same drain ID after an unknown response. A restarted process must be addressed using its new service instance ID. Drain is irreversible for this physical node; observations do not authorize instance termination.
       tags: [admin]
       security:
         - ApiKeyAuth: []
@@ -2770,6 +2773,12 @@ paths:
           $ref: "#/components/responses/404"
         "409":
           description: Node instance mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "412":
+          description: Node busy
           content:
             application/json:
               schema:

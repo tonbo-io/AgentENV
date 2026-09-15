@@ -50,6 +50,8 @@ pub enum NodesNodeIdDrainPostResponse {
     Status404_NotFound(models::Error),
     /// Node instance mismatch
     Status409_NodeInstanceMismatch(models::Error),
+    /// Node busy
+    Status412_NodeBusy(models::Error),
     /// Server error
     Status500_ServerError(models::Error),
 }

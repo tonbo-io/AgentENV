@@ -2513,6 +2513,7 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<ExecutionLea
     }
 }
 
+/// The activation a guest proxy request is addressed to. Routing to the owning node is the gateway's and scheduler's business; the activation is the fence that keeps a delayed request out of a later incarnation of the same runtime identity.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct ExecutionProxyTarget {
@@ -5169,6 +5170,11 @@ impl std::convert::TryFrom<HeaderValue> for header::IntoHeaderValue<NodeDrainObs
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct NodeDrainRequest {
+    /// When true, close admission only if the node has no running, starting or transitional guests. Fully paused guests are allowed but still require durable detach. A busy rejection does not close admission or create a drain marker. Replays of an already persisted drain still require the same drain ID. Omitted or false retains explicit unconditional drain for planned evacuation.
+    #[serde(rename = "onlyIfIdle")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub only_if_idle: Option<bool>,
+
     #[serde(rename = "clusterID")]
     pub cluster_id: uuid::Uuid,
 
@@ -5197,6 +5203,7 @@ impl NodeDrainRequest {
         drain_id: String,
     ) -> NodeDrainRequest {
         NodeDrainRequest {
+            only_if_idle: None,
             cluster_id,
             service_instance_id,
             drain_id,
@@ -5210,6 +5217,9 @@ impl NodeDrainRequest {
 impl std::fmt::Display for NodeDrainRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let params: Vec<Option<String>> = vec![
+            self.only_if_idle
+                .as_ref()
+                .map(|only_if_idle| ["onlyIfIdle".to_string(), only_if_idle.to_string()].join(",")),
             // Skipping clusterID in query parameter serialization
             Some("serviceInstanceID".to_string()),
             Some(self.service_instance_id.to_string()),
@@ -5236,6 +5246,7 @@ impl std::str::FromStr for NodeDrainRequest {
         #[derive(Default)]
         #[allow(dead_code)]
         struct IntermediateRep {
+            pub only_if_idle: Vec<bool>,
             pub cluster_id: Vec<uuid::Uuid>,
             pub service_instance_id: Vec<String>,
             pub drain_id: Vec<String>,
@@ -5260,6 +5271,10 @@ impl std::str::FromStr for NodeDrainRequest {
             if let Some(key) = key_result {
                 #[allow(clippy::match_single_binding)]
                 match key {
+                    #[allow(clippy::redundant_clone)]
+                    "onlyIfIdle" => intermediate_rep.only_if_idle.push(
+                        <bool as std::str::FromStr>::from_str(val).map_err(|x| x.to_string())?,
+                    ),
                     #[allow(clippy::redundant_clone)]
                     "clusterID" => intermediate_rep.cluster_id.push(
                         <uuid::Uuid as std::str::FromStr>::from_str(val)
@@ -5287,6 +5302,7 @@ impl std::str::FromStr for NodeDrainRequest {
 
         // Use the intermediate representation to return the struct
         std::result::Result::Ok(NodeDrainRequest {
+            only_if_idle: intermediate_rep.only_if_idle.into_iter().next(),
             cluster_id: intermediate_rep
                 .cluster_id
                 .into_iter()
@@ -8419,7 +8435,6 @@ impl std::str::FromStr for SandboxState {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, validator::Validate)]
 #[cfg_attr(feature = "conversion", derive(frunk::LabelledGeneric))]
 pub struct SandboxTimeoutRequest {
-    /// Exact Node incarnation for funded renewal. Optional only for legacy SDK and SQL callers until Kubernetes lifecycle handoff; when supplied, executionLease is required.
     #[serde(rename = "executionLease")]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
