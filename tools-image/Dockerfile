@@ -69,7 +69,7 @@ ARG ENVD_UPSTREAM_REPO
 ARG TARGETARCH
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git \
+    && apt-get install -y --no-install-recommends ca-certificates git protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -83,7 +83,20 @@ RUN set -eux; \
     git fetch --depth 1 origin "$ENVD_REF"; \
     git checkout --detach FETCH_HEAD
 
+COPY envd-overlay/ /opt/agentenv-envd/envd-overlay/
+COPY apply-envd-overlay.sh envd-source.env /opt/agentenv-envd/
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    GOBIN=/usr/local/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28.1
+RUN /opt/agentenv-envd/apply-envd-overlay.sh /src/infra
+
 WORKDIR /src/infra/packages/envd
+
+# Native unit checks cover the actual overlaid handlers before either target
+# architecture is built. Physical VM/transport recovery is validated in EKS.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    GOWORK=off go test -race ./internal/processio ./internal/services/process/... ./internal/logs
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \

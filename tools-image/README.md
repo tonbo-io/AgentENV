@@ -2,6 +2,8 @@
 
 This directory builds the small ext4 tools drive attached to every Firecracker guest as `/dev/vda`. Normal server startup consumes the immutable image configured in `config/deps_manifest.toml`.
 
+The envd source includes a reviewed [recoverable process I/O overlay](envd-overlay/README.md), with one process protobuf shared by Go and Rust. The build applies it only to the pinned upstream commit.
+
 The drive contains two static platform binaries:
 
 - `agentenv-init` runs as guest PID 1, mounts the user root and attached drives, pivots into the user filesystem, configures the minimal runtime mounts and network files, reaps orphaned children, and starts `envd`.

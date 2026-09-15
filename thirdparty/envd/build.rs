@@ -7,8 +7,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .build_transport(false)
         .compile_protos(
-            &["proto/filesystem.proto", "proto/process.proto"],
-            &["proto"],
+            &[
+                "proto/filesystem.proto",
+                "../../tools-image/envd-overlay/spec/process/process.proto",
+            ],
+            &["proto", "../../tools-image/envd-overlay/spec/process"],
         )?;
 
     Ok(())

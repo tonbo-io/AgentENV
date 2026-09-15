@@ -143,6 +143,7 @@ impl ProcessHandle {
         self.client
             .send_input(guest_request(
                 SendInputRequest {
+                    sequence: 0,
                     process: Some(selector),
                     input: Some(ProcessInput {
                         input: Some(process_input::Input::Stdin(data.to_vec())),
@@ -285,6 +286,7 @@ impl<'a> Executor<'a> {
     ) -> Result<ProcessHandle> {
         let request = guest_request(
             StartRequest {
+                recoverable_io: false,
                 process: Some(ProcessConfig {
                     cmd: cmd.to_string(),
                     args: args.iter().map(|s| s.to_string()).collect(),

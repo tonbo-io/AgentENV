@@ -43,6 +43,7 @@ message ProcessInfo {
     ProcessConfig config = 1;
     uint32 pid = 2;
     optional string tag = 3;
+    string incarnation = 4;
 }
 
 message ListResponse {
@@ -56,6 +57,8 @@ message StartRequest {
     // This is optional for backwards compatibility.
     // We default to true. New SDK versions will set this to false by default.
     optional bool stdin = 4;
+    // Existing E2B/AgentENV clients use legacy I/O; recoverable processes reject raw input.
+    bool recoverable_io = 5;
 }
 
 message UpdateRequest {
@@ -67,6 +70,8 @@ message UpdateRequest {
 message UpdateResponse {}
 
 message ProcessEvent {
+    // Zero for start/keepalive; retained output frames are numbered from one.
+    uint64 sequence = 5;
     oneof event {
         StartEvent start = 1;
         DataEvent data = 2;
@@ -76,6 +81,7 @@ message ProcessEvent {
     
     message StartEvent {
         uint32 pid = 1;
+        string incarnation = 2;
     }
     
     message DataEvent {
@@ -108,9 +114,15 @@ message SendInputRequest {
     ProcessSelector process = 1;
 
     ProcessInput input = 2;
+    // Required, consecutive and incarnation-scoped for recoverable processes.
+    uint64 sequence = 3;
 }
 
-message SendInputResponse {}
+message SendInputResponse {
+    uint64 sequence = 1;
+    string sha256 = 2;
+    uint32 written_bytes = 3;
+}
 
 message ProcessInput {
     oneof input {
@@ -161,11 +173,15 @@ message CloseStdinResponse {}
 
 message ConnectRequest {
     ProcessSelector process = 1;
+    // Required for recoverable processes: last fully consumed output frame, initially zero.
+    optional uint64 after_sequence = 2;
 }
 
 message ProcessSelector {
     oneof selector {
         uint32 pid = 1;
         string tag = 2;
+        // Recoverable I/O requires this identity; PID/tag cannot authorize its I/O.
+        string incarnation = 3;
     }
 }
