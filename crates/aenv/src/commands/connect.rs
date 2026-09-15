@@ -290,6 +290,7 @@ fn keepalive_input() -> StreamInputRequest {
 
 fn send_input_request(selector: ProcessSelector, payload: Vec<u8>) -> SendInputRequest {
     SendInputRequest {
+        sequence: 0,
         process: Some(selector),
         input: Some(ProcessInput {
             input: Some(process_input::Input::Pty(payload)),
@@ -540,6 +541,7 @@ async fn open_output_connection(
         .server_stream::<_, ConnectResponse>(
             "Connect",
             ConnectRequest {
+                after_sequence: None,
                 process: Some(selector),
             },
         )
@@ -855,7 +857,10 @@ mod tests {
 
     fn start_response(event: process_event::Event) -> StartResponse {
         StartResponse {
-            event: Some(ProcessEvent { event: Some(event) }),
+            event: Some(ProcessEvent {
+                sequence: 0,
+                event: Some(event),
+            }),
         }
     }
 

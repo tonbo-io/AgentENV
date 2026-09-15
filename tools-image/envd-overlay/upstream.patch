@@ -1,0 +1,458 @@
+diff --git a/packages/envd/internal/logs/interceptor.go b/packages/envd/internal/logs/interceptor.go
+index 92b99c0e..ce0459ea 100644
+--- a/packages/envd/internal/logs/interceptor.go
++++ b/packages/envd/internal/logs/interceptor.go
+@@ -69,11 +69,11 @@ func NewUnaryLogInterceptor(logger *zerolog.Logger) connect.UnaryInterceptorFunc
+ 				l = l.Int("error_code", int(connect.CodeOf(err)))
+ 			}
+ 
+-			if req != nil {
++			if req != nil && !strings.HasPrefix(req.Spec().Procedure, "/process.Process/") {
+ 				l = l.Interface("request", req.Any())
+ 			}
+ 
+-			if res != nil && err == nil {
++			if res != nil && err == nil && !strings.HasPrefix(req.Spec().Procedure, "/process.Process/") {
+ 				l = l.Interface("response", res.Any())
+ 			}
+ 
+@@ -103,7 +103,7 @@ func LogServerStreamWithoutEvents[T any, R any](
+ 		Str("method", DefaultHTTPMethod+" "+req.Spec().Procedure).
+ 		Str(string(OperationIDKey), ctx.Value(OperationIDKey).(string))
+ 
+-	if req != nil {
++	if req != nil && !strings.HasPrefix(req.Spec().Procedure, "/process.Process/") {
+ 		l = l.Interface("request", req.Any())
+ 	}
+ 
+@@ -149,7 +149,7 @@ func LogClientStreamWithoutEvents[T any, R any](
+ 		logEvent = logEvent.Int("error_code", int(connect.CodeOf(err)))
+ 	}
+ 
+-	if res != nil && err == nil {
++	if res != nil && err == nil && !strings.HasPrefix(stream.Spec().Procedure, "/process.Process/") {
+ 		logEvent = logEvent.Interface("response", res.Any())
+ 	}
+ 
+diff --git a/packages/envd/internal/services/process/connect.go b/packages/envd/internal/services/process/connect.go
+index 6f90c21e..4939a571 100644
+--- a/packages/envd/internal/services/process/connect.go
++++ b/packages/envd/internal/services/process/connect.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/e2b-dev/infra/packages/envd/internal/logs"
+ 	"github.com/e2b-dev/infra/packages/envd/internal/permissions"
++	"github.com/e2b-dev/infra/packages/envd/internal/processio"
+ 	rpc "github.com/e2b-dev/infra/packages/envd/internal/services/spec/process"
+ )
+ 
+@@ -25,6 +26,16 @@ func (s *Service) handleConnect(ctx context.Context, req *connect.Request[rpc.Co
+ 		return err
+ 	}
+ 
++	if proc.IO != nil {
++		if req.Msg.AfterSequence == nil {
++			return recoveryError(processio.ErrSequence)
++		}
++		return streamRecoverable(ctx, proc, req.Msg.GetAfterSequence(), func(event *rpc.ProcessEvent) error { return stream.Send(&rpc.ConnectResponse{Event: event}) })
++	}
++	if req.Msg.AfterSequence != nil {
++		return recoveryError(processio.ErrIncarnation)
++	}
++
+ 	exitChan := make(chan struct{})
+ 
+ 	data, dataCancel := proc.DataEvent.Fork()
+diff --git a/packages/envd/internal/services/process/handler/handler.go b/packages/envd/internal/services/process/handler/handler.go
+index 2fadc241..0d905e9d 100644
+--- a/packages/envd/internal/services/process/handler/handler.go
++++ b/packages/envd/internal/services/process/handler/handler.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/e2b-dev/infra/packages/envd/internal/execcontext"
+ 	"github.com/e2b-dev/infra/packages/envd/internal/logs"
+ 	"github.com/e2b-dev/infra/packages/envd/internal/permissions"
++	"github.com/e2b-dev/infra/packages/envd/internal/processio"
+ 	"github.com/e2b-dev/infra/packages/envd/internal/services/cgroups"
+ 	rpc "github.com/e2b-dev/infra/packages/envd/internal/services/spec/process"
+ )
+@@ -41,7 +42,9 @@ type ProcessExit struct {
+ }
+ 
+ type Handler struct {
+-	Config *rpc.ProcessConfig
++	IO         *processio.Journal
++	outputDone chan struct{}
++	Config     *rpc.ProcessConfig
+ 
+ 	logger *zerolog.Logger
+ 
+@@ -69,6 +72,9 @@ func (p *Handler) Pid() uint32 {
+ // userCommand returns a human-readable representation of the user's original command,
+ // without the internal OOM/nice wrapper that is prepended to the actual exec.
+ func (p *Handler) userCommand() string {
++	if p.IO != nil {
++		return "[recoverable process]"
++	}
+ 	return strings.Join(append([]string{p.Config.GetCmd()}, p.Config.GetArgs()...), " ")
+ }
+ 
+@@ -94,6 +100,9 @@ func New(
+ ) (*Handler, error) {
+ 	// User command string for logging (without the internal wrapper details).
+ 	userCmd := strings.Join(append([]string{req.GetProcess().GetCmd()}, req.GetProcess().GetArgs()...), " ")
++	if req.GetRecoverableIo() {
++		userCmd = "[recoverable process]"
++	}
+ 
+ 	// Wrap the command in a shell that sets the OOM score and nice value before exec-ing the actual command.
+ 	// This eliminates the race window where grandchildren could inherit the parent's protected OOM score (-1000)
+@@ -169,6 +178,14 @@ func New(
+ 
+ 	cmd.Env = formattedVars
+ 
++	var journal *processio.Journal
++	if req.GetRecoverableIo() {
++		journal, err = processio.New()
++		if err != nil {
++			return nil, err
++		}
++	}
++
+ 	outMultiplex := NewMultiplexedChannel[rpc.ProcessEvent_Data](outputBufferSize)
+ 
+ 	var outWg sync.WaitGroup
+@@ -189,6 +206,9 @@ func New(
+ 		logger:    logger,
+ 	}
+ 
++	h.IO = journal
++	h.outputDone = make(chan struct{})
++
+ 	if req.GetPty() != nil {
+ 		// The pty should ideally start only in the Start method, but the package does not support that and we would have to code it manually.
+ 		// The output of the pty should correctly be passed though.
+@@ -207,13 +227,13 @@ func New(
+ 				n, readErr := tty.Read(buf)
+ 
+ 				if n > 0 {
+-					outMultiplex.Source <- rpc.ProcessEvent_Data{
++					h.emitData(rpc.ProcessEvent_Data{
+ 						Data: &rpc.ProcessEvent_DataEvent{
+ 							Output: &rpc.ProcessEvent_DataEvent_Pty{
+ 								Pty: buf[:n],
+ 							},
+ 						},
+-					}
++					})
+ 				}
+ 
+ 				if errors.Is(readErr, io.EOF) {
+@@ -249,15 +269,17 @@ func New(
+ 				n, readErr := stdout.Read(buf)
+ 
+ 				if n > 0 {
+-					outMultiplex.Source <- rpc.ProcessEvent_Data{
++					h.emitData(rpc.ProcessEvent_Data{
+ 						Data: &rpc.ProcessEvent_DataEvent{
+ 							Output: &rpc.ProcessEvent_DataEvent_Stdout{
+ 								Stdout: buf[:n],
+ 							},
+ 						},
+-					}
++					})
+ 
+-					stdoutLogs <- buf[:n]
++					if h.IO == nil {
++						stdoutLogs <- buf[:n]
++					}
+ 				}
+ 
+ 				if errors.Is(readErr, io.EOF) {
+@@ -291,15 +313,17 @@ func New(
+ 				n, readErr := stderr.Read(buf)
+ 
+ 				if n > 0 {
+-					outMultiplex.Source <- rpc.ProcessEvent_Data{
++					h.emitData(rpc.ProcessEvent_Data{
+ 						Data: &rpc.ProcessEvent_DataEvent{
+ 							Output: &rpc.ProcessEvent_DataEvent_Stderr{
+ 								Stderr: buf[:n],
+ 							},
+ 						},
+-					}
++					})
+ 
+-					stderrLogs <- buf[:n]
++					if h.IO == nil {
++						stderrLogs <- buf[:n]
++					}
+ 				}
+ 
+ 				if errors.Is(readErr, io.EOF) {
+@@ -329,6 +353,7 @@ func New(
+ 	go func() {
+ 		outWg.Wait()
+ 
++		close(h.outputDone)
+ 		close(outMultiplex.Source)
+ 
+ 		outCancel()
+@@ -366,6 +391,9 @@ func (p *Handler) ResizeTty(size *pty.Winsize) error {
+ }
+ 
+ func (p *Handler) WriteStdin(data []byte) error {
++	if p.IO != nil {
++		return processio.ErrIncarnation
++	}
+ 	if p.tty != nil {
+ 		return errors.New("tty assigned to process — input should be written to the pty, not the stdin")
+ 	}
+@@ -391,6 +419,16 @@ func (p *Handler) CloseStdin() error {
+ 	if p.tty != nil {
+ 		return errors.New("cannot close stdin for PTY process — send Ctrl+D (0x04) instead")
+ 	}
++	if p.IO != nil {
++		return p.IO.CloseInput(p.IO.ID(), p.closeStdin)
++	}
++	return p.closeStdin()
++}
++
++func (p *Handler) closeStdin() error {
++	if p.tty != nil {
++		return errors.New("cannot close stdin for PTY process — send Ctrl+D (0x04) instead")
++	}
+ 
+ 	p.stdinMu.Lock()
+ 	defer p.stdinMu.Unlock()
+@@ -408,6 +446,9 @@ func (p *Handler) CloseStdin() error {
+ }
+ 
+ func (p *Handler) WriteTty(data []byte) error {
++	if p.IO != nil {
++		return processio.ErrIncarnation
++	}
+ 	if p.tty == nil {
+ 		return errors.New("tty not assigned to process — input should be written to the stdin, not the tty")
+ 	}
+@@ -442,9 +483,21 @@ func (p *Handler) Start(requestTimeout time.Duration) (uint32, error) {
+ 
+ func (p *Handler) Wait() {
+ 	// Wait for the output pipes to be closed or cancelled.
+-	<-p.outCtx.Done()
++	if p.IO != nil {
++		<-p.outputDone
++	} else {
++		<-p.outCtx.Done()
++	}
+ 
+ 	err := p.cmd.Wait()
++	if p.IO != nil {
++		_ = p.IO.CloseInput(p.IO.ID(), func() error {
++			if p.tty != nil {
++				return nil
++			}
++			return p.closeStdin()
++		})
++	}
+ 
+ 	p.tty.Close()
+ 
+@@ -466,7 +519,13 @@ func (p *Handler) Wait() {
+ 		End: endEvent,
+ 	}
+ 
+-	p.EndEvent.Source <- event
++	if p.IO != nil {
++		p.appendEvent(&rpc.ProcessEvent{Event: &event})
++		p.IO.CloseOutput()
++		close(p.EndEvent.Source)
++	} else {
++		p.EndEvent.Source <- event
++	}
+ 
+ 	p.logger.
+ 		Info().
+diff --git a/packages/envd/internal/services/process/input.go b/packages/envd/internal/services/process/input.go
+index 6df194c7..4f81bdd3 100644
+--- a/packages/envd/internal/services/process/input.go
++++ b/packages/envd/internal/services/process/input.go
+@@ -8,6 +8,7 @@ import (
+ 	"github.com/rs/zerolog"
+ 
+ 	"github.com/e2b-dev/infra/packages/envd/internal/logs"
++	"github.com/e2b-dev/infra/packages/envd/internal/processio"
+ 	"github.com/e2b-dev/infra/packages/envd/internal/services/process/handler"
+ 	rpc "github.com/e2b-dev/infra/packages/envd/internal/services/spec/process"
+ )
+@@ -45,6 +46,17 @@ func (s *Service) SendInput(ctx context.Context, req *connect.Request[rpc.SendIn
+ 		return nil, err
+ 	}
+ 
++	if proc.IO != nil {
++		receipt, err := proc.WriteRecoverable(req.Msg.GetSequence(), req.Msg.GetInput())
++		if err != nil {
++			return nil, recoveryError(err)
++		}
++		return connect.NewResponse(&rpc.SendInputResponse{Sequence: receipt.Sequence, Sha256: receipt.Digest, WrittenBytes: uint32(receipt.Written)}), nil
++	}
++	if req.Msg.GetSequence() != 0 {
++		return nil, recoveryError(processio.ErrIncarnation)
++	}
++
+ 	err = handleInput(ctx, proc, req.Msg.GetInput(), s.logger)
+ 	if err != nil {
+ 		return nil, err
+@@ -70,6 +82,9 @@ func (s *Service) streamInputHandler(ctx context.Context, stream *connect.Client
+ 				return nil, err
+ 			}
+ 
++			if p.IO != nil {
++				return nil, recoveryError(processio.ErrIncarnation)
++			}
+ 			proc = p
+ 		case *rpc.StreamInputRequest_Data:
+ 			err := handleInput(ctx, proc, req.GetData().GetInput(), s.logger)
+diff --git a/packages/envd/internal/services/process/list.go b/packages/envd/internal/services/process/list.go
+index 6af780fb..eae23d61 100644
+--- a/packages/envd/internal/services/process/list.go
++++ b/packages/envd/internal/services/process/list.go
+@@ -14,9 +14,10 @@ func (s *Service) List(context.Context, *connect.Request[rpc.ListRequest]) (*con
+ 
+ 	s.processes.Range(func(pid uint32, value *handler.Handler) bool {
+ 		processes = append(processes, &rpc.ProcessInfo{
+-			Pid:    pid,
+-			Tag:    value.Tag,
+-			Config: value.Config,
++			Pid:         pid,
++			Tag:         value.Tag,
++			Config:      value.Config,
++			Incarnation: value.Incarnation(),
+ 		})
+ 
+ 		return true
+diff --git a/packages/envd/internal/services/process/service.go b/packages/envd/internal/services/process/service.go
+index 01b839ba..07ccabde 100644
+--- a/packages/envd/internal/services/process/service.go
++++ b/packages/envd/internal/services/process/service.go
+@@ -2,6 +2,7 @@ package process
+ 
+ import (
+ 	"fmt"
++	"sync"
+ 
+ 	"connectrpc.com/connect"
+ 	"github.com/go-chi/chi/v5"
+@@ -17,14 +18,19 @@ import (
+ )
+ 
+ type Service struct {
+-	processes     *utils.Map[uint32, *handler.Handler]
+-	logger        *zerolog.Logger
+-	defaults      *execcontext.Defaults
+-	cgroupManager cgroups.Manager
++	recoverableMu    sync.Mutex
++	recoverableCount int
++	processMu        sync.Mutex
++	recoverable      map[string]*handler.Handler
++	processes        *utils.Map[uint32, *handler.Handler]
++	logger           *zerolog.Logger
++	defaults         *execcontext.Defaults
++	cgroupManager    cgroups.Manager
+ }
+ 
+ func newService(l *zerolog.Logger, defaults *execcontext.Defaults, cgroupManager cgroups.Manager) *Service {
+ 	return &Service{
++		recoverable:   make(map[string]*handler.Handler),
+ 		logger:        l,
+ 		processes:     utils.NewMap[uint32, *handler.Handler](),
+ 		defaults:      defaults,
+@@ -48,6 +54,14 @@ func (s *Service) getProcess(selector *rpc.ProcessSelector) (*handler.Handler, e
+ 	var proc *handler.Handler
+ 
+ 	switch selector.GetSelector().(type) {
++	case *rpc.ProcessSelector_Incarnation:
++		s.recoverableMu.Lock()
++		proc = s.recoverable[selector.GetIncarnation()]
++		s.recoverableMu.Unlock()
++		if proc == nil {
++			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("process incarnation expired or unknown"))
++		}
++		return proc, nil
+ 	case *rpc.ProcessSelector_Pid:
+ 		p, ok := s.processes.Load(selector.GetPid())
+ 		if !ok {
+@@ -80,5 +94,8 @@ func (s *Service) getProcess(selector *rpc.ProcessSelector) (*handler.Handler, e
+ 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("invalid input type %T", selector))
+ 	}
+ 
++	if proc.IO != nil {
++		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("recoverable process requires its incarnation selector"))
++	}
+ 	return proc, nil
+ }
+diff --git a/packages/envd/internal/services/process/start.go b/packages/envd/internal/services/process/start.go
+index d6cfb88d..8bb16dfa 100644
+--- a/packages/envd/internal/services/process/start.go
++++ b/packages/envd/internal/services/process/start.go
+@@ -41,10 +41,10 @@ func (s *Service) InitializeStartProcess(ctx context.Context, user *user.User, r
+ 		return err
+ 	}
+ 
+-	s.processes.Store(pid, proc)
++	s.storeProcess(pid, proc)
+ 
+ 	go func() {
+-		defer s.processes.Delete(pid)
++		defer s.retireProcess(pid, proc)
+ 
+ 		proc.Wait()
+ 	}()
+@@ -79,6 +79,17 @@ func (s *Service) handleStart(ctx context.Context, req *connect.Request[rpc.Star
+ 		procCtx, cancelProc = context.WithTimeout(procCtx, requestTimeout)
+ 	}
+ 
++	release, err := s.reserveRecovery(req.Msg.GetRecoverableIo())
++	if err != nil {
++		cancelProc()
++		return err
++	}
++	defer func() {
++		if release != nil {
++			release()
++		}
++	}()
++
+ 	proc, err := handler.New( //nolint:contextcheck // TODO: fix this later
+ 		procCtx,
+ 		u,
+@@ -95,6 +106,12 @@ func (s *Service) handleStart(ctx context.Context, req *connect.Request[rpc.Star
+ 		return err
+ 	}
+ 
++	if proc.IO != nil {
++		reservedRelease := release
++		release = nil
++		return s.startRecoverable(ctx, proc, requestTimeout, reservedRelease, func(event *rpc.ProcessEvent) error { return stream.Send(&rpc.StartResponse{Event: event}) })
++	}
++
+ 	exitChan := make(chan struct{})
+ 
+ 	startMultiplexer := handler.NewMultiplexedChannel[rpc.ProcessEvent_Start](0)
+@@ -209,7 +226,7 @@ func (s *Service) handleStart(ctx context.Context, req *connect.Request[rpc.Star
+ 		return connect.NewError(connect.CodeInvalidArgument, err)
+ 	}
+ 
+-	s.processes.Store(pid, proc)
++	s.storeProcess(pid, proc)
+ 
+ 	start <- rpc.ProcessEvent_Start{
+ 		Start: &rpc.ProcessEvent_StartEvent{
+@@ -218,7 +235,7 @@ func (s *Service) handleStart(ctx context.Context, req *connect.Request[rpc.Star
+ 	}
+ 
+ 	go func() {
+-		defer s.processes.Delete(pid)
++		defer s.retireProcess(pid, proc)
+ 
+ 		proc.Wait()
+ 	}()

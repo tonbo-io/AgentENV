@@ -32,12 +32,13 @@ DOCKER ?= docker
 .PHONY: build publish push check check-format check-vet check-build check-buildx check-tools-version check-publish-image
 
 check: check-format check-vet check-build
+	cd envd-overlay && GOWORK=off go test -race ./internal/processio
 	cd agentenv-init && go test ./...
 
 check-format:
-	@test -z "$$(gofmt -l agentenv-init)" || { \
+	@test -z "$$(gofmt -l agentenv-init envd-overlay)" || { \
 		echo "agentenv-init files need gofmt:" >&2; \
-		gofmt -l agentenv-init >&2; \
+		gofmt -l agentenv-init envd-overlay >&2; \
 		exit 1; \
 	}
 

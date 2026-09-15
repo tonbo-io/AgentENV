@@ -387,6 +387,7 @@ pub struct StartOpts<'a> {
 
 pub fn build_start_request(opts: StartOpts<'_>) -> StartRequest {
     StartRequest {
+        recoverable_io: false,
         process: Some(ProcessConfig {
             cmd: opts.cmd.to_string(),
             args: opts.args,

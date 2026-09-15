@@ -22,6 +22,7 @@ members = [
     "src/custom_extension_api/generated",
     "thirdparty/firecracker-client",
     "thirdparty/envd",
+    "thirdparty/envd/protocol",
     "storage/util",
     "storage/overlaybd",
     "storage/ublk",

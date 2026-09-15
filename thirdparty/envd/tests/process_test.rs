@@ -36,6 +36,7 @@ async fn test_start_process() -> Result<()> {
 
         // Configure the process request: run /bin/bash validation script
         let request = Request::new(StartRequest {
+            recoverable_io: false,
             process: Some(ProcessConfig {
                 cmd: "/bin/bash".to_string(),
                 args: vec![
@@ -114,6 +115,7 @@ async fn test_process_interactive() -> Result<()> {
 
         // Start `cat`
         let request = Request::new(StartRequest {
+            recoverable_io: false,
             process: Some(ProcessConfig {
                 cmd: "cat".to_string(),
                 args: vec![],
@@ -153,6 +155,7 @@ async fn test_process_interactive() -> Result<()> {
 
         input_client
             .send_input(Request::new(SendInputRequest {
+                sequence: 0,
                 process: Some(process_selector.clone()),
                 input: Some(ProcessInput {
                     input: Some(envd::process::process_input::Input::Stdin(
