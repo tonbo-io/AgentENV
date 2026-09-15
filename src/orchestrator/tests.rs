@@ -136,6 +136,8 @@ type StoreHookSlot = StdMutex<Option<StoreHook>>;
 struct ScriptedStoreControl {
     add_actions: StdMutex<VecDeque<StoreAction>>,
     update_if_state_actions: StdMutex<VecDeque<StoreAction>>,
+    list_actions: StdMutex<VecDeque<StoreAction>>,
+    on_list: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     on_add: StoreHookSlot,
 }
 
@@ -249,7 +251,17 @@ impl MetadataStore for ScriptedStore {
     }
 
     async fn list(&self) -> StdResult<Vec<SandboxMetadata>, StoreError> {
-        self.inner.list().await
+        if let StoreAction::Fail(error) =
+            ScriptedStoreControl::take_action(&self.control.list_actions)
+        {
+            return Err(error);
+        }
+        let snapshot = self.inner.list().await?;
+        let hook = self.control.on_list.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(snapshot)
     }
 
     async fn list_with_callback<F>(&self, callback: F) -> StdResult<(), StoreError>
@@ -5011,6 +5023,131 @@ async fn fork_sandbox_register_failure_cleans_up_metrics() -> Result<()> {
 
     orchestrator.delete_sandbox(child.id).await?;
     orchestrator.delete_sandbox(source.id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn conditional_node_drain_rejects_unknown_inventory_and_activity_during_the_read(
+) -> Result<()> {
+    setup();
+    let directory = TempDir::new().unwrap();
+    let marker = directory.path().join("drain");
+    let control = Arc::new(ScriptedStoreControl::default());
+    let mut orchestrator =
+        make_orchestrator_without_background(ScriptedStore::new(control.clone()));
+    Arc::get_mut(&mut orchestrator).unwrap().admission =
+        NodeAdmission::persistent(marker.clone()).unwrap();
+    control
+        .list_actions
+        .lock()
+        .unwrap()
+        .push_back(StoreAction::Fail(StoreError::Backend {
+            source: anyhow::anyhow!("injected unavailable inventory"),
+        }));
+    assert!(orchestrator
+        .drain_node_if_idle("idle:1".into())
+        .await
+        .is_err());
+    assert!(!orchestrator.node_admission_status().closed);
+    assert!(!marker.exists());
+    let gate = orchestrator.admission.clone();
+    *control.on_list.lock().unwrap() = Some(Arc::new(move || {
+        // An admitted operation starts and finishes after the snapshot was
+        // taken; the zero in-flight count must not bless that old snapshot.
+        drop(gate.acquire().unwrap());
+    }));
+    assert!(orchestrator
+        .drain_node_if_idle("idle:1".into())
+        .await?
+        .is_none());
+    assert!(!orchestrator.node_admission_status().closed);
+    assert!(!marker.exists());
+    assert!(
+        orchestrator
+            .drain_node_if_idle("idle:1".into())
+            .await?
+            .unwrap()
+            .closed
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn conditional_node_drain_refuses_activity_and_accepts_only_fully_paused_inventory(
+) -> Result<()> {
+    setup();
+    let directory = TempDir::new().unwrap();
+    let marker = directory.path().join("drain");
+    let mut orchestrator = make_orchestrator_without_background(InMemoryMetadataStore::new());
+    Arc::get_mut(&mut orchestrator).unwrap().admission =
+        NodeAdmission::persistent(marker.clone()).unwrap();
+    let running = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    assert!(orchestrator
+        .drain_node_if_idle("idle:1".into())
+        .await?
+        .is_none());
+    assert!(!orchestrator.node_admission_status().closed);
+    assert!(!marker.exists());
+    // Busy refusal retains usable admission for another create.
+    let second = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    orchestrator.pause_sandbox(running.id).await?;
+    orchestrator.pause_sandbox(second.id).await?;
+    for state in [
+        SandboxState::Creating,
+        SandboxState::Resuming,
+        SandboxState::Running,
+        SandboxState::Snapshotting,
+        SandboxState::Forking,
+        SandboxState::Pausing,
+        SandboxState::Killing,
+        SandboxState::CleanupPending,
+    ] {
+        orchestrator
+            .store
+            .update_state_if_state(&running.id, state, &[SandboxState::Paused])
+            .await?;
+        assert!(
+            orchestrator
+                .drain_node_if_idle("idle:1".into())
+                .await?
+                .is_none(),
+            "{state:?}"
+        );
+        assert!(!orchestrator.node_admission_status().closed);
+        assert!(!marker.exists());
+        orchestrator
+            .store
+            .update_state_if_state(&running.id, SandboxState::Paused, &[state])
+            .await?;
+    }
+    assert!(
+        orchestrator
+            .drain_node_if_idle("idle:1".into())
+            .await?
+            .unwrap()
+            .closed
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "idle:1");
+    assert!(orchestrator
+        .drain_node_if_idle("idle:1".into())
+        .await?
+        .is_some());
+    assert!(orchestrator
+        .drain_node_if_idle("foreign:1".into())
+        .await
+        .is_err());
+    assert!(matches!(
+        orchestrator
+            .resume_sandbox(running.id, NewTimeout::Set(Duration::from_secs(60)))
+            .await,
+        Err(OrchestratorError::NodeDraining)
+    ));
+    orchestrator.delete_sandbox(running.id).await?;
+    orchestrator.delete_sandbox(second.id).await?;
     Ok(())
 }
 

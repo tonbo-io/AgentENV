@@ -205,10 +205,31 @@ impl Admin<()> for ApiImpl {
                 )),
             );
         }
-        if let Err(error) = self.orchestrator().drain_node(body.drain_id.clone()).await {
-            return Ok(NodesNodeIdDrainPostResponse::Status500_ServerError(
-                Self::error(500, error.to_string()),
-            ));
+        let outcome = if body.only_if_idle == Some(true) {
+            self.orchestrator()
+                .drain_node_if_idle(body.drain_id.clone())
+                .await
+        } else {
+            self.orchestrator()
+                .drain_node(body.drain_id.clone())
+                .await
+                .map(Some)
+        };
+        match outcome {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Ok(NodesNodeIdDrainPostResponse::Status412_NodeBusy(
+                    Self::error(
+                        412,
+                        "node is busy; conditional drain did not close admission",
+                    ),
+                ))
+            }
+            Err(error) => {
+                return Ok(NodesNodeIdDrainPostResponse::Status500_ServerError(
+                    Self::error(500, error.to_string()),
+                ))
+            }
         }
         let node = match observability.node_snapshot().await {
             Ok(node) => node,
