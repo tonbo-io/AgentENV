@@ -34,8 +34,10 @@ permissions:
 
 jobs:
   agentenv-tests:
+    # VM host exception: Depot Actions runners do not guarantee KVM/ublk.
+    # Retire this exception when their runner contract provides both devices.
     # Ubuntu 24.04's Linux 6.17 kernel can crash in ublk ADD_DEV.
-    runs-on: depot-ubuntu-22.04-8
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
@@ -63,9 +65,8 @@ jobs:
 
   e2e-tests:
     name: e2e-tests (${{ matrix.e2e_name }})
-    # Match the VM integration host: 24.04 runners have intermittently lacked
-    # /dev/kvm, and their Linux 6.17 kernel can crash in ublk ADD_DEV.
-    runs-on: depot-ubuntu-22.04-8
+    # Use the same KVM/ublk host exception as agentenv-tests above.
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
