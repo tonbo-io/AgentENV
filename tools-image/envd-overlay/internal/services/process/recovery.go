@@ -36,6 +36,10 @@ func (s *Service) reserveRecovery(enabled bool) (func(), error) {
 func recoveryError(err error) error {
 	code := connect.CodeFailedPrecondition
 	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		code = connect.CodeDeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		code = connect.CodeCanceled
 	case errors.Is(err, processio.ErrIncarnation):
 		code = connect.CodeFailedPrecondition
 	case errors.Is(err, processio.ErrSequence):
@@ -54,7 +58,7 @@ func (s *Service) startRecoverable(ctx context.Context, proc *handler.Handler, t
 	pid, err := proc.Start(timeout)
 	if err != nil {
 		proc.AbortStart()
-		release()
+		go func() { waitResidencyCleanup(proc); release() }()
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	s.recoverableMu.Lock()
@@ -68,6 +72,7 @@ func (s *Service) startRecoverable(ctx context.Context, proc *handler.Handler, t
 		// Handler.Wait follows process exit closely, but compare under the map's
 		// process mutex is required before removing a reused key.
 		s.retireProcess(pid, proc)
+		waitResidencyCleanup(proc)
 		timer := time.NewTimer(exitedProcessRetention)
 		defer timer.Stop()
 		<-timer.C
@@ -77,6 +82,15 @@ func (s *Service) startRecoverable(ctx context.Context, proc *handler.Handler, t
 		release()
 	}()
 	return streamRecoverable(ctx, proc, 0, send)
+}
+
+// A parent exit is not proof that all children stopped. Keep the bounded
+// recovery reservation while descendants or an uncertain kernel result prevent
+// removal. Never thaw or kill them as a side effect of journal expiration.
+func waitResidencyCleanup(proc *handler.Handler) {
+	for proc.CleanupResidency() != nil {
+		time.Sleep(time.Second)
+	}
 }
 
 func streamRecoverable(ctx context.Context, proc *handler.Handler, after uint64, send func(*rpc.ProcessEvent) error) error {

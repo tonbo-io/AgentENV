@@ -18,6 +18,23 @@ service Process {
     // Close stdin to signal EOF to the process.
     // Only works for non-PTY processes. For PTY, send Ctrl+D (0x04) instead.
     rpc CloseStdin(CloseStdinRequest) returns (CloseStdinResponse);
+
+    // Incarnation-only physical process-tree barrier. The outer runtime owner
+    // must fence the source and repair the target before ResumeHandoff.
+    rpc PrepareHandoff(ProcessHandoffRequest) returns (ProcessHandoffResponse);
+    rpc ResumeHandoff(ProcessHandoffRequest) returns (ProcessHandoffResponse);
+}
+
+message ProcessHandoffRequest {
+    ProcessSelector process = 1;
+    uint64 epoch = 2;
+    string operation_id = 3;
+}
+
+message ProcessHandoffResponse {
+    string incarnation = 1;
+    uint64 epoch = 2;
+    string operation_id = 3;
 }
 
 message PTY {

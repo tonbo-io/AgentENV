@@ -58,6 +58,7 @@ type Journal struct {
 	uncertain     bool
 	inputClosed   bool
 	inputCloseErr error
+	handoff       handoffState
 	outputMu      sync.Mutex
 	nextOutput    uint64
 	output        []Event
@@ -116,6 +117,9 @@ func (j *Journal) Write(id string, sequence uint64, channel string, payload []by
 	if j.inputClosed {
 		return Receipt{}, ErrClosed
 	}
+	if j.handoff.blocked() {
+		return Receipt{}, ErrHandoff
+	}
 	// If delivery panics, the RPC server may recover; retries must still fail closed.
 	j.uncertain = true
 	n, err := deliver(owned)
@@ -143,6 +147,9 @@ func (j *Journal) CloseInput(id string, closePipe func() error) error {
 	defer j.inputMu.Unlock()
 	if j.inputClosed {
 		return j.inputCloseErr
+	}
+	if j.handoff.blocked() {
+		return ErrHandoff
 	}
 	j.inputClosed = true
 	// A panic during close must never turn a replay into success.
