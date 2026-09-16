@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"agentenv/services/shared/admission"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -34,6 +35,8 @@ const (
 	headerTargetPort           = "x-agentenv-target-port"
 	headerE2BTargetPort        = "e2b-sandbox-port"
 	headerNodeID               = "x-agentenv-node-id"
+	headerDispatchOutcome      = "X-AgentENV-Dispatch-Outcome"
+	headerAdmissionReason      = "X-AgentENV-Admission-Reason"
 	maxRecordAssignmentTimeout = 5 * time.Second
 )
 
@@ -279,6 +282,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		})
 		recordGatewaySchedulerRPC("Schedule", rpcStart, err)
 		if err != nil {
+			// Schedule selects a node; it never invokes the runtime. This
+			// receipt describes this HTTP attempt only, not earlier attempts.
+			if isSandboxCreateRequest(r) {
+				w.Header().Set(headerDispatchOutcome, "not_dispatched")
+				if admission.IsCapacityUnavailable(err) {
+					w.Header().Set(headerAdmissionReason, "capacity_unavailable")
+				} else {
+					w.Header().Set(headerAdmissionReason, "scheduler_error")
+				}
+			}
 			s.writeSchedulerError(w, err)
 			return
 		}
@@ -324,6 +337,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+func isSandboxCreateRequest(r *http.Request) bool {
+	return r.Method == http.MethodPost && (strings.TrimRight(r.URL.Path, "/") == "/sandboxes" || strings.TrimRight(r.URL.Path, "/") == "/sandboxes-cold")
+}
+
 func (s *Server) writeSchedulerError(w http.ResponseWriter, err error) {
 	st, ok := status.FromError(err)
 	if !ok {
@@ -337,7 +354,7 @@ func (s *Server) writeSchedulerError(w http.ResponseWriter, err error) {
 		http.Error(w, st.Message(), http.StatusNotFound)
 	case codes.FailedPrecondition:
 		http.Error(w, st.Message(), http.StatusConflict)
-	case codes.Unavailable:
+	case codes.Unavailable, codes.ResourceExhausted:
 		http.Error(w, st.Message(), http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "scheduler error", http.StatusBadGateway)
@@ -407,6 +424,10 @@ func (s *Server) proxyRequest(
 		},
 		FlushInterval: flushInterval(options.flushImmediately),
 		ModifyResponse: func(resp *http.Response) error {
+			// Only this gateway can attest that it never dispatched an attempt.
+			// A runtime response (including 503) has already crossed that boundary.
+			resp.Header.Del(headerDispatchOutcome)
+			resp.Header.Del(headerAdmissionReason)
 			// Control responses bind resource observations to their serving node.
 			// Always overwrite a runtime-provided value at the gateway boundary.
 			if s.debugMode || (options.hostRoute == nil && isSandboxControlPlaneRequest(proxyReq)) {
