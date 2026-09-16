@@ -18,3 +18,7 @@ protoc --proto_path=spec --go_out=internal/services/spec \
   --go_opt=paths=source_relative \
   --go_opt=Mprocess/process.proto=github.com/e2b-dev/infra/packages/envd/internal/services/spec/process \
   spec/process/process.proto
+protoc --proto_path=spec --connect-go_out=internal/services/spec \
+  --connect-go_opt=paths=source_relative \
+  --connect-go_opt=Mprocess/process.proto=github.com/e2b-dev/infra/packages/envd/internal/services/spec/process \
+  spec/process/process.proto

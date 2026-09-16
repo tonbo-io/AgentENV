@@ -64,7 +64,7 @@ index 6f90c21e..4939a571 100644
  
  	data, dataCancel := proc.DataEvent.Fork()
 diff --git a/packages/envd/internal/services/process/handler/handler.go b/packages/envd/internal/services/process/handler/handler.go
-index 2fadc241..0d905e9d 100644
+index 2fadc241..ad477828 100644
 --- a/packages/envd/internal/services/process/handler/handler.go
 +++ b/packages/envd/internal/services/process/handler/handler.go
 @@ -21,6 +21,7 @@ import (
@@ -75,18 +75,19 @@ index 2fadc241..0d905e9d 100644
  	"github.com/e2b-dev/infra/packages/envd/internal/services/cgroups"
  	rpc "github.com/e2b-dev/infra/packages/envd/internal/services/spec/process"
  )
-@@ -41,7 +42,9 @@ type ProcessExit struct {
+@@ -41,7 +42,10 @@ type ProcessExit struct {
  }
  
  type Handler struct {
 -	Config *rpc.ProcessConfig
 +	IO         *processio.Journal
++	residency  processResidency
 +	outputDone chan struct{}
 +	Config     *rpc.ProcessConfig
  
  	logger *zerolog.Logger
  
-@@ -69,6 +72,9 @@ func (p *Handler) Pid() uint32 {
+@@ -69,6 +73,9 @@ func (p *Handler) Pid() uint32 {
  // userCommand returns a human-readable representation of the user's original command,
  // without the internal OOM/nice wrapper that is prepended to the actual exec.
  func (p *Handler) userCommand() string {
@@ -96,8 +97,12 @@ index 2fadc241..0d905e9d 100644
  	return strings.Join(append([]string{p.Config.GetCmd()}, p.Config.GetArgs()...), " ")
  }
  
-@@ -94,6 +100,9 @@ func New(
- ) (*Handler, error) {
+@@ -91,9 +98,12 @@ func New(
+ 	defaults *execcontext.Defaults,
+ 	cgroupManager cgroups.Manager,
+ 	cancel context.CancelFunc,
+-) (*Handler, error) {
++) (_ *Handler, resultErr error) {
  	// User command string for logging (without the internal wrapper details).
  	userCmd := strings.Join(append([]string{req.GetProcess().GetCmd()}, req.GetProcess().GetArgs()...), " ")
 +	if req.GetRecoverableIo() {
@@ -106,7 +111,7 @@ index 2fadc241..0d905e9d 100644
  
  	// Wrap the command in a shell that sets the OOM score and nice value before exec-ing the actual command.
  	// This eliminates the race window where grandchildren could inherit the parent's protected OOM score (-1000)
-@@ -169,6 +178,14 @@ func New(
+@@ -169,6 +179,31 @@ func New(
  
  	cmd.Env = formattedVars
  
@@ -118,20 +123,40 @@ index 2fadc241..0d905e9d 100644
 +		}
 +	}
 +
++	var residency *processio.ProcessGroup
++	constructed := false
++	if journal != nil && ok {
++		residency, err = processio.NewProcessGroup(cgroupFD, journal.ID())
++		if err != nil {
++			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
++		}
++		cmd.SysProcAttr.CgroupFD = residency.FD()
++		defer func() {
++			if !constructed {
++				resultErr = errors.Join(resultErr, residency.Remove())
++			}
++		}()
++	}
++	// A guest without a cgroup manager can still use recoverable I/O, but
++	// PrepareHandoff rejects it: journal receipts alone cannot prove quiescence.
++
  	outMultiplex := NewMultiplexedChannel[rpc.ProcessEvent_Data](outputBufferSize)
  
  	var outWg sync.WaitGroup
-@@ -189,6 +206,9 @@ func New(
+@@ -189,6 +224,12 @@ func New(
  		logger:    logger,
  	}
  
 +	h.IO = journal
++	if residency != nil {
++		h.residency = residency
++	}
 +	h.outputDone = make(chan struct{})
 +
  	if req.GetPty() != nil {
  		// The pty should ideally start only in the Start method, but the package does not support that and we would have to code it manually.
  		// The output of the pty should correctly be passed though.
-@@ -207,13 +227,13 @@ func New(
+@@ -207,13 +248,13 @@ func New(
  				n, readErr := tty.Read(buf)
  
  				if n > 0 {
@@ -147,7 +172,7 @@ index 2fadc241..0d905e9d 100644
  				}
  
  				if errors.Is(readErr, io.EOF) {
-@@ -249,15 +269,17 @@ func New(
+@@ -249,15 +290,17 @@ func New(
  				n, readErr := stdout.Read(buf)
  
  				if n > 0 {
@@ -168,7 +193,7 @@ index 2fadc241..0d905e9d 100644
  				}
  
  				if errors.Is(readErr, io.EOF) {
-@@ -291,15 +313,17 @@ func New(
+@@ -291,15 +334,17 @@ func New(
  				n, readErr := stderr.Read(buf)
  
  				if n > 0 {
@@ -189,7 +214,7 @@ index 2fadc241..0d905e9d 100644
  				}
  
  				if errors.Is(readErr, io.EOF) {
-@@ -329,6 +353,7 @@ func New(
+@@ -329,11 +374,13 @@ func New(
  	go func() {
  		outWg.Wait()
  
@@ -197,7 +222,13 @@ index 2fadc241..0d905e9d 100644
  		close(outMultiplex.Source)
  
  		outCancel()
-@@ -366,6 +391,9 @@ func (p *Handler) ResizeTty(size *pty.Winsize) error {
+ 	}()
+ 
++	constructed = true
+ 	return h, nil
+ }
+ 
+@@ -366,6 +413,9 @@ func (p *Handler) ResizeTty(size *pty.Winsize) error {
  }
  
  func (p *Handler) WriteStdin(data []byte) error {
@@ -207,7 +238,7 @@ index 2fadc241..0d905e9d 100644
  	if p.tty != nil {
  		return errors.New("tty assigned to process — input should be written to the pty, not the stdin")
  	}
-@@ -391,6 +419,16 @@ func (p *Handler) CloseStdin() error {
+@@ -391,6 +441,16 @@ func (p *Handler) CloseStdin() error {
  	if p.tty != nil {
  		return errors.New("cannot close stdin for PTY process — send Ctrl+D (0x04) instead")
  	}
@@ -224,7 +255,7 @@ index 2fadc241..0d905e9d 100644
  
  	p.stdinMu.Lock()
  	defer p.stdinMu.Unlock()
-@@ -408,6 +446,9 @@ func (p *Handler) CloseStdin() error {
+@@ -408,6 +468,9 @@ func (p *Handler) CloseStdin() error {
  }
  
  func (p *Handler) WriteTty(data []byte) error {
@@ -234,7 +265,7 @@ index 2fadc241..0d905e9d 100644
  	if p.tty == nil {
  		return errors.New("tty not assigned to process — input should be written to the stdin, not the tty")
  	}
-@@ -442,9 +483,21 @@ func (p *Handler) Start(requestTimeout time.Duration) (uint32, error) {
+@@ -442,9 +505,21 @@ func (p *Handler) Start(requestTimeout time.Duration) (uint32, error) {
  
  func (p *Handler) Wait() {
  	// Wait for the output pipes to be closed or cancelled.
@@ -257,7 +288,7 @@ index 2fadc241..0d905e9d 100644
  
  	p.tty.Close()
  
-@@ -466,7 +519,13 @@ func (p *Handler) Wait() {
+@@ -466,7 +541,13 @@ func (p *Handler) Wait() {
  		End: endEvent,
  	}
  

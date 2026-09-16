@@ -87,7 +87,8 @@ COPY envd-overlay/ /opt/agentenv-envd/envd-overlay/
 COPY apply-envd-overlay.sh envd-source.env /opt/agentenv-envd/
 
 RUN --mount=type=cache,target=/go/pkg/mod \
-    GOBIN=/usr/local/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28.1
+    GOBIN=/usr/local/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28.1 \
+    && GOBIN=/usr/local/bin go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.18.1
 RUN /opt/agentenv-envd/apply-envd-overlay.sh /src/infra
 
 WORKDIR /src/infra/packages/envd
