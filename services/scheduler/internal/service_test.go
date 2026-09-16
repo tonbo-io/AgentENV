@@ -188,8 +188,8 @@ func TestSchedulePlacementFailsWithoutCompatibleDestination(t *testing.T) {
 	}
 
 	_, err := service.Schedule(context.Background(), placementScheduleRequest("source-sandbox"))
-	if status.Code(err) != codes.Unavailable {
-		t.Fatalf("expected unavailable without another node, got %v", err)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("expected resource exhausted without another node, got %v", err)
 	}
 }
 
@@ -455,7 +455,7 @@ func TestListNodesReflectsRegistryUpdates(t *testing.T) {
 	}
 }
 
-func TestScheduleReturnsUnavailableWhenRegistryIsEmpty(t *testing.T) {
+func TestScheduleReturnsResourceExhaustedWhenRegistryIsEmpty(t *testing.T) {
 	service := NewService(
 		zap.NewNop(),
 		NewAtomicNodeRegistry(nil, defaultObservedReportTTL),
@@ -464,8 +464,8 @@ func TestScheduleReturnsUnavailableWhenRegistryIsEmpty(t *testing.T) {
 	)
 
 	_, err := service.Schedule(context.Background(), &schedulerv1.ScheduleRequest{Hint: &schedulerv1.ScheduleRequestHint{Kind: &schedulerv1.ScheduleRequestHint_NewSandbox{NewSandbox: &schedulerv1.NewSandboxHint{}}}})
-	if status.Code(err) != codes.Unavailable {
-		t.Fatalf("expected unavailable, got %v", err)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("expected resource exhausted, got %v", err)
 	}
 }
 
@@ -480,7 +480,7 @@ func TestScheduleRequiresFreshReadyHeartbeatWhenConfigured(t *testing.T) {
 	)
 
 	_, err := service.Schedule(context.Background(), &schedulerv1.ScheduleRequest{})
-	if status.Code(err) != codes.Unavailable {
+	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("expected no placement before a fresh heartbeat, got %v", err)
 	}
 
@@ -978,7 +978,7 @@ func TestRequiredNodeNeverFallsBackOrBypassesResourceAdmission(t *testing.T) {
 		t.Fatalf("exact target: %v %v", selected, err)
 	}
 	limited := FilterByResourceLimit(nodes, &config.NodeResourceLimit{MaxCPUUsedPercent: uint32Ptr(90)})
-	if _, err := service.filterPlacementCandidates(limited, hint, time.Now()); status.Code(err) != codes.Unavailable {
+	if _, err := service.filterPlacementCandidates(limited, hint, time.Now()); status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("overloaded target silently fell back: %v", err)
 	}
 	hint.GetNewSandbox().GetPlacement().NodeId = " target "
@@ -1002,7 +1002,7 @@ func TestNodeReportedDrainExcludesPlacementButPreservesRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Schedule(context.Background(), &schedulerv1.ScheduleRequest{}); status.Code(err) != codes.Unavailable {
+	if _, err := service.Schedule(context.Background(), &schedulerv1.ScheduleRequest{}); status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("draining node remained schedulable: %v", err)
 	}
 	route, err := service.LookupNode(context.Background(), &schedulerv1.LookupNodeRequest{SandboxId: "existing"})

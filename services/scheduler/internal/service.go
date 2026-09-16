@@ -129,7 +129,7 @@ func (s *Service) Schedule(_ context.Context, req *schedulerv1.ScheduleRequest) 
 			zap.Error(selectErr),
 		)
 		if errors.Is(selectErr, ErrNoNodes) {
-			err = status.Error(codes.Unavailable, "no nodes available")
+			err = status.Error(codes.ResourceExhausted, "no nodes available")
 			return nil, err
 		}
 		err = status.Error(codes.Internal, selectErr.Error())

@@ -36,7 +36,7 @@ func (s *Service) filterPlacementCandidates(nodes []RichNode, hint *schedulerv1.
 			}
 		}
 		if len(filtered) == 0 {
-			return nil, status.Error(codes.Unavailable, "required placement node is unavailable")
+			return nil, status.Error(codes.ResourceExhausted, "required placement node is unavailable")
 		}
 		nodes = filtered
 	}
@@ -115,9 +115,9 @@ func (s *Service) filterPlacementCandidates(nodes []RichNode, hint *schedulerv1.
 	}
 	if len(compatible) == 0 {
 		if len(compatibilitySources) > 0 {
-			return nil, status.Error(codes.Unavailable, "no snapshot-compatible placement target available")
+			return nil, status.Error(codes.ResourceExhausted, "no snapshot-compatible placement target available")
 		}
-		return nil, status.Error(codes.Unavailable, "no placement target available")
+		return nil, status.Error(codes.ResourceExhausted, "no placement target available")
 	}
 	return compatible, nil
 }
