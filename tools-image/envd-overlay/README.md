@@ -31,4 +31,10 @@ Process RPC interceptors omit request/response payloads, and recoverable handler
 
 ## Validation
 
+### Residency handoff preparation
+
+The journal's internal `PrepareHandoff`/`ResumeHandoff` primitive serializes the input boundary with an idempotent physical freeze/resume callback. It uses consecutive handoff epochs and an immutable operation identity; old or conflicting operations cannot reopen admission or freeze a later residency. New writes and stdin closure stay blocked after an uncertain backend result or panic. Retained successful input receipts and output history remain available. This state is part of the in-memory journal captured with the VM, not a substitute for durable controller ownership or source fencing.
+
+This primitive is not yet exposed through the process RPC. The process-tree freezer, snapshot/restore adapter, target authorization and Cloud consumer still need implementation and physical qualification. A callback must prove the entire process tree quiescent and must not reenter the journal. The caller may resume only after the old residency is fenced and target credentials and filesystem are ready; a successful callback cannot be inferred from lease expiry or a stopped parent PID. No serving handoff guarantee is enabled by these unit tests.
+
 `go -C tools-image/envd-overlay test -race ./internal/processio` exercises the journal without a guest. The tools-image build applies the overlay to a fresh pinned checkout, runs Linux race-enabled process/handler/logging unit tests, then compiles envd. Local Linux cross-compilation is a build check, not execution of those Linux tests. The final runtime qualification must use reviewed isolated EKS jobs: lost input acknowledgment, reconnect during output, expired cursor, controller replacement, incarnation end/reuse, unchanged runtime authority and cleanup. No serving consumer or recovery guarantee is enabled by this source change alone.
