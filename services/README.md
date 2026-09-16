@@ -153,7 +153,7 @@ Example:
 }
 ```
 
-When all nodes are filtered out, the scheduler returns `ResourceExhausted` to the caller. Placement exclusions and an unavailable required target use the same code. Scheduler transport, leadership and binding-store failures retain `Unavailable` and must not be classified as capacity demand. The Gateway maps both codes to HTTP 503, but only a pre-dispatch creation refusal carries the machine-readable admission headers defined in [the API contract](../src/api/openapi.yml). Deploy the scheduler producer before relying on capacity classification in clients; older scheduler `Unavailable` responses remain uncertain as to cause. This is not runtime idempotency or permission to retry a previously ambiguous activation.
+When all nodes are filtered out, the scheduler returns `ResourceExhausted` with the shared capacity `ErrorInfo` to the caller. Placement exclusions and an unavailable required target use the same typed error. A bare transport `ResourceExhausted` does not establish capacity exhaustion. Scheduler transport, leadership and binding-store failures retain `Unavailable` and must not be classified as capacity demand. The Gateway maps both codes to HTTP 503, but only a pre-dispatch creation refusal carries the machine-readable admission headers defined in [the API contract](../src/api/openapi.yml). Deploy the scheduler producer before relying on capacity classification in clients; older scheduler `Unavailable` responses remain uncertain as to cause. This is not runtime idempotency or permission to retry a previously ambiguous activation.
 
 ## Gateway configuration
 

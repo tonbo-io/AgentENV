@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"agentenv/services/shared/admission"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -285,7 +286,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// receipt describes this HTTP attempt only, not earlier attempts.
 			if isSandboxCreateRequest(r) {
 				w.Header().Set(headerDispatchOutcome, "not_dispatched")
-				if status.Code(err) == codes.ResourceExhausted {
+				if admission.IsCapacityUnavailable(err) {
 					w.Header().Set(headerAdmissionReason, "capacity_unavailable")
 				} else {
 					w.Header().Set(headerAdmissionReason, "scheduler_error")

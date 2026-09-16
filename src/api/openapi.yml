@@ -6,7 +6,7 @@ info:
     Gateway creation admission contract: for POST /sandboxes and POST /sandboxes-cold,
     X-AgentENV-Dispatch-Outcome: not_dispatched attests only that this HTTP attempt
     failed during scheduling before any runtime request. X-AgentENV-Admission-Reason
-    is capacity_unavailable (HTTP 503, scheduler ResourceExhausted) or scheduler_error.
+    is capacity_unavailable (HTTP 503, scheduler capacity ErrorInfo) or scheduler_error.
     Reasons must never be inferred from error text or HTTP status alone. Proxied runtime
     responses have both headers removed by the gateway, even on runtime HTTP 503.
     Missing headers or a lost response imply an unknown dispatch outcome. A receipt

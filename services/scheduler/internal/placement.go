@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"agentenv/services/shared/admission"
 	"agentenv/services/shared/nodecompatibility"
 	"strings"
 	"time"
@@ -36,7 +37,7 @@ func (s *Service) filterPlacementCandidates(nodes []RichNode, hint *schedulerv1.
 			}
 		}
 		if len(filtered) == 0 {
-			return nil, status.Error(codes.ResourceExhausted, "required placement node is unavailable")
+			return nil, admission.CapacityUnavailable("required placement node is unavailable")
 		}
 		nodes = filtered
 	}
@@ -115,9 +116,9 @@ func (s *Service) filterPlacementCandidates(nodes []RichNode, hint *schedulerv1.
 	}
 	if len(compatible) == 0 {
 		if len(compatibilitySources) > 0 {
-			return nil, status.Error(codes.ResourceExhausted, "no snapshot-compatible placement target available")
+			return nil, admission.CapacityUnavailable("no snapshot-compatible placement target available")
 		}
-		return nil, status.Error(codes.ResourceExhausted, "no placement target available")
+		return nil, admission.CapacityUnavailable("no placement target available")
 	}
 	return compatible, nil
 }

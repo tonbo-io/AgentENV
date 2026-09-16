@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"agentenv/services/shared/admission"
 	"context"
 	"errors"
 	"io"
@@ -28,8 +29,9 @@ func TestCreateAdmissionRefusalIsPreDispatchOnly(t *testing.T) {
 			err    error
 			reason string
 		}{
-			{"capacity", status.Error(codes.ResourceExhausted, "no eligible nodes"), "capacity_unavailable"},
+			{"capacity", admission.CapacityUnavailable("no eligible nodes"), "capacity_unavailable"},
 			{"scheduler transport", status.Error(codes.Unavailable, "no nodes available"), "scheduler_error"},
+			{"transport resource limit", status.Error(codes.ResourceExhausted, "no nodes available"), "scheduler_error"},
 			{"deadline", status.Error(codes.DeadlineExceeded, "deadline"), "scheduler_error"},
 		} {
 			t.Run(path+tc.name, func(t *testing.T) {
