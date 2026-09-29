@@ -140,9 +140,10 @@ Each namespace has three managed chains:
 The static filter chain is ordered as follows:
 
 1. Accept `ESTABLISHED,RELATED` traffic from `tap0` to `vpeer`.
-2. Allow UDP/TCP DNS traffic to the configured guest DNS address on port 53.
-3. Reject the complete internal address pools and configured `always_denied_cidrs`.
-4. Jump to `AGENTENV-USER-EGRESS`.
+2. Reset non-SYN TCP segments that conntrack classifies as `NEW` (`-p tcp ! --syn -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset`). A guest resumed from a snapshot can land on a different slot whose namespace has no conntrack or NAT state for its pre-snapshot flows; with the kernel default `nf_conntrack_tcp_loose=1` their next mid-stream segment is `NEW`, and without this rule it would leave under the new slot's address and be black-holed upstream until guest read timeouts fire. The reset makes guest clients reconnect at once.
+3. Allow UDP/TCP DNS traffic to the configured guest DNS address on port 53.
+4. Reject the complete internal address pools and configured `always_denied_cidrs`.
+5. Jump to `AGENTENV-USER-EGRESS`.
 
 The user chain is rendered in this order:
 
