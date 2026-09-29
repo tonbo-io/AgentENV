@@ -308,6 +308,9 @@ pub(super) fn initialize_namespace_egress_chain(
         .context("initialize AgentENV namespace egress iptables chains")
 }
 
+const STALE_GUEST_TCP_FLOW_RESET_RULE: &str =
+    "-i tap0 -o vpeer -p tcp ! --syn -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset";
+
 fn build_static_egress_commands(
     guest_dns_ip: Ipv4Addr,
     internal_egress_denied_cidrs: &[String],
@@ -319,6 +322,16 @@ fn build_static_egress_commands(
     // namespace SNATs the guest response to its host interaction address.
     commands.push(append_egress_command(
         "-i tap0 -o vpeer -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT".to_string(),
+    ));
+
+    // A guest resumed from a snapshot can land on a different network slot whose
+    // namespace has no conntrack or NAT state for the guest's pre-snapshot TCP
+    // flows. With the kernel default nf_conntrack_tcp_loose=1 their next mid-stream
+    // segment is classified NEW; without this rule it would be SNATed to the new
+    // slot's address and black-holed upstream, stalling the guest until its own
+    // read timeouts fire. Reset those flows so guest clients reconnect at once.
+    commands.push(append_egress_command(
+        STALE_GUEST_TCP_FLOW_RESET_RULE.to_string(),
     ));
 
     // Allow DNS traffic to the guest DNS server.
@@ -677,6 +690,12 @@ mod tests {
                     == Some("-i tap0 -o vpeer -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT")
             })
             .unwrap();
+        assert_eq!(
+            append_rule(&commands[1]),
+            Some(
+                "-i tap0 -o vpeer -p tcp ! --syn -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset"
+            )
+        );
         let dns_udp_pos = commands
             .iter()
             .position(|command| {
@@ -708,6 +727,20 @@ mod tests {
                 append_rule(command) == Some("-i tap0 -o vpeer -d 10.0.0.0/8 -j REJECT")
             })
             .unwrap();
+        let stale_reset_pos = commands
+            .iter()
+            .position(|command| append_rule(command) == Some(STALE_GUEST_TCP_FLOW_RESET_RULE))
+            .unwrap();
+        assert!(established_pos < stale_reset_pos);
+        assert!(stale_reset_pos < dns_udp_pos);
+        assert!(stale_reset_pos < dns_tcp_pos);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| append_rule(command) == Some(STALE_GUEST_TCP_FLOW_RESET_RULE))
+                .count(),
+            1
+        );
         assert!(established_pos < hard_deny_pos);
         assert!(dns_udp_pos < hard_deny_pos);
         assert!(dns_tcp_pos < hard_deny_pos);
