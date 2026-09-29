@@ -60,7 +60,7 @@ ARG TARGETARCH
 # Docker caches the complete apt transaction even after Ubuntu publishes a
 # security update. Advance this reviewed epoch when the release scanner finds a
 # patched Ubuntu package newer than the cached runtime-base layer.
-ARG UBUNTU_APT_SECURITY_EPOCH=2026-08-27
+ARG UBUNTU_APT_SECURITY_EPOCH=2026-09-29
 # Optional extra runtime packages, specified as a whitespace- or comma-separated build arg.
 ARG EXTRA_RUNTIME_PACKAGES=""
 COPY deploy/docker/apply_apt_mirror.sh /usr/local/bin/apply_apt_mirror.sh
