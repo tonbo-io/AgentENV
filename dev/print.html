@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f1255445.js";
+            window.path_to_searchindex_js = "searchindex-291553da.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c868df7a.js"></script>
@@ -3677,6 +3677,7 @@ POSTROUTING -s &lt;host_interaction_cidr&gt; -j MASQUERADE
 <p>The static filter chain is ordered as follows:</p>
 <ol>
 <li>Accept <code>ESTABLISHED,RELATED</code> traffic from <code>tap0</code> to <code>vpeer</code>.</li>
+<li>Reset non-SYN TCP segments that conntrack classifies as <code>NEW</code> (<code>-p tcp ! --syn -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset</code>). A guest resumed from a snapshot can land on a different slot whose namespace has no conntrack or NAT state for its pre-snapshot flows; with the kernel default <code>nf_conntrack_tcp_loose=1</code> their next mid-stream segment is <code>NEW</code>, and without this rule it would leave under the new slot’s address and be black-holed upstream until guest read timeouts fire. The reset makes guest clients reconnect at once.</li>
 <li>Allow UDP/TCP DNS traffic to the configured guest DNS address on port 53.</li>
 <li>Reject the complete internal address pools and configured <code>always_denied_cidrs</code>.</li>
 <li>Jump to <code>AGENTENV-USER-EGRESS</code>.</li>
