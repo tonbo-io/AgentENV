@@ -186,7 +186,7 @@ func (s *Server) fetchNodeClusterList(ctx context.Context, incoming *http.Reques
 	}
 	req.Header = incoming.Header.Clone()
 	req.Host = incoming.Host
-	injectForwardedHeaders(req.Header, incoming)
+	s.injectForwardedHeaders(req.Header, incoming)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

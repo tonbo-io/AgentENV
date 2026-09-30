@@ -146,6 +146,7 @@ func main() {
 		APIKey:                   apiKey,
 		DebugMode:                cfg.Gateway.DebugMode,
 		SandboxProxyDomains:      cfg.Gateway.SandboxProxyDomains,
+		TrustedForwarders:        cfg.Gateway.TrustedForwarders,
 		QueryOnlySchedulerClient: queryOnlySchedulerClient,
 	})
 	if err != nil {
@@ -158,6 +159,7 @@ func main() {
 		zap.String("scheduler", cfg.Gateway.SchedulerAddr),
 		zap.String("query_only_scheduler", cfg.Gateway.QueryOnlySchedulerAddr),
 		zap.Strings("sandbox_proxy_domains", s.SandboxProxyDomains()),
+		zap.Strings("trusted_forwarders", cfg.Gateway.TrustedForwarders),
 	)
 	httpServer := &http.Server{
 		Addr:    cfg.Gateway.HTTPListenAddr,

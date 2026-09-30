@@ -285,6 +285,42 @@ func TestLoadAppliesGatewayRequestTimeoutEnvDuration(t *testing.T) {
 	}
 }
 
+func TestLoadGatewayTrustedForwarders(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.json")
+	content := `{"gateway": {"trusted_forwarders": ["10.45.0.0/16"]}}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config file failed: %v", err)
+	}
+
+	cfg, err := Load(path, "gateway")
+	if err != nil {
+		t.Fatalf("load config failed: %v", err)
+	}
+	if got := cfg.Gateway.TrustedForwarders; len(got) != 1 || got[0] != "10.45.0.0/16" {
+		t.Fatalf("unexpected trusted forwarders: %#v", got)
+	}
+
+	t.Setenv("GATEWAY_TRUSTED_FORWARDERS", " 10.46.0.0/16, 192.0.2.7 ,,")
+	cfg, err = Load(path, "gateway")
+	if err != nil {
+		t.Fatalf("load config failed: %v", err)
+	}
+	if got := cfg.Gateway.TrustedForwarders; len(got) != 2 || got[0] != "10.46.0.0/16" || got[1] != "192.0.2.7" {
+		t.Fatalf("unexpected trusted forwarders from env: %#v", got)
+	}
+}
+
+func TestLoadDefaultsGatewayTrustedForwardersToNone(t *testing.T) {
+	cfg, err := Load("", "gateway")
+	if err != nil {
+		t.Fatalf("load config failed: %v", err)
+	}
+	if got := cfg.Gateway.TrustedForwarders; len(got) != 0 {
+		t.Fatalf("expected no trusted forwarders by default, got %#v", got)
+	}
+}
+
 func TestLoadRejectsInvalidGatewayRequestTimeoutEnvDuration(t *testing.T) {
 	t.Setenv("GATEWAY_REQUEST_TIMEOUT", "1m30")
 

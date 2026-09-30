@@ -171,6 +171,7 @@ When all nodes are filtered out, the scheduler returns `ResourceExhausted` with 
 - `GATEWAY_QUERY_ONLY_SCHEDULER_ADDR=<addr>` overrides `gateway.query_only_scheduler_addr` from the environment.
 - `gateway.sandbox_proxy_domains` enables host-based sandbox data-plane routing for `{port}-{sandboxID}.{domain}` URLs. Domains are normalized to lowercase, deduplicated, and must be valid DNS names. Sandbox IDs used in host routes must be lowercase RFC 952/1123 DNS labels, and the full `{port}-{sandboxID}` label must be at most 63 characters.
 - `GATEWAY_SANDBOX_PROXY_DOMAINS=<domain>[,<domain>...]` overrides `gateway.sandbox_proxy_domains` from the environment.
+- `gateway.trusted_forwarders` lists peer addresses or CIDR prefixes (for example a reverse proxy in front of the gateway) whose `X-Forwarded-For` chain is passed to the runtime unchanged. Every other peer, and a trusted peer that sends no chain, gets `X-Forwarded-For` replaced by the peer address, so an untrusted caller cannot assert a client address. The default is empty. `GATEWAY_TRUSTED_FORWARDERS=<cidr-or-address>[,...]` overrides it from the environment.
 
 Logging format defaults to `auto`:
 

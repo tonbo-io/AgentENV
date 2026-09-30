@@ -230,6 +230,11 @@ type GatewayConfig struct {
 	RequestTimeout         time.Duration `json:"request_timeout"`
 	ForwardResponseSize    int64         `json:"forward_response_size"`
 	SandboxProxyDomains    []string      `json:"sandbox_proxy_domains"`
+	// TrustedForwarders lists the peer addresses or CIDR prefixes whose
+	// X-Forwarded-For chain the gateway passes on unchanged. A request from any
+	// other peer gets X-Forwarded-For replaced by the peer address. Empty by
+	// default, so no caller can assert a client address.
+	TrustedForwarders []string `json:"trusted_forwarders"`
 	// DebugMode enables debug-only behaviors in the gateway such as exposing
 	// the backend node id on proxied responses. It is off by default.
 	DebugMode bool `json:"debug_mode"`
@@ -244,6 +249,7 @@ func (g *GatewayConfig) UnmarshalJSON(data []byte) error {
 		RequestTimeout         json.RawMessage `json:"request_timeout"`
 		ForwardResponseSize    *int64          `json:"forward_response_size"`
 		SandboxProxyDomains    *[]string       `json:"sandbox_proxy_domains"`
+		TrustedForwarders      *[]string       `json:"trusted_forwarders"`
 		DebugMode              *bool           `json:"debug_mode"`
 	}
 
@@ -269,6 +275,9 @@ func (g *GatewayConfig) UnmarshalJSON(data []byte) error {
 	}
 	if parsed.SandboxProxyDomains != nil {
 		g.SandboxProxyDomains = *parsed.SandboxProxyDomains
+	}
+	if parsed.TrustedForwarders != nil {
+		g.TrustedForwarders = *parsed.TrustedForwarders
 	}
 	if parsed.DebugMode != nil {
 		g.DebugMode = *parsed.DebugMode
@@ -376,6 +385,7 @@ func defaultConfig(service string) Config {
 			RequestTimeout:      30 * time.Second,
 			ForwardResponseSize: 4 << 20,
 			SandboxProxyDomains: []string{},
+			TrustedForwarders:   []string{},
 		},
 	}
 }
@@ -400,6 +410,9 @@ func overrideWithEnv(cfg *Config) error {
 
 	if v := strings.TrimSpace(os.Getenv("GATEWAY_SANDBOX_PROXY_DOMAINS")); v != "" {
 		cfg.Gateway.SandboxProxyDomains = splitCommaSeparated(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("GATEWAY_TRUSTED_FORWARDERS")); v != "" {
+		cfg.Gateway.TrustedForwarders = splitCommaSeparated(v)
 	}
 
 	if v := strings.TrimSpace(os.Getenv("SCHEDULER_BINDING_TTL")); v != "" {
