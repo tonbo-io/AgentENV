@@ -8,10 +8,12 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -51,11 +53,14 @@ const (
 )
 
 type ServerOptions struct {
-	APIKey                   string
-	RequestTimeout           time.Duration
-	MaxResponseSize          int64
-	DebugMode                bool
-	SandboxProxyDomains      []string
+	APIKey              string
+	RequestTimeout      time.Duration
+	MaxResponseSize     int64
+	DebugMode           bool
+	SandboxProxyDomains []string
+	// TrustedForwarders are peer addresses or CIDR prefixes whose
+	// X-Forwarded-For chain is passed on unchanged.
+	TrustedForwarders        []string
 	QueryOnlySchedulerClient schedulerv1.SchedulerClient
 }
 
@@ -73,6 +78,7 @@ type Server struct {
 	// header. Off by default; toggled via GatewayConfig.DebugMode.
 	debugMode           bool
 	sandboxProxyDomains []string
+	trustedForwarders   []netip.Prefix
 }
 
 func NewServer(logger *zap.Logger, schedulerClient schedulerv1.SchedulerClient, options ServerOptions) (*Server, error) {
@@ -80,6 +86,10 @@ func NewServer(logger *zap.Logger, schedulerClient schedulerv1.SchedulerClient, 
 		return nil, errors.New("API key is required")
 	}
 	sandboxProxyDomains, err := normalizeProxyDomains(options.SandboxProxyDomains)
+	if err != nil {
+		return nil, err
+	}
+	trustedForwarders, err := parseTrustedForwarders(options.TrustedForwarders)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +110,7 @@ func NewServer(logger *zap.Logger, schedulerClient schedulerv1.SchedulerClient, 
 		apiKey:              []byte(options.APIKey),
 		debugMode:           options.DebugMode,
 		sandboxProxyDomains: sandboxProxyDomains,
+		trustedForwarders:   trustedForwarders,
 	}, nil
 }
 
@@ -416,7 +427,7 @@ func (s *Server) proxyRequest(
 			req.Out.URL.RawPath = upstreamURL.RawPath
 			req.Out.URL.RawQuery = upstreamURL.RawQuery
 			req.Out.Host = req.In.Host
-			injectForwardedHeaders(req.Out.Header, req.In)
+			s.injectForwardedHeaders(req.Out.Header, req.In)
 			if options.hostRoute != nil {
 				req.Out.Header.Set(headerSandboxID, options.hostRoute.sandboxID)
 				req.Out.Header.Set(headerTargetPort, strconv.Itoa(options.hostRoute.targetPort))
@@ -798,16 +809,72 @@ func joinURLPath(basePath, path string) string {
 	}
 }
 
-func injectForwardedHeaders(h http.Header, r *http.Request) {
+func (s *Server) injectForwardedHeaders(h http.Header, r *http.Request) {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	setXForwardedFor(h, r.RemoteAddr)
+	if !s.forwardedByTrustedPeer(h, r.RemoteAddr) {
+		setXForwardedFor(h, r.RemoteAddr)
+	}
 	h.Set("X-Forwarded-Host", r.Host)
 	h.Set("X-Forwarded-Proto", scheme)
 	h.Set("X-Forwarded-Method", r.Method)
 	h.Set("X-Forwarded-URI", r.URL.RequestURI())
+}
+
+// forwardedByTrustedPeer reports whether the request already carries an
+// X-Forwarded-For chain from a configured trusted forwarder, which the
+// gateway then passes on unchanged. Any other peer, and a trusted peer that
+// sent no chain, gets the header replaced by its own address.
+func (s *Server) forwardedByTrustedPeer(h http.Header, remoteAddr string) bool {
+	if len(s.trustedForwarders) == 0 || strings.TrimSpace(strings.Join(h.Values("X-Forwarded-For"), "")) == "" {
+		return false
+	}
+	peer, ok := peerAddr(remoteAddr)
+	if !ok {
+		return false
+	}
+	for _, prefix := range s.trustedForwarders {
+		if prefix.Contains(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+func peerAddr(remoteAddr string) (netip.Addr, bool) {
+	host := strings.TrimSpace(remoteAddr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// parseTrustedForwarders accepts CIDR prefixes and single addresses.
+func parseTrustedForwarders(values []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			prefixes = append(prefixes, prefix.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(value)
+		if err != nil {
+			return nil, fmt.Errorf("gateway.trusted_forwarders contains invalid address or CIDR %q", value)
+		}
+		addr = addr.Unmap()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return prefixes, nil
 }
 
 func setXForwardedFor(h http.Header, remoteAddr string) {

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1584,6 +1585,7 @@ func TestSetXForwardedFor(t *testing.T) {
 }
 
 func TestInjectForwardedHeadersSetsXForwardedFor(t *testing.T) {
+	server := newTestServer(t, stubSchedulerClient{}, time.Second, 1024)
 	req, err := http.NewRequest(http.MethodGet, "http://gateway.test/sandboxes", nil)
 	if err != nil {
 		t.Fatalf("build request failed: %v", err)
@@ -1593,10 +1595,59 @@ func TestInjectForwardedHeadersSetsXForwardedFor(t *testing.T) {
 
 	h := http.Header{}
 	h.Set("X-Forwarded-For", "10.0.0.1")
-	injectForwardedHeaders(h, req)
+	server.injectForwardedHeaders(h, req)
 
 	if got := h.Get("X-Forwarded-For"); got != "192.168.1.10" {
 		t.Fatalf("X-Forwarded-For = %q, want %q", got, "192.168.1.10")
+	}
+}
+
+func TestInjectForwardedHeadersTrustsOnlyConfiguredForwarders(t *testing.T) {
+	server := newTestServer(t, stubSchedulerClient{}, time.Second, 1024, func(options *ServerOptions) {
+		options.TrustedForwarders = []string{" 10.45.0.0/16 ", "192.0.2.7", ""}
+	})
+
+	cases := []struct {
+		name       string
+		remoteAddr string
+		incoming   []string
+		want       []string
+	}{
+		{"trusted prefix keeps the chain", "10.45.21.169:41000", []string{"198.51.100.2, 203.0.113.9"}, []string{"198.51.100.2, 203.0.113.9"}},
+		{"trusted prefix keeps every header line", "10.45.21.169:41000", []string{"198.51.100.2", "203.0.113.9"}, []string{"198.51.100.2", "203.0.113.9"}},
+		{"trusted single address keeps the chain", "192.0.2.7:41000", []string{"203.0.113.9"}, []string{"203.0.113.9"}},
+		{"IPv4-mapped trusted peer keeps the chain", "[::ffff:10.45.1.2]:41000", []string{"203.0.113.9"}, []string{"203.0.113.9"}},
+		{"trusted peer without a chain is recorded", "10.45.21.169:41000", nil, []string{"10.45.21.169"}},
+		{"trusted peer with an empty chain is recorded", "10.45.21.169:41000", []string{" "}, []string{"10.45.21.169"}},
+		{"untrusted peer cannot assert a client", "10.46.0.5:41000", []string{"203.0.113.9"}, []string{"10.46.0.5"}},
+		{"neighbouring address is not trusted", "192.0.2.8:41000", []string{"203.0.113.9"}, []string{"192.0.2.8"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, "http://gateway.test/proxy", nil)
+			if err != nil {
+				t.Fatalf("build request failed: %v", err)
+			}
+			req.RemoteAddr = tc.remoteAddr
+			h := http.Header{}
+			for _, value := range tc.incoming {
+				h.Add("X-Forwarded-For", value)
+			}
+			server.injectForwardedHeaders(h, req)
+			if got := h.Values("X-Forwarded-For"); !slices.Equal(got, tc.want) {
+				t.Fatalf("X-Forwarded-For = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewServerRejectsInvalidTrustedForwarder(t *testing.T) {
+	_, err := NewServer(zap.NewNop(), stubSchedulerClient{}, ServerOptions{
+		APIKey:            testAPIKey,
+		TrustedForwarders: []string{"10.45.0.0/33"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "gateway.trusted_forwarders") {
+		t.Fatalf("NewServer error = %v, want an invalid trusted forwarder error", err)
 	}
 }
 

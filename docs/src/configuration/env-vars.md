@@ -97,6 +97,7 @@ These variables apply to both the gateway and scheduler processes.
 | `GATEWAY_QUERY_ONLY_SCHEDULER_ADDR` | unset | Optional secondary scheduler gRPC address used only for sandbox data-plane `LookupNode` queries. When set, creation and control-plane calls still go to `GATEWAY_SCHEDULER_ADDR`. |
 | `GATEWAY_REQUEST_TIMEOUT` | `30s` | Override the gateway's HTTP request timeout (for example, `1m30s`) |
 | `GATEWAY_SANDBOX_PROXY_DOMAINS` | from config | Comma-separated DNS domains that enable gateway host-based sandbox proxy URLs like `{port}-{sandboxID}.{domain}`. Empty or unset keeps `gateway.sandbox_proxy_domains`. |
+| `GATEWAY_TRUSTED_FORWARDERS` | from config | Comma-separated peer addresses or CIDR prefixes whose `X-Forwarded-For` chain the gateway passes on unchanged. Requests from any other peer get `X-Forwarded-For` replaced by the peer address. Empty or unset keeps `gateway.trusted_forwarders` (default: none). |
 | `GATEWAY_DEBUG_MODE` | `false` | Enable gateway debug mode |
 
 ## Scheduler
