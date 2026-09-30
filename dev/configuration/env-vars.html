@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-291553da.js";
+            window.path_to_searchindex_js = "../searchindex-7685e5f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c868df7a.js"></script>
@@ -292,6 +292,7 @@ export E2B_API_KEY=${AENV_API_KEY}
 <tr><td><code>GATEWAY_QUERY_ONLY_SCHEDULER_ADDR</code></td><td>unset</td><td>Optional secondary scheduler gRPC address used only for sandbox data-plane <code>LookupNode</code> queries. When set, creation and control-plane calls still go to <code>GATEWAY_SCHEDULER_ADDR</code>.</td></tr>
 <tr><td><code>GATEWAY_REQUEST_TIMEOUT</code></td><td><code>30s</code></td><td>Override the gateway’s HTTP request timeout (for example, <code>1m30s</code>)</td></tr>
 <tr><td><code>GATEWAY_SANDBOX_PROXY_DOMAINS</code></td><td>from config</td><td>Comma-separated DNS domains that enable gateway host-based sandbox proxy URLs like <code>{port}-{sandboxID}.{domain}</code>. Empty or unset keeps <code>gateway.sandbox_proxy_domains</code>.</td></tr>
+<tr><td><code>GATEWAY_TRUSTED_FORWARDERS</code></td><td>from config</td><td>Comma-separated peer addresses or CIDR prefixes whose <code>X-Forwarded-For</code> chain the gateway passes on unchanged. Requests from any other peer get <code>X-Forwarded-For</code> replaced by the peer address. Empty or unset keeps <code>gateway.trusted_forwarders</code> (default: none).</td></tr>
 <tr><td><code>GATEWAY_DEBUG_MODE</code></td><td><code>false</code></td><td>Enable gateway debug mode</td></tr>
 </tbody>
 </table>
