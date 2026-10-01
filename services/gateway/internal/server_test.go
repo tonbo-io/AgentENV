@@ -1629,13 +1629,80 @@ func TestInjectForwardedHeadersTrustsOnlyConfiguredForwarders(t *testing.T) {
 				t.Fatalf("build request failed: %v", err)
 			}
 			req.RemoteAddr = tc.remoteAddr
-			h := http.Header{}
 			for _, value := range tc.incoming {
-				h.Add("X-Forwarded-For", value)
+				req.Header.Add("X-Forwarded-For", value)
 			}
+			// httputil.ReverseProxy hands Rewrite an outbound header set
+			// without X-Forwarded-For, so the chain must come from req.
+			h := http.Header{}
 			server.injectForwardedHeaders(h, req)
 			if got := h.Values("X-Forwarded-For"); !slices.Equal(got, tc.want) {
 				t.Fatalf("X-Forwarded-For = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleProxyForwardedForThroughReverseProxy drives the gateway handler,
+// and so the real httputil.ReverseProxy with its Rewrite hook, between a client
+// and an upstream node. ReverseProxy strips X-Forwarded-For from the outbound
+// request before Rewrite runs, so this catches a trust decision that reads
+// the outbound headers instead of the inbound ones.
+func TestHandleProxyForwardedForThroughReverseProxy(t *testing.T) {
+	cases := []struct {
+		name     string
+		trusted  []string
+		incoming []string
+		want     []string
+	}{
+		{"trusted peer keeps the chain", []string{"127.0.0.0/8"}, []string{"203.0.113.9, 198.51.100.2"}, []string{"203.0.113.9, 198.51.100.2"}},
+		{"trusted peer keeps every header line", []string{"127.0.0.0/8"}, []string{"203.0.113.9", "198.51.100.2"}, []string{"203.0.113.9", "198.51.100.2"}},
+		{"trusted peer without a chain is recorded", []string{"127.0.0.0/8"}, nil, []string{"127.0.0.1"}},
+		{"default empty trust list replaces the chain", nil, []string{"203.0.113.9"}, []string{"127.0.0.1"}},
+		{"untrusted peer cannot assert a client", []string{"10.45.0.0/16"}, []string{"203.0.113.9"}, []string{"127.0.0.1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			received := make(chan []string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received <- r.Header.Values("X-Forwarded-For")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer upstream.Close()
+
+			server := newTestServer(t, stubSchedulerClient{
+				lookupNodeFunc: func(_ context.Context, _ *schedulerv1.LookupNodeRequest, _ ...grpc.CallOption) (*schedulerv1.LookupNodeResponse, error) {
+					return &schedulerv1.LookupNodeResponse{
+						Node: &schedulerv1.Node{NodeId: "node-1", Endpoint: upstream.URL},
+					}, nil
+				},
+			}, time.Second, 1024, func(options *ServerOptions) {
+				options.TrustedForwarders = tc.trusted
+			})
+			// httptest listens on 127.0.0.1, so the gateway's peer is loopback.
+			gatewayServer := httptest.NewServer(authenticatedTestHandler(server))
+			defer gatewayServer.Close()
+
+			req, err := http.NewRequest(http.MethodGet, gatewayServer.URL+"/whoami", nil)
+			if err != nil {
+				t.Fatalf("build proxy request failed: %v", err)
+			}
+			req.Header.Set(headerSandboxID, "sbx-forwarded")
+			req.Header.Set(headerTargetPort, "8080")
+			for _, value := range tc.incoming {
+				req.Header.Add("X-Forwarded-For", value)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("proxy request failed: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("proxy status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+			}
+
+			if got := <-received; !slices.Equal(got, tc.want) {
+				t.Fatalf("upstream X-Forwarded-For = %q, want %q", got, tc.want)
 			}
 		})
 	}
