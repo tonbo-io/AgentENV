@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -809,38 +810,53 @@ func joinURLPath(basePath, path string) string {
 	}
 }
 
-func (s *Server) injectForwardedHeaders(h http.Header, r *http.Request) {
+// injectForwardedHeaders sets the forwarding headers on h, the outbound
+// request's headers, from in, the request the gateway received.
+//
+// The incoming X-Forwarded-For chain is always read from in.Header, never from
+// h: httputil.ReverseProxy deletes X-Forwarded-For, X-Forwarded-Host and
+// X-Forwarded-Proto from the outbound request before Rewrite runs, so h no
+// longer carries the client's chain on the proxy path.
+func (s *Server) injectForwardedHeaders(h http.Header, in *http.Request) {
 	scheme := "http"
-	if r.TLS != nil {
+	if in.TLS != nil {
 		scheme = "https"
 	}
-	if !s.forwardedByTrustedPeer(h, r.RemoteAddr) {
-		setXForwardedFor(h, r.RemoteAddr)
+	if chain := s.trustedForwardedChain(in); chain != nil {
+		h["X-Forwarded-For"] = chain
+	} else {
+		setXForwardedFor(h, in.RemoteAddr)
 	}
-	h.Set("X-Forwarded-Host", r.Host)
+	h.Set("X-Forwarded-Host", in.Host)
 	h.Set("X-Forwarded-Proto", scheme)
-	h.Set("X-Forwarded-Method", r.Method)
-	h.Set("X-Forwarded-URI", r.URL.RequestURI())
+	h.Set("X-Forwarded-Method", in.Method)
+	h.Set("X-Forwarded-URI", in.URL.RequestURI())
 }
 
-// forwardedByTrustedPeer reports whether the request already carries an
-// X-Forwarded-For chain from a configured trusted forwarder, which the
-// gateway then passes on unchanged. Any other peer, and a trusted peer that
-// sent no chain, gets the header replaced by its own address.
-func (s *Server) forwardedByTrustedPeer(h http.Header, remoteAddr string) bool {
-	if len(s.trustedForwarders) == 0 || strings.TrimSpace(strings.Join(h.Values("X-Forwarded-For"), "")) == "" {
-		return false
+// trustedForwardedChain returns a copy of the X-Forwarded-For chain that in
+// carries when its peer is a configured trusted forwarder and the chain is not
+// blank. The gateway passes that chain on unchanged and appends nothing. For
+// any other peer, and for a trusted peer that sent no chain, it returns nil
+// and the header is replaced by the peer address. With no trusted forwarders
+// configured (the default) it always returns nil.
+func (s *Server) trustedForwardedChain(in *http.Request) []string {
+	if len(s.trustedForwarders) == 0 {
+		return nil
 	}
-	peer, ok := peerAddr(remoteAddr)
+	chain := in.Header.Values("X-Forwarded-For")
+	if strings.TrimSpace(strings.Join(chain, "")) == "" {
+		return nil
+	}
+	peer, ok := peerAddr(in.RemoteAddr)
 	if !ok {
-		return false
+		return nil
 	}
 	for _, prefix := range s.trustedForwarders {
 		if prefix.Contains(peer) {
-			return true
+			return slices.Clone(chain)
 		}
 	}
-	return false
+	return nil
 }
 
 func peerAddr(remoteAddr string) (netip.Addr, bool) {
