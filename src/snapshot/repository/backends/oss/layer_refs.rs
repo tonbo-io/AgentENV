@@ -138,9 +138,26 @@ pub(crate) fn managed_layer_ref_digest<'a>(
 
 /// Digests a committed snapshot stores under this repository's
 /// `managed-layers/`: managed and managed-URL external rootfs and drive
-/// layers, memory layers and the tools drive. These are the objects restore
-/// and publication must lease and check.
+/// layers, memory layers and the tools drive. These are the objects a
+/// publication must lease and check before its record names them.
 pub(crate) fn committed_managed_layer_digests(
+    committed: &CommittedSnapshot,
+    managed_layers_repo_blob_url: &str,
+) -> BTreeSet<String> {
+    let mut digests = committed_restore_layer_digests(committed, managed_layers_repo_blob_url);
+    if let Some(tools_drive) = &committed.tools_drive {
+        digests.insert(tools_drive.digest.clone());
+    }
+    digests
+}
+
+/// Digests a restored guest reads lazily from this repository's
+/// `managed-layers/` for its lifetime: managed and managed-URL external
+/// rootfs and drive layers, and memory layers. The tools drive is excluded:
+/// restore downloads it and checks its digest, so it is never read lazily and
+/// a missing one fails the restore cleanly. These are the objects a restore
+/// leases and, in delete mode, gates.
+pub(crate) fn committed_restore_layer_digests(
     committed: &CommittedSnapshot,
     managed_layers_repo_blob_url: &str,
 ) -> BTreeSet<String> {
@@ -162,9 +179,6 @@ pub(crate) fn committed_managed_layer_digests(
             .iter()
             .map(|layer| layer.digest.clone()),
     );
-    if let Some(tools_drive) = &committed.tools_drive {
-        digests.insert(tools_drive.digest.clone());
-    }
     digests
 }
 
@@ -355,6 +369,14 @@ mod tests {
                 .into_iter()
                 .map(test_digest)
                 .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            committed_restore_layer_digests(&committed, MANAGED_URL),
+            [1, 2, 4, 5, 6]
+                .into_iter()
+                .map(test_digest)
+                .collect::<BTreeSet<_>>(),
+            "restore excludes the downloaded tools drive and registry layers"
         );
 
         let record = SnapshotRecord::mock_ready(committed);

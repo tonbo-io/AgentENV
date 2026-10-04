@@ -2490,6 +2490,10 @@ mod tests {
                 .repository_image_config_paths(),
             vec![PathBuf::from("runtime/memory/image.json")]
         );
+        assert!(
+            running.runtime_info().runtime_artifacts.is_empty(),
+            "a memory-only set has nothing for the image cache to keep"
+        );
     }
 
     #[test]

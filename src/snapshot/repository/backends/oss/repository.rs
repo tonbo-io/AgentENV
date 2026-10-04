@@ -11,9 +11,7 @@ use overlaybd::layer_metadata::read_overlaybd_layer_uuid;
 use tracing::{debug, info, warn};
 
 use super::client::{OssClient, OssUploadArtifact};
-use super::layer_leases::{
-    protect_and_check, LayerCheckError, LayerLeaseGuard, LayerLeases, ProtectPath,
-};
+use super::layer_leases::{GatePath, LayerCheckError, LayerLeaseGuard, LayerLeases};
 use super::layer_refs::{committed_managed_layer_digests, same_repo_blob_url};
 use super::layout::OssSnapshotArtifactLayout;
 use crate::cfg::{SnapshotImageStoragePolicy, SnapshotPublishCompressionConfig};
@@ -47,15 +45,18 @@ use crate::snapshot::{
 /// ```
 ///
 /// Managed layers are shared across snapshots and collected by the managed
-/// layer GC (`layer_gc`) once no catalog record and no node lease names them,
-/// so publication leases and re-checks every layer before writing a record.
+/// layer GC (`layer_gc`) once no catalog record and no node lease names them.
+/// With leases (`report` and `delete` modes) publication holds every layer
+/// its record names; in `delete` mode it also gates them (lease durable,
+/// intents checked, existence checked) before writing the record.
 pub(crate) struct OssSnapshotRepository {
     client: Arc<OssClient>,
     snapshot_image_storage: SnapshotImageStoragePolicy,
     acr_exporter: AcrDiskImageExporter,
     publish_compression: OverlaybdCompactOutput,
-    /// Node managed-layer leases. Publication requires them; read-only users
-    /// (the snapshot image export tool) construct the repository without.
+    /// Node managed-layer leases; `None` in `off` mode and for read-only
+    /// users (the snapshot image export tool), where publication runs exactly
+    /// as without managed-layer GC.
     leases: Option<Arc<LayerLeases>>,
 }
 
@@ -101,22 +102,21 @@ impl OssSnapshotRepository {
         self
     }
 
-    /// Lease, intent-check and verify every managed layer `committed` names
-    /// before its record can make them reachable (GC rule N1).
-    async fn protect_record_layers(
+    /// Hold every managed layer `committed` names until the returned guard
+    /// drops (plus the lease tail) and, in `delete` mode, gate them before
+    /// the record can make them reachable (GC rule N1). `None` without
+    /// leases.
+    async fn gate_record_layers(
         &self,
         id: &SnapshotId,
         committed: &CommittedSnapshot,
-    ) -> RepositoryResult<LayerLeaseGuard> {
-        let leases = self
-            .leases
-            .as_ref()
-            .ok_or_else(|| RepositoryError::Unsupported {
-                feature: "snapshot publication without managed-layer leases".to_string(),
-            })?;
+    ) -> RepositoryResult<Option<LayerLeaseGuard>> {
+        let Some(leases) = self.leases.as_ref() else {
+            return Ok(None);
+        };
         let digests =
             committed_managed_layer_digests(committed, &self.client.managed_layers_repo_blob_url());
-        pre_commit_protect(leases, id, digests).await
+        pre_commit_gate(leases, id, digests).await.map(Some)
     }
 
     fn layout<'a>(&self, id: &'a SnapshotId) -> OssSnapshotArtifactLayout<'a> {
@@ -390,18 +390,13 @@ impl SnapshotRepository for OssSnapshotRepository {
                 disk_publications: disk_publications.clone(),
             };
 
-            // 3b. Lease every managed layer the record names, wait out any GC
+            // 3b. Hold every managed layer the record names; in delete mode
+            // also make them durable in the node lease, wait out any GC
             // deletion intent naming them, and check that they exist. A layer
             // collected under a deduplicated upload fails the publication
             // retryably before the record exists; the replay uploads it again.
             // The guard covers the alias and record writes below.
-            let _layer_guard = self.protect_record_layers(id, &committed).await?;
-            info!(
-                snapshot_id = %id,
-                phase = "managed_layers_leased",
-                elapsed_ms = publish_started.elapsed().as_secs_f64() * 1000.0,
-                "snapshot publication phase completed"
-            );
+            let _layer_guard = self.gate_record_layers(id, &committed).await?;
 
             // 4. Bind alias (if present) with conflict detection.
             if let Some(ref alias) = metadata.alias {
@@ -1327,15 +1322,21 @@ async fn upload_managed_layer_if_missing(
     Ok(())
 }
 
-/// Publication pre-commit check over the layer store: lease `digests`, wait
-/// out any GC deletion intent naming them, then check each exists. Failures
-/// are retryable backend errors raised before the record is written.
-async fn pre_commit_protect(
+/// Publication pre-commit step: hold `digests` and, in `delete` mode, gate
+/// them. Failures are retryable backend errors raised before the record is
+/// written.
+async fn pre_commit_gate(
     leases: &Arc<LayerLeases>,
     id: &SnapshotId,
     digests: std::collections::BTreeSet<String>,
 ) -> RepositoryResult<LayerLeaseGuard> {
-    protect_and_check(leases, digests, ProtectPath::Publish, true)
+    let guard = leases.hold(digests);
+    if !leases.is_gating() {
+        return Ok(guard);
+    }
+    let started = std::time::Instant::now();
+    let outcome = leases
+        .gate(guard.digests(), GatePath::Publish)
         .await
         .map_err(|error| {
             if let LayerCheckError::Missing { digest } = &error {
@@ -1349,7 +1350,15 @@ async fn pre_commit_protect(
                 message: format!("pre-commit managed layer check for snapshot '{id}': {error}"),
                 source: None,
             }
-        })
+        })?;
+    info!(
+        snapshot_id = %id,
+        phase = "managed_layers_gated",
+        outcome = outcome.as_str(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "snapshot publication phase completed"
+    );
+    Ok(guard)
 }
 
 fn validate_publish_manifest_image_configs(
@@ -1423,12 +1432,13 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn pre_commit_verification_leases_all_record_digests_checks_intents_then_heads_before_record_write(
-    ) {
+    async fn delete_mode_pre_commit_gates_every_record_digest_and_fails_retryably_when_one_is_gone()
+    {
         use super::super::layer_refs::test_digest;
         use super::super::layer_store::fake::{FakeLayerStore, OpKind};
         use super::super::layer_store::LayerStore;
         use super::super::layout::{LAYER_GC_INTENTS_PREFIX, LAYER_GC_LEASES_PREFIX};
+        use crate::cfg::SnapshotLayerGcMode;
 
         let store = Arc::new(FakeLayerStore::new());
         let digests = (1..=3)
@@ -1444,12 +1454,14 @@ mod tests {
             Arc::clone(&store) as Arc<dyn LayerStore>,
             "publisher",
             "s3://bucket/prefix/managed-layers",
-        );
+            SnapshotLayerGcMode::Delete,
+        )
+        .expect("leases");
         let id = SnapshotId::generate();
 
-        let guard = pre_commit_protect(&leases, &id, digests.clone())
+        let guard = pre_commit_gate(&leases, &id, digests.clone())
             .await
-            .expect("pre-commit check");
+            .expect("pre-commit gate");
         assert_eq!(guard.digests(), &digests);
         let ops = store.ops();
         let put = ops
@@ -1473,18 +1485,55 @@ mod tests {
         assert!(put < list && stats.iter().all(|index| *index > list));
         drop(guard);
 
-        // The publication always re-checks, and a collected layer fails it
-        // retryably (a backend error) before any record exists.
+        // Verified digests (still leased through the tail) need no request.
+        store.clear_ops();
+        let _warm = pre_commit_gate(&leases, &id, digests.clone())
+            .await
+            .expect("warm gate");
+        assert!(store.ops().is_empty());
+
+        // A collected layer fails another node's publication retryably (a
+        // backend error) before any record exists.
+        let other = LayerLeases::new(
+            Arc::clone(&store) as Arc<dyn LayerStore>,
+            "other-publisher",
+            "s3://bucket/prefix/managed-layers",
+            SnapshotLayerGcMode::Delete,
+        )
+        .expect("leases");
         store.remove(&OssSnapshotArtifactLayout::managed_layer_key(&test_digest(
             2,
         )));
-        let error = pre_commit_protect(&leases, &id, digests)
+        let error = pre_commit_gate(&other, &id, digests)
             .await
             .expect_err("missing layer");
         assert!(
             matches!(&error, RepositoryError::Backend { message, .. } if message.contains(&test_digest(2))),
             "{error:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn report_mode_pre_commit_only_holds() {
+        use super::super::layer_refs::test_digest;
+        use super::super::layer_store::fake::FakeLayerStore;
+        use super::super::layer_store::LayerStore;
+        use crate::cfg::SnapshotLayerGcMode;
+
+        let store = Arc::new(FakeLayerStore::new());
+        let leases = LayerLeases::new(
+            Arc::clone(&store) as Arc<dyn LayerStore>,
+            "publisher",
+            "s3://bucket/prefix/managed-layers",
+            SnapshotLayerGcMode::Report,
+        )
+        .expect("leases");
+        let digests = std::collections::BTreeSet::from([test_digest(1)]);
+        let guard = pre_commit_gate(&leases, &SnapshotId::generate(), digests.clone())
+            .await
+            .expect("report mode never fails publication");
+        assert_eq!(guard.digests(), &digests);
+        assert!(store.ops().is_empty(), "report mode makes no request");
     }
 
     #[test]

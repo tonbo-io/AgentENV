@@ -427,11 +427,11 @@ looked up by consumers.
 
 ## `[snapshot.layer_gc]`
 
-Collection of OSS managed layers (`managed-layers/sha256:*`) that no catalog record references and no live node lease holds. Every node using the OSS backend always writes its managed-layer lease under `layer-gc/leases/`, whatever this section says; the section only decides whether this node also runs GC passes. Any mode other than `off` requires `snapshot.repository_backend = "oss"`. Read [Snapshot Layer GC](../internals/snapshot-layer-gc.md) before enabling `delete`: every node writing to the same bucket and prefix must run a lease-writing release first.
+Collection of OSS managed layers (`managed-layers/sha256:*`) that no catalog record references and no live node lease holds. Any mode other than `off` requires `snapshot.repository_backend = "oss"`. Read [Snapshot Layer GC](../internals/snapshot-layer-gc.md) before enabling `delete`: every process that reads managed layers from the same bucket and prefix must run this release in `report` or `delete` first.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mode` | string | `"off"` | `off` runs no passes. `report` classifies every managed layer (referenced, leased, young, unrecognized, garbage) and writes a run report and metrics without deleting any managed layer; like `delete`, it removes stale GC intents and week-old leases. `delete` additionally deletes garbage layers under the deletion-intent protocol. |
+| `mode` | string | `"off"` | `off` takes no part in the protocol: no lease, no GC pass and no request under `layer-gc/`; restore, publication, startup and shutdown behave as without GC. `report` writes this node's lease (declaring `report`) in the background and runs passes that classify every managed layer (referenced, leased, young, unrecognized, garbage) and write a run report and metrics without deleting any managed layer; no serving path waits for or fails on it. `delete` writes a lease declaring `delete`, gates restores, publications and resumes of persisted paused sandboxes on the lease protocol, and deletes garbage layers under the deletion-intent protocol; a delete pass degrades to a report pass while any live lease does not declare `delete`. |
 | `interval_secs` | integer | `3600` | Seconds between passes, with ±10% jitter. The first pass runs at a random point 5 to 10 minutes after process start. Minimum `300`. |
 | `grace_secs` | integer | `86400` | Only objects whose object-store `LastModified` is older than this are collected. Minimum `3600`. |
 | `max_deletes_per_pass` | integer | `1000` | Upper bound on deletions (and deletion-intent size) per pass, oldest first. Valid range `1..=10000`. |

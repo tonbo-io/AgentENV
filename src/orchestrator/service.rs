@@ -23,7 +23,7 @@ use crate::sandbox::{
     SandboxNetworkPolicy, SandboxRuntimeInfo, SandboxSnapshotCaptureOutcome,
     SandboxSnapshotCaptureRequest, SandboxSnapshotSourceDisposition,
 };
-use crate::snapshot::repository::{NoopLayerRetention, SnapshotLayerRetention};
+use crate::snapshot::repository::{PersistedLayerCheck, SnapshotLayerRetention};
 use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
 
@@ -120,12 +120,15 @@ pub struct Orchestrator<
     shutdown_outcome: OnceCell<ShutdownOutcome>,
     image_refs: Arc<dyn RuntimeImageRefs>,
     /// Keeps repository layers read by this node's sandboxes protected from
-    /// repository GC (OSS managed-layer leases; a no-op otherwise).
-    layer_retention: Arc<dyn SnapshotLayerRetention>,
-    /// Paused sandboxes restored from local persistence whose repository
-    /// layers have not been checked present since this process started (the
-    /// startup check failed or found a missing layer). Their resume re-checks
-    /// first and fails cleanly while a layer is missing.
+    /// repository GC (OSS managed-layer leases in `report` and `delete`
+    /// modes). `None` otherwise, and then none of the layer-retention work
+    /// below runs.
+    layer_retention: Option<Arc<dyn SnapshotLayerRetention>>,
+    /// Gating retention only: paused sandboxes restored from local
+    /// persistence whose repository layers have not been verified since this
+    /// process started. A background task verifies them after startup; a
+    /// resume of one still listed verifies it first and fails cleanly while
+    /// a layer is missing. Entries are only ever removed.
     unverified_paused_layers: std::sync::Mutex<HashSet<SandboxId>>,
     access_tokens: SandboxAccessTokenGenerator,
 }
@@ -148,7 +151,7 @@ where
 {
     pub async fn with_file_backed_store_and_factory(
         factory: F,
-        layer_retention: Arc<dyn SnapshotLayerRetention>,
+        layer_retention: Option<Arc<dyn SnapshotLayerRetention>>,
     ) -> Result<Arc<Self>> {
         let config = ConfigManager::global_config();
         let store = InMemoryMetadataStore::new();
@@ -209,7 +212,7 @@ where
             persister,
             image_refs,
             NodeAdmission::default(),
-            Arc::new(NoopLayerRetention),
+            None,
         )
         .await
     }
@@ -220,7 +223,7 @@ where
         persister: P,
         image_refs: Arc<dyn RuntimeImageRefs>,
         admission: NodeAdmission,
-        layer_retention: Arc<dyn SnapshotLayerRetention>,
+        layer_retention: Option<Arc<dyn SnapshotLayerRetention>>,
     ) -> Result<Arc<Self>> {
         let app_config = ConfigManager::global_config();
         let config = &app_config.orchestrator;
@@ -273,18 +276,29 @@ where
             access_tokens,
         });
 
-        // Lease and check the repository layers of restored paused sandboxes
-        // before the node serves requests. Sandboxes whose layers could not be
-        // checked, or are missing, re-check on resume and fail cleanly there.
-        // Until the lease is written the previous process's lease still
-        // covers them for its TTL, and the refresh task below retries.
-        orchestrator
-            .protect_persisted_paused_layers(&restored_paused)
-            .await;
-        Self::start_layer_retention_task(
-            Arc::clone(&orchestrator),
-            orchestrator.shutdown_tx.subscribe(),
-        );
+        // Layer retention never delays serving. With gating retention every
+        // restored paused sandbox starts unverified and is verified in the
+        // background; a resume that gets there first verifies its own
+        // sandbox. Until this process's lease is written the previous
+        // process's lease still covers them for its TTL.
+        if let Some(retention) = orchestrator.layer_retention.clone() {
+            if retention.is_gating() && !restored_paused.is_empty() {
+                orchestrator
+                    .unverified_paused_layers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend(restored_paused.iter().map(|(sandbox_id, _)| *sandbox_id));
+                Self::spawn_verify_restored_paused_layers(
+                    Arc::downgrade(&orchestrator),
+                    retention,
+                    restored_paused.clone(),
+                );
+            }
+            Self::start_layer_retention_task(
+                Arc::clone(&orchestrator),
+                orchestrator.shutdown_tx.subscribe(),
+            );
+        }
 
         // Start the auto-evict task.
         let evict_interval = Duration::from_millis(config.auto_evict_interval_ms);
@@ -385,12 +399,15 @@ where
         running
     }
 
-    /// Startup half of rule N1 for persisted paused sandboxes: records in
-    /// `unverified_paused_layers` every sandbox whose layers could not be
-    /// checked or are missing.
-    async fn protect_persisted_paused_layers(
-        &self,
-        restored_paused: &[(SandboxId, Arc<dyn PausedSandboxState>)],
+    /// Startup half of rule N1 for persisted paused sandboxes (gating
+    /// retention): verify every restored paused sandbox's repository layers
+    /// in one batch, off the serving path, and clear the verified ones from
+    /// `unverified_paused_layers`. Sandboxes with a missing layer, or all of
+    /// them when the check fails, stay listed and verify again on resume.
+    fn spawn_verify_restored_paused_layers(
+        orchestrator: std::sync::Weak<Self>,
+        retention: Arc<dyn SnapshotLayerRetention>,
+        restored_paused: Vec<(SandboxId, Arc<dyn PausedSandboxState>)>,
     ) {
         let configs = restored_paused
             .iter()
@@ -403,52 +420,59 @@ where
                 )
             })
             .collect::<Vec<_>>();
-        let unverified = match self
-            .layer_retention
-            .protect_persisted_image_configs(
-                configs
-                    .iter()
-                    .flat_map(|(_, paths)| paths.iter().cloned())
-                    .collect(),
-            )
-            .await
-        {
-            Ok(missing) => {
-                let missing = missing.into_iter().collect::<HashSet<_>>();
-                configs
-                    .iter()
-                    .filter(|(_, paths)| paths.iter().any(|path| missing.contains(path)))
-                    .map(|(sandbox_id, _)| *sandbox_id)
-                    .collect::<HashSet<_>>()
+        tokio::spawn(async move {
+            let paths = configs
+                .iter()
+                .flat_map(|(_, paths)| paths.iter().cloned())
+                .collect();
+            let missing = match retention
+                .verify_persisted_image_configs(paths, PersistedLayerCheck::Startup)
+                .await
+            {
+                Ok(missing) => missing.into_iter().collect::<HashSet<_>>(),
+                Err(error) => {
+                    warn!(
+                        error = %format!("{error:#}"),
+                        "failed to verify repository layers of persisted paused sandboxes; each resume verifies them first"
+                    );
+                    return;
+                }
+            };
+            let Some(orchestrator) = orchestrator.upgrade() else {
+                return;
+            };
+            let mut unverified = orchestrator
+                .unverified_paused_layers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (sandbox_id, paths) in &configs {
+                if paths.iter().any(|path| missing.contains(path)) {
+                    warn!(
+                        sandbox_id = %sandbox_id,
+                        "persisted paused sandbox reads a missing repository layer; its resume fails until the layer is present"
+                    );
+                } else {
+                    unverified.remove(sandbox_id);
+                }
             }
-            Err(error) => {
-                warn!(
-                    error = %format!("{error:#}"),
-                    "failed to lease and check repository layers of persisted paused sandboxes; each resume checks them first"
-                );
-                configs.iter().map(|(sandbox_id, _)| *sandbox_id).collect()
-            }
-        };
-        for sandbox_id in &unverified {
-            warn!(
-                sandbox_id = %sandbox_id,
-                "persisted paused sandbox has unverified repository layers; its resume re-checks them"
-            );
-        }
-        *self
-            .unverified_paused_layers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = unverified;
+        });
     }
 
-    /// Resume half of rule N1: before a persisted paused sandbox whose layers
-    /// were not verified at startup resumes, lease and check them again and
-    /// refuse to resume while one is missing.
+    /// Resume half of rule N1 (gating retention): before a persisted paused
+    /// sandbox that is still unverified resumes, verify its layers and refuse
+    /// to resume while one is missing.
     async fn check_persisted_paused_layers(
         &self,
         sandbox_id: SandboxId,
         paused_state: Option<&Arc<dyn PausedSandboxState>>,
     ) -> Result<()> {
+        let Some(retention) = self
+            .layer_retention
+            .as_ref()
+            .filter(|retention| retention.is_gating())
+        else {
+            return Ok(());
+        };
         let unverified = self
             .unverified_paused_layers
             .lock()
@@ -462,12 +486,12 @@ where
             operation: SandboxOperation::Resume,
             source,
         };
-        let missing = self
-            .layer_retention
-            .protect_persisted_image_configs(
+        let missing = retention
+            .verify_persisted_image_configs(
                 paused_state
                     .runtime_artifacts()
                     .repository_image_config_paths(),
+                PersistedLayerCheck::Resume,
             )
             .await
             .map_err(|error| failed(error.context("check repository layers of paused sandbox")))?;
@@ -488,17 +512,33 @@ where
         Ok(())
     }
 
-    /// Every repository image config (rootfs, attached drives and memory) read
-    /// by running sandboxes and by paused sandboxes in the store. `None` when
-    /// the paused sandboxes cannot be listed: a partial set would move their
-    /// layers into the tail as if they were gone.
-    async fn collect_layer_retention_configs(&self) -> Option<Vec<PathBuf>> {
-        let mut paths = self
-            .collect_running_artifacts()
-            .await
-            .into_iter()
-            .flat_map(|(_, artifacts)| artifacts.repository_image_config_paths())
-            .collect::<Vec<_>>();
+    /// Every repository image config (rootfs, attached drives and memory)
+    /// read by running sandboxes and by paused sandboxes in the store, and
+    /// whether every running sandbox could be observed. A sandbox whose
+    /// handle is locked by a long operation is skipped rather than waited
+    /// for. `None` when the paused sandboxes cannot be listed.
+    async fn collect_layer_retention_configs(&self) -> Option<(Vec<PathBuf>, bool)> {
+        let handles = {
+            self.sandboxes
+                .read()
+                .await
+                .values()
+                .map(Arc::clone)
+                .collect::<Vec<_>>()
+        };
+        let mut complete = true;
+        let mut paths = Vec::new();
+        for handle in handles {
+            match handle.try_lock() {
+                Ok(sandbox) => paths.extend(
+                    sandbox
+                        .runtime_info()
+                        .runtime_artifacts
+                        .repository_image_config_paths(),
+                ),
+                Err(_) => complete = false,
+            }
+        }
         match self.store.list().await {
             Ok(sandboxes) => paths.extend(
                 sandboxes
@@ -520,13 +560,25 @@ where
         }
         paths.sort();
         paths.dedup();
-        Some(paths)
+        Some((paths, complete))
     }
 
     /// Hand the current running and paused image configs to layer retention.
+    /// While any sandbox could not be observed the set only grows, so a
+    /// stuck sandbox lock can over-protect but never drop a running guest's
+    /// layers.
     async fn refresh_layer_retention(&self) {
-        if let Some(paths) = self.collect_layer_retention_configs().await {
-            self.layer_retention.set_runtime_image_configs(paths).await;
+        let Some(retention) = self.layer_retention.as_ref() else {
+            return;
+        };
+        let Some((paths, complete)) = self.collect_layer_retention_configs().await else {
+            return;
+        };
+        if complete {
+            retention.set_runtime_image_configs(paths).await;
+        } else {
+            ::metrics::counter!("agentenv_snapshot_layer_retention_contended_total").increment(1);
+            retention.add_runtime_image_configs(paths).await;
         }
     }
 

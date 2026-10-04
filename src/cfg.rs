@@ -353,13 +353,19 @@ pub struct SnapshotConfig {
 }
 
 /// Collection of OSS managed layers that no catalog record references and no
-/// node lease holds. Node leases are always written by OSS-backed nodes; this
-/// section only controls whether this node also runs GC passes. See
-/// `docs/src/internals/snapshot-layer-gc.md`.
+/// node lease holds. The mode decides how far this node takes part in the
+/// protocol; see `docs/src/internals/snapshot-layer-gc.md`.
 #[derive(Debug, Config, Clone)]
 pub struct SnapshotLayerGcConfig {
-    /// `off` (default), `report` (classify and report, never delete) or
-    /// `delete`. Anything other than `off` requires the OSS repository backend.
+    /// `off` (default): no protocol participation, no lease, no GC and no
+    /// object-store traffic under `layer-gc/`; serving paths run as without
+    /// GC. `report`: writes a lease declaring `report` and runs report-only
+    /// passes; serving paths never wait for or fail on it. `delete`: writes a
+    /// lease declaring `delete`, gates restores, publications and resumes of
+    /// persisted paused sandboxes (rule N1), and deletes garbage. Anything
+    /// other than `off` requires the OSS repository backend; every reader of
+    /// the bucket prefix must run `report` or `delete` before any node runs
+    /// `delete`.
     #[config(default = "off", env = "AENV_SNAPSHOT_LAYER_GC_MODE")]
     pub mode: SnapshotLayerGcMode,
     /// Seconds between passes (±10% jitter). Minimum 300.

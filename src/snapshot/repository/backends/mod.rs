@@ -82,7 +82,7 @@ pub fn build_snapshot_backend(
                 overlaybd_layers,
                 p2p_transport,
             )?;
-            let layer_maintenance = Some(backend.layer_maintenance());
+            let layer_maintenance = backend.layer_maintenance();
             let (repository, runtime_resolver) = backend.into_parts();
             Ok(SnapshotBackendParts {
                 repository,

@@ -75,6 +75,27 @@ impl MinioFixture {
         Ok(())
     }
 
+    pub async fn get_object(&self, key: &str) -> Result<Vec<u8>> {
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        Ok(output.body.collect().await?.into_bytes().to_vec())
+    }
+
+    pub async fn delete_object(&self, key: &str) -> Result<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        Ok(())
+    }
+
     /// Keys under `prefix` (first page of up to 1000 keys).
     pub async fn list_keys(&self, prefix: &str) -> Result<Vec<String>> {
         let output = self

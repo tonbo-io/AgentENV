@@ -138,8 +138,10 @@ impl RuntimeArtifactSet {
         self
     }
 
+    /// Whether the image cache has nothing to keep for this set. Memory
+    /// configs do not count: the image cache does not track them.
     pub fn is_empty(&self) -> bool {
-        self.overlaybd_image_config_paths.is_empty() && self.memory_image_config_paths.is_empty()
+        self.overlaybd_image_config_paths.is_empty()
     }
 
     /// Image configs whose local-only layers the image cache must keep.

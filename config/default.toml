@@ -252,11 +252,12 @@ algorithm = "lz4"
 workers = 1
 
 # OSS only: collect managed layers (managed-layers/sha256:*) that no catalog
-# record references and no node lease holds. Every OSS-backed node always
-# writes its lease under layer-gc/leases/; this section only decides whether
-# this node also runs GC passes. "report" classifies and reports without
-# deleting; "delete" removes unreferenced layers older than grace_secs. See
-# docs/src/internals/snapshot-layer-gc.md before enabling "delete".
+# record references and no node lease holds. "off" takes no part: no lease, no
+# GC, no request under layer-gc/. "report" writes this node's lease and runs
+# report-only passes; restores, publications, startup and shutdown never wait
+# for it. "delete" also gates restores and publications on the lease protocol
+# and removes unreferenced layers older than grace_secs. Roll out off ->
+# report everywhere -> delete; see docs/src/internals/snapshot-layer-gc.md.
 # [snapshot.layer_gc]
 # mode = "off"                  # "off" | "report" | "delete"; env AENV_SNAPSHOT_LAYER_GC_MODE
 # interval_secs = 3600          # >= 300, ±10% jitter; first pass 5-10 min after start

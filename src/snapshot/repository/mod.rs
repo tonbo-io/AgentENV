@@ -4,6 +4,6 @@ pub mod interfaces;
 
 pub use errors::{RepositoryError, RepositoryResult};
 pub use interfaces::{
-    NoopLayerRetention, SnapshotLayerRetention, SnapshotListFilter, SnapshotRepository,
+    PersistedLayerCheck, SnapshotLayerRetention, SnapshotListFilter, SnapshotRepository,
     SnapshotRuntimeResolver,
 };

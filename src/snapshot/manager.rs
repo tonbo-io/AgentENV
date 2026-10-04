@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use futures::{stream, StreamExt};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::p2p::SnapshotP2pArtifact;
@@ -16,7 +15,7 @@ use crate::sandbox::{
 use crate::snapshot::repository::backends::build_snapshot_backend;
 use crate::snapshot::repository::backends::oss::OssLayerMaintenance;
 use crate::snapshot::repository::interfaces::{
-    NoopLayerRetention, SnapshotLayerRetention, SnapshotRepository, SnapshotRuntimeResolver,
+    SnapshotLayerRetention, SnapshotRepository, SnapshotRuntimeResolver,
 };
 use crate::snapshot::repository::{RepositoryError, SnapshotListFilter};
 use crate::snapshot::{
@@ -86,22 +85,21 @@ impl SnapshotManager {
     }
 
     /// Layer retention the orchestrator feeds with the image configs of its
-    /// running and paused sandboxes. A no-op for backends without managed
-    /// layer collection.
-    pub fn layer_retention(&self) -> Arc<dyn SnapshotLayerRetention> {
-        match &self.layer_maintenance {
-            Some(maintenance) => maintenance.retention(),
-            None => Arc::new(NoopLayerRetention),
-        }
+    /// running and paused sandboxes. `None` for backends without managed
+    /// layer collection and for `[snapshot.layer_gc].mode = "off"`, where
+    /// the orchestrator does none of this work.
+    pub fn layer_retention(&self) -> Option<Arc<dyn SnapshotLayerRetention>> {
+        self.layer_maintenance
+            .as_ref()
+            .map(|maintenance| maintenance.retention())
     }
 
-    /// Start managed-layer lease maintenance and, when configured, managed
-    /// layer GC. Call after the orchestrator has protected its persisted
-    /// paused sandboxes. The tasks stop when `shutdown` turns true.
-    pub fn start_layer_maintenance(&self, shutdown: watch::Receiver<bool>) -> Vec<JoinHandle<()>> {
-        match &self.layer_maintenance {
-            Some(maintenance) => maintenance.start(shutdown),
-            None => Vec::new(),
+    /// Start the managed-layer lease refresher and GC loop (`report` and
+    /// `delete` modes only). The tasks stop when `shutdown` turns true;
+    /// nothing waits for them.
+    pub fn start_layer_maintenance(&self, shutdown: watch::Receiver<bool>) {
+        if let Some(maintenance) = &self.layer_maintenance {
+            maintenance.start(shutdown);
         }
     }
 

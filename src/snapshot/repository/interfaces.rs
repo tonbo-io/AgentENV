@@ -201,42 +201,48 @@ pub trait SnapshotRuntimeResolver: Send + Sync {
     async fn resolve(&self, snapshot: Arc<SnapshotRecord>) -> RepositoryResult<RunnableSnapshot>;
 }
 
+/// When persisted paused sandboxes' layers are verified (metric label).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistedLayerCheck {
+    /// In the background after the node restored its persisted sandboxes.
+    Startup,
+    /// Before resuming a sandbox the startup check has not verified.
+    Resume,
+}
+
 #[async_trait]
 /// Keeps the repository layers that this node's sandboxes read protected from
 /// repository garbage collection.
 ///
-/// Backends whose shared layers are collected (OSS managed layers) lease every
-/// layer named by the overlaybd image configs of the node's running and paused
-/// sandboxes; other backends use [`NoopLayerRetention`]. Paths are opaque
-/// overlaybd `image.json` files (rootfs, attached drives and memory).
+/// Only the OSS backend with `[snapshot.layer_gc].mode` `report` or `delete`
+/// provides one; elsewhere the orchestrator has none and does none of this
+/// work. Paths are opaque overlaybd `image.json` files (rootfs, attached
+/// drives and memory).
 pub trait SnapshotLayerRetention: Send + Sync {
-    /// Lease the layers named by paused sandboxes' image configs restored
-    /// from local persistence, wait until no GC pass can still delete them,
-    /// and check that every repository layer they read exists. Returns the
-    /// configs that read a missing layer: their sandboxes must not resume.
-    /// An error means nothing was checked; callers must check again (with
-    /// the same call) before resuming those sandboxes.
-    async fn protect_persisted_image_configs(
+    /// Whether serving paths must wait for [`verify_persisted_image_configs`]
+    /// before trusting persisted layers (`delete` mode). In `report` mode
+    /// nothing gates.
+    ///
+    /// [`verify_persisted_image_configs`]: Self::verify_persisted_image_configs
+    fn is_gating(&self) -> bool;
+
+    /// Keep the layers named by paused sandboxes' image configs restored from
+    /// local persistence protected and, when gating, check that every remote
+    /// repository layer they read exists after no GC pass can still delete
+    /// it. Returns the configs that read a missing layer: their sandboxes
+    /// must not resume. An error means nothing was checked; callers must
+    /// check again before resuming those sandboxes.
+    async fn verify_persisted_image_configs(
         &self,
         paths: Vec<PathBuf>,
+        check: PersistedLayerCheck,
     ) -> anyhow::Result<Vec<PathBuf>>;
 
-    /// Replace the set of image configs read by running and paused sandboxes.
+    /// Replace the set of image configs read by running and paused
+    /// sandboxes. Never waits for the object store.
     async fn set_runtime_image_configs(&self, paths: Vec<PathBuf>);
-}
 
-/// Layer retention for backends without shared-layer collection.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoopLayerRetention;
-
-#[async_trait]
-impl SnapshotLayerRetention for NoopLayerRetention {
-    async fn protect_persisted_image_configs(
-        &self,
-        _paths: Vec<PathBuf>,
-    ) -> anyhow::Result<Vec<PathBuf>> {
-        Ok(Vec::new())
-    }
-
-    async fn set_runtime_image_configs(&self, _paths: Vec<PathBuf>) {}
+    /// Add image configs without removing any, when the caller could not
+    /// observe every sandbox. Never waits for the object store.
+    async fn add_runtime_image_configs(&self, paths: Vec<PathBuf>);
 }
