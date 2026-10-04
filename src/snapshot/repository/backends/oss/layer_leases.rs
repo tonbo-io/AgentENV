@@ -89,7 +89,8 @@ pub(crate) async fn with_timeout<T>(
 }
 
 /// Sleep for `duration` unless shutdown is requested first. Returns `true`
-/// when shutdown was requested.
+/// when shutdown was requested. A dropped sender can no longer request
+/// shutdown, so the sleep then simply runs out.
 pub(crate) async fn sleep_or_shutdown(
     duration: Duration,
     shutdown: &mut watch::Receiver<bool>,
@@ -103,8 +104,13 @@ pub(crate) async fn sleep_or_shutdown(
         tokio::select! {
             _ = &mut sleep => return false,
             changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return true;
+                match changed {
+                    Ok(()) if *shutdown.borrow() => return true,
+                    Ok(()) => {}
+                    Err(_) => {
+                        (&mut sleep).await;
+                        return false;
+                    }
                 }
             }
         }
