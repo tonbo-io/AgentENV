@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7685e5f4.js";
+            window.path_to_searchindex_js = "../searchindex-bb4fea61.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-c868df7a.js"></script>
+        <script src="../toc-83fad3c2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -708,6 +708,25 @@ them. Snapshot P2P publication also skips digest-keyed advertisements for
 local raw layers whose digest is absent from the committed record — the
 record names the compressed bytes, so the raw digest key would never be
 looked up by consumers.</p>
+<h2 id="snapshotlayer_gc"><a class="header" href="#snapshotlayer_gc"><code>[snapshot.layer_gc]</code></a></h2>
+<p>Collection of OSS managed layers (<code>managed-layers/sha256:*</code>) that no catalog record references and no live node lease holds. Any mode other than <code>off</code> requires <code>snapshot.repository_backend = "oss"</code>. Read <a href="../internals/snapshot-layer-gc.html">Snapshot Layer GC</a> before enabling <code>delete</code>: every process that reads managed layers from the same bucket and prefix must run this release in <code>report</code> or <code>delete</code> first.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>mode</code></td><td>string</td><td><code>"off"</code></td><td><code>off</code> takes no part in the protocol: no lease, no GC pass and no request under <code>layer-gc/</code>; restore, publication, startup and shutdown behave as without GC. <code>report</code> writes this node’s lease (declaring <code>report</code>) in the background and runs passes that classify every managed layer (referenced, leased, young, unrecognized, garbage) and write a run report and metrics without deleting any managed layer; no serving path waits for or fails on it. <code>delete</code> writes a lease declaring <code>delete</code>, gates restores, publications and resumes of persisted paused sandboxes on the lease protocol, and deletes garbage layers under the deletion-intent protocol; a delete pass degrades to a report pass while any live lease does not declare <code>delete</code>.</td></tr>
+<tr><td><code>interval_secs</code></td><td>integer</td><td><code>3600</code></td><td>Seconds between passes, with ±10% jitter. The first pass runs at a random point 5 to 10 minutes after process start. Minimum <code>300</code>.</td></tr>
+<tr><td><code>grace_secs</code></td><td>integer</td><td><code>86400</code></td><td>Only objects whose object-store <code>LastModified</code> is older than this are collected. Minimum <code>3600</code>.</td></tr>
+<tr><td><code>max_deletes_per_pass</code></td><td>integer</td><td><code>1000</code></td><td>Upper bound on deletions (and deletion-intent size) per pass, oldest first. Valid range <code>1..=10000</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Environment variable overrides:</p>
+<ul>
+<li><code>AENV_SNAPSHOT_LAYER_GC_MODE</code></li>
+</ul>
 <h2 id="backendposix_fs"><a class="header" href="#backendposix_fs"><code>[backend.posix_fs]</code></a></h2>
 <p>POSIX filesystem-backed snapshot repository configuration. This section is used when <code>snapshot.repository_backend = "posix_fs"</code>.</p>
 <div class="table-wrapper">

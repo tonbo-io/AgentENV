@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7685e5f4.js";
+            window.path_to_searchindex_js = "searchindex-bb4fea61.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c868df7a.js"></script>
+        <script src="toc-83fad3c2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1919,6 +1919,25 @@ them. Snapshot P2P publication also skips digest-keyed advertisements for
 local raw layers whose digest is absent from the committed record — the
 record names the compressed bytes, so the raw digest key would never be
 looked up by consumers.</p>
+<h2 id="snapshotlayer_gc"><a class="header" href="#snapshotlayer_gc"><code>[snapshot.layer_gc]</code></a></h2>
+<p>Collection of OSS managed layers (<code>managed-layers/sha256:*</code>) that no catalog record references and no live node lease holds. Any mode other than <code>off</code> requires <code>snapshot.repository_backend = "oss"</code>. Read <a href="#snapshot-layer-gc">Snapshot Layer GC</a> before enabling <code>delete</code>: every process that reads managed layers from the same bucket and prefix must run this release in <code>report</code> or <code>delete</code> first.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>mode</code></td><td>string</td><td><code>"off"</code></td><td><code>off</code> takes no part in the protocol: no lease, no GC pass and no request under <code>layer-gc/</code>; restore, publication, startup and shutdown behave as without GC. <code>report</code> writes this node’s lease (declaring <code>report</code>) in the background and runs passes that classify every managed layer (referenced, leased, young, unrecognized, garbage) and write a run report and metrics without deleting any managed layer; no serving path waits for or fails on it. <code>delete</code> writes a lease declaring <code>delete</code>, gates restores, publications and resumes of persisted paused sandboxes on the lease protocol, and deletes garbage layers under the deletion-intent protocol; a delete pass degrades to a report pass while any live lease does not declare <code>delete</code>.</td></tr>
+<tr><td><code>interval_secs</code></td><td>integer</td><td><code>3600</code></td><td>Seconds between passes, with ±10% jitter. The first pass runs at a random point 5 to 10 minutes after process start. Minimum <code>300</code>.</td></tr>
+<tr><td><code>grace_secs</code></td><td>integer</td><td><code>86400</code></td><td>Only objects whose object-store <code>LastModified</code> is older than this are collected. Minimum <code>3600</code>.</td></tr>
+<tr><td><code>max_deletes_per_pass</code></td><td>integer</td><td><code>1000</code></td><td>Upper bound on deletions (and deletion-intent size) per pass, oldest first. Valid range <code>1..=10000</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Environment variable overrides:</p>
+<ul>
+<li><code>AENV_SNAPSHOT_LAYER_GC_MODE</code></li>
+</ul>
 <h2 id="backendposix_fs"><a class="header" href="#backendposix_fs"><code>[backend.posix_fs]</code></a></h2>
 <p>POSIX filesystem-backed snapshot repository configuration. This section is used when <code>snapshot.repository_backend = "posix_fs"</code>.</p>
 <div class="table-wrapper">
@@ -2148,6 +2167,7 @@ and are then re-fetched on demand.</p>
 <tr><td><code>AENV_TOOLS_VERSION</code></td><td>bundled dependency manifest</td><td>Select the immutable tools-drive version, including a version imported from <code>AENV_TOOLS_DRIVE_PATH</code>.</td></tr>
 <tr><td><code>AENV_VIRTUALIZATION_MODE</code></td><td><code>kvm</code></td><td>Select the node virtualization mode. Leave unset for normal installations; set to <code>pvm</code> only when following the <a href="#pvm-deployment">PVM Deployment</a> guide.</td></tr>
 <tr><td><code>AENV_SNAPSHOT_LOCAL_CACHE_PATH</code></td><td><code>$AENV_HOME/snapshot-local-cache</code></td><td>Override the snapshot manager’s node-local artifact/cache root</td></tr>
+<tr><td><code>AENV_SNAPSHOT_LAYER_GC_MODE</code></td><td><code>off</code></td><td>Override <code>snapshot.layer_gc.mode</code> (<code>off</code>, <code>report</code> or <code>delete</code>); anything but <code>off</code> requires the OSS repository backend</td></tr>
 <tr><td><code>AENV_SNAPSHOT_STORE</code></td><td><code>$AENV_HOME/snapshot-store</code></td><td>Override the posix_fs snapshot repository root directory</td></tr>
 <tr><td><code>AENV_UBLK_DAEMON_BINARY_PATH</code></td><td><code>$AENV_HOME/ublk/uvm-ublk-daemon</code></td><td>Override path to the <code>uvm-ublk-daemon</code> binary</td></tr>
 <tr><td><code>AENV_UBLK_DAEMON_METRICS_LISTEN_ADDR</code></td><td><code>0.0.0.0:9103</code></td><td>Override ublk daemon Prometheus metrics listen address; empty string disables it</td></tr>
@@ -4786,7 +4806,7 @@ network namespaces are missing</li>
 <tr><td>Firecracker binary</td><td><code>&lt;deps_path&gt;/firecracker/{version}/firecracker</code></td><td>Firecracker executable</td><td>VM process runtime</td><td>Created during setup when missing. Old versions are retained until manually removed.</td></tr>
 <tr><td>CPU template helper</td><td><code>&lt;deps_path&gt;/firecracker/{version}/cpu-template-helper</code></td><td>Optional Firecracker helper executable</td><td>Detects host CPU config for cluster-wide CPU intersection</td><td>Extracted from Firecracker package when present.</td></tr>
 <tr><td>Kernel image</td><td><code>&lt;deps_path&gt;/kernel/{version}/vmlinux.bin</code></td><td>Guest kernel</td><td>VM boot source</td><td>Downloaded during setup. Old versions are retained until manually removed.</td></tr>
-<tr><td>Tools drive</td><td><code>&lt;deps_path&gt;/tools/{version}/tools.ext4</code> for fresh launch; snapshot repository <code>managed-layers/sha256:*</code> for durable restore</td><td>Read-only ext4 image with static <code>agentenv-init</code> and <code>envd</code> binaries</td><td>Fresh sandboxes use the immutable installed release; new snapshots publish and pin the exact bytes by content digest so another node can restore them</td><td>Setup extracts or imports the current version. Snapshot publication imports the exact file into the content-addressed repository; restore validates the digest and treats the node-local copy only as an evictable cache. Shared managed layers are retained independently of individual snapshot records until a future reference-aware GC is introduced.</td></tr>
+<tr><td>Tools drive</td><td><code>&lt;deps_path&gt;/tools/{version}/tools.ext4</code> for fresh launch; snapshot repository <code>managed-layers/sha256:*</code> for durable restore</td><td>Read-only ext4 image with static <code>agentenv-init</code> and <code>envd</code> binaries</td><td>Fresh sandboxes use the immutable installed release; new snapshots publish and pin the exact bytes by content digest so another node can restore them</td><td>Setup extracts or imports the current version. Snapshot publication imports the exact file into the content-addressed repository; restore validates the digest and treats the node-local copy only as an evictable cache. Shared managed layers outlive individual snapshot records; on the OSS backend, managed-layer GC removes them once no catalog record and no node lease names them (see <a href="#snapshot-layer-gc">Snapshot Layer GC</a>).</td></tr>
 <tr><td>Overlaybd tools</td><td><code>&lt;deps_path&gt;/overlaybd/bin/*</code></td><td>Statically linked <code>overlaybd-create</code>, <code>overlaybd-apply</code>, <code>overlaybd-commit</code>, and <code>overlaybd-resize</code></td><td>OCI-to-overlaybd conversion and packaging</td><td>Installed during setup when release metadata does not match.</td></tr>
 <tr><td>Overlaybd release metadata</td><td><code>&lt;deps_path&gt;/overlaybd/tools-release.json</code></td><td>Installed overlaybd release identifier</td><td>Detects whether tools need reinstalling</td><td>Rewritten on setup when release changes.</td></tr>
 <tr><td>Overlaybd package downloads</td><td><code>&lt;deps_path&gt;/overlaybd/downloads/*</code></td><td>Temporary downloaded package archives</td><td>Setup staging for overlaybd release packages</td><td>Removed after a successful install.</td></tr>
@@ -4874,7 +4894,10 @@ network namespaces are missing</li>
 <tr><td>Snapshot aliases</td><td>POSIX: <code>&lt;snapshot_store&gt;/repository/catalog/aliases/{alias}</code>; OSS: <code>catalog/aliases/{alias}.json</code></td><td>Alias-to-snapshot binding</td><td>Name lookup for templates/snapshots</td><td>Bound during create/publish with conflict checks. Deleted with record cleanup.</td><td>Partially, from records if aliases are still recorded.</td></tr>
 <tr><td>Firecracker manifest</td><td>POSIX: <code>&lt;snapshot_store&gt;/repository/snapshots/{id}/firecracker-manifest.json</code>; OSS: <code>artifacts/{id}/firecracker-manifest.json</code></td><td>Firecracker snapshot shape, virtual sizes, attached-drive metadata; path fields are hydrated at runtime</td><td>Runtime manifest template for launching committed snapshots</td><td>Persisted during publish. Removed with per-snapshot artifacts.</td><td>Partially, but kept as durable artifact.</td></tr>
 <tr><td>VM state</td><td>POSIX: <code>&lt;snapshot_store&gt;/repository/snapshots/{id}/vm_state.bin</code>; OSS: <code>artifacts/{id}/vm_state.bin</code></td><td>Firecracker VM state snapshot</td><td>Required to resume committed snapshots</td><td>Copied/uploaded during publish. Removed with per-snapshot artifacts.</td><td>No.</td></tr>
-<tr><td>Managed snapshot layers</td><td>POSIX: <code>&lt;snapshot_store&gt;/repository/managed-layers/{digest}.overlaybd.commit</code>; OSS: <code>managed-layers/{digest}</code></td><td>Content-addressed rootfs, attached-drive, and memory overlaybd commit layers</td><td>Shared immutable layer storage for committed snapshots</td><td>Imported during publish by descriptor or by hashing local descriptor-less layers. Usually not removed with a single snapshot.</td><td>Not from metadata alone; can be re-fetched only if source still exists.</td></tr>
+<tr><td>Managed snapshot layers</td><td>POSIX: <code>&lt;snapshot_store&gt;/repository/managed-layers/{digest}.overlaybd.commit</code>; OSS: <code>managed-layers/{digest}</code></td><td>Content-addressed rootfs, attached-drive, and memory overlaybd commit layers</td><td>Shared immutable layer storage for committed snapshots</td><td>Imported during publish by descriptor or by hashing local descriptor-less layers. Never removed with a single snapshot. OSS: managed-layer GC deletes layers older than its grace period that no catalog record and no live node lease names, when <code>[snapshot.layer_gc].mode = "delete"</code>.</td><td>Not from metadata alone; can be re-fetched only if source still exists.</td></tr>
+<tr><td>Managed-layer leases</td><td>OSS: <code>layer-gc/leases/{node}-{instance}[-g{n}].json</code></td><td>Version 2: node id, process instance, the writer’s mode (<code>report</code> or <code>delete</code>) and every managed-layer digest the node process may read</td><td>Protect layers of running, paused and restoring sandboxes, in-flight publications and template builds from GC; a live lease that does not declare <code>delete</code> makes delete passes degrade to report passes</td><td>Written only by processes in <code>report</code> or <code>delete</code> mode (never in <code>off</code>), in the background on growth, debounced shrink and at least hourly; a failed write moves the process to a new <code>-g{n}</code> key; live while <code>LastModified</code> is within 24 h; removed by any report- or delete-mode GC runner after 7 days.</td><td>Yes; rewritten by the owning process.</td></tr>
+<tr><td>Managed-layer GC intents</td><td>OSS: <code>layer-gc/intents/{runner}-{pass}.json</code></td><td>Digests one GC pass is about to delete</td><td>Tell delete-mode nodes to wait out the deletion window before trusting a named layer</td><td>Written before the final lease read of a delete-mode pass and rewritten once before its deletes; removed right after its deletes, or held for at most 120 s after the write when a delete failed; an interrupted pass’s intent is removed by any report- or delete-mode runner once older than 10 minutes.</td><td>Not needed.</td></tr>
+<tr><td>Managed-layer GC run reports</td><td>OSS: <code>layer-gc/runs/{runner}.json</code></td><td>Counts, garbage sample and deleted digests of the runner’s last pass</td><td>Audit trail and duplicate-work avoidance; noncurrent versions keep a 30-day history in versioned buckets</td><td>Overwritten every pass. Contains only digests and counts.</td><td>Not needed.</td></tr>
 <tr><td>Source-registry publications</td><td><code>SnapshotRecord.committed.disk_publications</code> plus remote OCI registry objects</td><td>Published rootfs/attached-drive image refs and manifest digests</td><td>Lets compatible snapshot deltas live in their source registry</td><td>Created during OSS publish when image publishing is enabled. Rolled back on failure or delete when possible.</td><td>Registry-owned; record is required to locate.</td></tr>
 </tbody>
 </table>
@@ -4972,6 +4995,164 @@ network namespaces are missing</li>
 <li>P2P store contents are node-local and optional. Unpublish removes the local catalog entry and related blobs; clearing the store only affects peer-to-peer sharing and may require republishing or refetching artifacts.</li>
 <li>Logs and dependency downloads are operational artifacts. They are not part of sandbox or snapshot correctness, but may require separate retention policy outside image-cache GC.</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="snapshot-layer-gc"><a class="header" href="#snapshot-layer-gc">Snapshot Layer GC</a></h1>
+<p>The OSS snapshot repository stores rootfs, attached-drive, memory and tools-drive layers once, content-addressed, under <code>managed-layers/sha256:&lt;digest&gt;</code>, and shares them across snapshots. Deleting a snapshot removes its alias, catalog record, disk publications and <code>artifacts/{id}/</code> prefix, never its managed layers. Managed-layer GC removes the layers nothing needs any more. These layers hold guest memory images and disk deltas, so retaining them after their snapshots are deleted keeps customer data.</p>
+<p>A catalog-only GC is not safe: a restored guest reads its source snapshot’s memory and rootfs lowers lazily from object storage for its whole lifetime, and a caller may delete the source snapshot right after the restore commits. Node processes therefore publish leases, and deleting runners publish deletion intents first.</p>
+<p>Code: <code>src/snapshot/repository/backends/oss/{layer_refs,layer_store,layer_leases,layer_gc,boot_clock}.rs</code>.</p>
+<h2 id="modes"><a class="header" href="#modes">Modes</a></h2>
+<p><code>[snapshot.layer_gc].mode</code> decides how far a node process takes part. Only <code>delete</code> changes what serving paths do.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th><code>off</code> (default)</th><th><code>report</code></th><th><code>delete</code></th></tr>
+</thead>
+<tbody>
+<tr><td>Restore</td><td>As without GC: managed rootfs, drive and memory lowers are HEADed inside the image-config cache fill on a cache miss.</td><td>As <code>off</code>, plus an in-memory hold of the restore’s layers (no request, no wait, no failure).</td><td>Hold, then the gate (below) as one more branch of the restore’s concurrent fetches. A missing layer fails with <code>ArtifactNotFound</code>; any other gate failure is a retryable backend error.</td></tr>
+<tr><td>Publication</td><td>As without GC.</td><td>As <code>off</code>, plus an in-memory hold of every layer the record names until the record write.</td><td>Hold and gate every layer the record names before the alias and record writes; failures are retryable backend errors raised before the record exists.</td></tr>
+<tr><td>Resume of a paused sandbox</td><td>As without GC.</td><td>As without GC.</td><td>Every resume gates the sandbox’s remote managed lowers; layers verified earlier and held in a fresh lease cost no request. A missing layer fails the resume (<code>SandboxOperationFailed(Resume)</code>) and leaves the sandbox paused.</td></tr>
+<tr><td>Startup</td><td>As without GC.</td><td>Nothing extra; the first refresh covers persisted paused sandboxes.</td><td>Restored paused sandboxes are verified in a background task, which warms the gate for their resumes and logs missing layers. Nothing blocks the API listener.</td></tr>
+<tr><td>Shutdown</td><td>As without GC.</td><td>Sends a stop signal; waits for nothing.</td><td>Sends a stop signal; waits for nothing. A pass stops issuing deletes; an interrupted pass leaves its intent for any runner’s stale-intent cleanup.</td></tr>
+<tr><td>Background</td><td>Nothing.</td><td>Lease refresher, the orchestrator’s 60 s runtime refresh, report passes.</td><td>As <code>report</code>, with delete passes.</td></tr>
+<tr><td>Writes under <code>layer-gc/</code></td><td>None.</td><td>Its lease (declaring <code>report</code>), its run report, removal of stale intents and week-old leases.</td><td>As <code>report</code> with a lease declaring <code>delete</code>, plus deletion intents.</td></tr>
+</tbody>
+</table>
+</div>
+<p>The gate (rule N1) makes no request when every needed digest was verified by an earlier gate and the lease holding it was written successfully less than 12 hours ago (boot clock). Otherwise it makes the digests durable in the node’s lease (at most one coalesced PUT), lists <code>layer-gc/intents/</code> once and reads each listed intent (16 concurrent), sleeps 120 s only when an intent names a needed digest, HEADs the unverified digests (16 concurrent, stopping at the first error) and marks them verified. Every request has a 15 s timeout. Lease writes share failures: a gate whose digests are not yet durable returns the error of any write that started after it registered them and failed, instead of writing again, so during a store brownout queued restores and publications share failed writes rather than each issuing one. The lease writer is a FIFO lock that the refresher and the GC’s pre-pass rewrite also take, so a gate may wait behind more than one write; a write cancelled with its gate records no outcome (and keeps any failure recorded before it), so gates queued only behind that write issue their own. The whole gate has a 45 s deadline, extended by the 120 s intent wait only when an intent names a needed digest, so a gate fails after at most 45 s (165 s with an intent wait). A cancelled gate (deadline or dropped request) abandons the lease key of a write it left in flight, like a failed write. In a restore, nothing reads a managed layer before the resolve returns, and the resolve returns only after the gate and every fetch succeeded, so the gate runs alongside the vm_state, manifest, image-config and tools-drive fetches; materialization skips its own HEADs because the gate checks them. The tools drive is not gated on restore: restore downloads it and checks its digest, so it is never read lazily.</p>
+<h2 id="what-keeps-a-layer"><a class="header" href="#what-keeps-a-layer">What keeps a layer</a></h2>
+<p>A pass recomputes holders from scratch; there are no persistent counters to drift.</p>
+<ul>
+<li>
+<p><strong>Catalog records</strong> (<code>catalog/records/*.json</code>). The digest set is the union of a structured extraction of the committed payload (rootfs layers whether managed or external, attached-drive layers, memory layers, tools drive) and a raw scan of the record bytes for <code>sha256:&lt;64 lowercase hex&gt;</code>. A committed record that yields no digest aborts the pass. A record that does not parse makes a delete pass degrade (G6).</p>
+</li>
+<li>
+<p><strong>Aliases hold nothing.</strong> Publication binds the alias before it writes the record, inside its held pre-commit window.</p>
+</li>
+<li>
+<p><strong>Node leases</strong> (<code>layer-gc/leases/{node}-{instance}[-g{n}].json</code>, version 2), written only by <code>report</code> and <code>delete</code> processes. Each declares its writer’s <code>mode</code> and lists every digest the process may read:</p>
+<ul>
+<li>the runtime set: every lower <code>digest</code>/<code>targetDigest</code> in the overlaybd image configs (rootfs, attached drives and memory) of running sandboxes and of paused sandboxes in the store, refreshed every 60 s by the orchestrator (config files are read off the async runtime; a sandbox whose handle is locked by a long operation is skipped, and while any is skipped the set only grows);</li>
+<li>active holds: a restore’s hold lives in the <code>RunnableSnapshot</code> until launch completes (template builds hold their base snapshot through publication); a publication’s hold covers its record write;</li>
+<li>a 2-hour tail of every digest that left the runtime set or lost its last hold, which bridges hand-offs (hold dropped before the next runtime refresh, pause and detach, a record written after a GC’s catalog read).</li>
+</ul>
+<p>The resolver records which digests each materialized runtime image config names, so an evicted memory config in the local artifact cache still contributes its digests. A lease is live while its object-store <code>LastModified</code> is within 24 h of the GC’s reference time. The refresher rewrites it promptly on growth (coalesced), on shrink after 5 minutes, and at least hourly; after a failed write it waits a full minute before writing again. Every lease write is a single PUT request with no client retry (see A3), so once a write is reported successful no attempt of it can land afterwards. A write that fails (for example times out) may still land later with older content, so the owner abandons that key and writes the next lease to a new <code>-g{n}</code> key; the abandoned key keeps every digest that both its last successful content and the failed attempt carry until it expires, and the node keeps treating exactly those digests as durable (and verified ones as verified) while its last success is fresh. A key a GC runner may have removed is never written again.</p>
+</li>
+</ul>
+<h2 id="deletion-rule"><a class="header" href="#deletion-rule">Deletion rule</a></h2>
+<p>A pass P deletes <code>managed-layers/{d}</code> only if all of these hold. <code>T0</code> is the <code>LastModified</code> of the runner’s own lease, rewritten and stat’ed before the catalog listing starts.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Rule</th><th>Condition</th><th>Clock</th></tr>
+</thead>
+<tbody>
+<tr><td>G1</td><td><code>LastModified(d) &lt; T0 - grace</code>.</td><td>Object store</td></tr>
+<tr><td>G2</td><td>No catalog record read by P names <code>d</code>.</td><td>—</td></tr>
+<tr><td>G3</td><td>P’s deletion intent <code>layer-gc/intents/{runner}-{pass}.json</code> naming <code>d</code> was written and stat’ed (<code>I_lm</code>) before P started its final lease listing, and no live lease returned by that listing names <code>d</code>.</td><td>—</td></tr>
+<tr><td>G4a</td><td>After the final lease read, P rewrites the intent with the same bytes and stats it (<code>T_end</code>); <code>T_end - I_lm &lt;= 19 s</code> (a 20 s budget minus 1 s of <code>LastModified</code> precision).</td><td>Object store</td></tr>
+<tr><td>G4b</td><td>Each DELETE is issued within 20 s of taking the boot-clock time just before that rewrite was sent; candidates past it are counted as <code>not_issued</code> and wait for the next pass. With G4a every DELETE is issued within 41 s of <code>I_lm</code>, inside the 45 s issue window.</td><td><code>CLOCK_BOOTTIME</code></td></tr>
+<tr><td>G5</td><td><code>T_end - T0 &lt;= 30 min - 1 s</code>, so the catalog listing and the end of the final lease read are at most 30 minutes apart.</td><td>Object store</td></tr>
+<tr><td>G6</td><td>Both lease reads found only live leases declaring <code>mode = "delete"</code>, and every catalog record parsed. Otherwise the pass degrades to a report pass: no intent (or its intent is removed) and no DELETE, outcome <code>degraded</code>.</td><td>—</td></tr>
+</tbody>
+</table>
+</div>
+<p>After its DELETEs, P removes its intent at once only when it issued none; otherwise it keeps the intent until 120 s after the intent write was acknowledged (boot clock), then removes it. A failed DELETE may still land later; a pass that issued any DELETE keeps the same hold whatever their outcomes, which keeps one rule. A pass that is interrupted keeps it; any runner removes intents at least 10 minutes old (object-store time).</p>
+<p>Node rules, in <code>delete</code> mode only:</p>
+<ul>
+<li><strong>N1.</strong> Before a process trusts that <code>managed-layers/{d}</code> exists, either <code>d</code> is verified (checked by an earlier N1 run and continuously in a lease key whose last successful write is under 12 h old on the boot clock), or, in order: a lease PUT carrying <code>d</code> was acknowledged at <code>t_L</code>; the process listed intents at <code>L &gt; t_L</code>; it slept 120 s if a listed intent names <code>d</code>; it HEADed <code>d</code> and refuses it when missing.</li>
+<li><strong>N2.</strong> <code>d</code> stays in the live set while anything on the node can read it, plus a 2-hour tail (boot clock), and leaves the lease only after a 5-minute debounce.</li>
+</ul>
+<h2 id="why-this-is-safe"><a class="header" href="#why-this-is-safe">Why this is safe</a></h2>
+<p>Assumptions:</p>
+<ul>
+<li><strong>A1.</strong> The store has strong read-after-write and list-after-write consistency (AWS S3 since December 2020, Alibaba Cloud OSS). A weaker S3-compatible store voids the argument.</li>
+<li><strong>A2 (rollout precondition).</strong> While any process runs <code>delete</code> on a bucket and prefix, every other process that reads its managed layers runs this release in <code>delete</code>, or in <code>report</code> with a live lease (which makes every delete pass degrade). <code>off</code> processes, older releases and other tools (<code>aenv-snapshot-image</code>) are invisible to the GC and must be excluded operationally; see Rollout.</li>
+<li><strong>A3.</strong> Every protocol write (lease PUTs, intent PUTs and DELETEs, lease DELETEs, managed-layer DELETEs) is a single request: the protocol’s object-store operator has no retry layer, so a reported success means that one request landed, and a failure (including a timeout) abandons the request, which may still land. The only second request is the credential-refresh path, sent after the store answered the first with permission denied, so the first never lands. A DELETE whose request failed lands, if at all, within 60 s after its 15 s timeout. SigV4’s 15-minute request validity bounds the worst case, since the one request is signed once.</li>
+<li><strong>A4 (liveness).</strong> A delete-mode process rewrites its lease at least every 24 h. Alerted on at 2 h and 6 h.</li>
+<li><strong>A5.</strong> <code>LastModified</code> has whole-second precision; every object-store comparison carries 1 s of slack.</li>
+</ul>
+<p>Suppose P deletes <code>d</code> at time <code>x</code>.</p>
+<ol>
+<li><strong>Gated readers.</strong> Let R trust <code>d</code>, with <code>d</code> durable in R’s lease from <code>t_L</code> (A4 keeps that key live). If <code>t_L</code> is before P’s final listing began, that listing read R’s lease after <code>t_L</code> and found <code>d</code>, so P skipped <code>d</code>. Every write that can land on that key after <code>t_L</code>, while R trusts <code>d</code> through it, carries <code>d</code>: R’s writes are serialized; an acknowledged PUT is a single request (A3), so no earlier attempt of an acknowledged write lands after it; and a write that fails abandons the key and leaves <code>d</code> trusted only if that write carried <code>d</code>. Otherwise <code>t_L</code> is after P’s intent was committed, and R’s intent listing at <code>L &gt; t_L</code> either saw P’s intent, so R HEADed <code>d</code> at least 120 s after <code>I_lm</code>, by which time every DELETE of P had landed (issued within 45 s of <code>I_lm</code>, timed out within 15 s more, landed within 60 s more by A3); or did not see it, because P issued no DELETE or removed it no earlier than 120 s after the intent write (after every landing). Either way R’s HEAD observes the deletion and R refuses <code>d</code>. If R trusted <code>d</code> because it was verified, apply the same argument to the N1 run that verified it.</li>
+<li><strong>Records.</strong> Let a committed record naming <code>d</code> exist at <code>x</code>. If it existed when P listed the catalog, P read <code>d</code> (G2). Otherwise it was written later by a publisher that, by A2 and G6, gates (a report-mode publisher has a live report lease, and P would have degraded). The publication made <code>d</code> durable at <code>t_P</code> before the record write <code>w</code> and held it until at least <code>w + 2 h</code>; P’s final lease read ended at most 30 minutes after the catalog listing (G5), which is before <code>w + 2 h</code>. If <code>t_P</code> precedes P’s final listing, P saw <code>d</code>; otherwise the publication’s gate ran after it and, as in step 1, observed the deletion and failed before the record was written.</li>
+<li><strong>Formats and grace.</strong> Unparsed records degrade the pass (G6); unknown fields in parsed records are covered by the raw scan; a committed record naming no digest aborts the pass. G1 is not needed for steps 1 and 2; it covers multipart uploads in progress (their <code>LastModified</code> is the initiation time) and writers outside the protocol.</li>
+</ol>
+<p>This is a Dekker pair: delete-mode nodes write their lease and then read intents; GC runners write their intent and then read leases.</p>
+<p><code>off</code> and <code>report</code> never delete a managed layer: <code>off</code> constructs no GC, and a report pass returns before the delete phase. Their only deletes are intents at least 10 minutes old and leases at least 7 days old (object-store time); such intents are past every landing bound and expired leases protect nothing.</p>
+<h2 id="clocks"><a class="header" href="#clocks">Clocks</a></h2>
+<ul>
+<li>Object-store times are compared only with object-store times: G1, G4a, G5, lease liveness and hygiene.</li>
+<li>In-process durations that bound safety use <code>CLOCK_BOOTTIME</code>, which keeps counting while the host is suspended or hibernated: G4b, the intent hold, the gate’s 12-hour freshness, the tail and the shrink debounce.</li>
+<li>Tokio sleeps are used only for waits (the node’s 120 s intent wait); a clock that stops only lengthens the real wait. The pass-level Tokio timeouts are liveness guards, not safety rules.</li>
+<li>Residual: no in-guest clock sees a hypervisor pause of a VM-hosted process. The object-store checks cover everything up to the pre-delete rewrite; a VM pause of a runner inside the 20 s delete phase, or of a node for more than 12 hours, is not covered.</li>
+<li>Residual: host suspend inside the delete phase, between a managed-layer DELETE’s G4b check and the request reaching the store. G4b reads the boot clock only when it starts each DELETE, and the 15 s request timeout runs on <code>CLOCK_MONOTONIC</code>, which stops during suspend, so after a long enough suspend the request can land after P’s own hold and after another runner removed the intent as stale, past the window nodes wait out. SigV4 validity bounds the delay to about 15 minutes after signing, since the request is never re-signed (A3), but that is longer than the 120 s nodes wait.</li>
+<li>Tonbo’s hosts are EC2 bare metal (<code>m6g.metal</code>), which cannot be paused, suspended or hibernated; deployments on VMs that can be paused, or on hosts that can suspend, depend on neither happening inside the delete phase.</li>
+</ul>
+<h2 id="configuration-4"><a class="header" href="#configuration-4">Configuration</a></h2>
+<p><code>[snapshot.layer_gc]</code> (see the <a href="#snapshotlayer_gc">configuration reference</a>):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Default</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>mode</code></td><td><code>off</code></td><td><code>off</code>, <code>report</code> or <code>delete</code>. Env <code>AENV_SNAPSHOT_LAYER_GC_MODE</code>.</td></tr>
+<tr><td><code>interval_secs</code></td><td><code>3600</code></td><td>At least 300; ±10% jitter; the first pass runs at a random point 5 to 10 minutes after start.</td></tr>
+<tr><td><code>grace_secs</code></td><td><code>86400</code></td><td>At least 3600.</td></tr>
+<tr><td><code>max_deletes_per_pass</code></td><td><code>1000</code></td><td>1 to 10000; oldest candidates first.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Protocol constants live in code: lease TTL 24 h, liveness rewrite 1 h, shrink debounce 5 min, tail 2 h, gate freshness 12 h, intent wait 120 s, issue window 45 s (pre-delete budget 20 s, delete phase 20 s), request timeout 15 s, pass span 30 min, stale intents 10 min, stale leases 7 days.</p>
+<p>The GC runs inside the node server process; there is no separate worker. A runner skips its pass when another runner of at least its mode reported <code>ok</code> within half an interval (a <code>degraded</code> run counts as a report run). This is best effort and not needed for safety: intents are per pass, runners never write leases or records, and DELETE is idempotent.</p>
+<p>Each process start (for example every scale-to-zero wake) and each failed write creates a new lease key. Keys stay live for 24 h and any runner removes them after 7 days; in a versioned bucket every rewrite also leaves a noncurrent version for the bucket’s lifecycle window. A delete pass reads every live lease.</p>
+<h2 id="rollout-and-rollback"><a class="header" href="#rollout-and-rollback">Rollout and rollback</a></h2>
+<ol>
+<li>Every process that reads managed layers from a bucket and prefix must run this release in <code>report</code> or <code>delete</code> before any process enables <code>delete</code> (A2). <code>off</code> processes, older releases and <code>aenv-snapshot-image</code> are invisible to the GC. Verify with a read-only listing of <code>layer-gc/leases/</code> owners against the cell’s node inventory, and confirm that no other process or cluster generation reads the prefix.</li>
+<li>Order: <code>off</code> to <code>report</code> everywhere, then <code>delete</code> everywhere. Never <code>off</code> straight to <code>delete</code>.</li>
+<li>After switching to <code>delete</code>, passes stay <code>degraded</code> until every report-mode lease has expired, up to 24 h after the last report-mode write. The run report’s <code>non_gating_sample</code> lists the blocking keys.</li>
+<li>Rollback: <code>delete</code> to <code>report</code> everywhere first; only after no process runs <code>delete</code> may any process run <code>off</code> or an older release. Older releases ignore <code>layer-gc/</code> objects.</li>
+</ol>
+<p>Deletes use <code>DeleteObject</code> without a version id. In a versioned bucket the bytes stay as a noncurrent version under the bucket’s lifecycle rule; recovering a wrongly deleted layer means copying that version back (or removing the delete marker) with a principal that holds <code>GetObjectVersion</code>, which the node role does not. The run report and the per-layer audit log lines list what each pass deleted.</p>
+<h2 id="tonbo-cloud"><a class="header" href="#tonbo-cloud">Tonbo Cloud</a></h2>
+<p>Tonbo’s idle reclamation publishes every paused guest as a catalog record before its host leaves, and every wake restores from those records. Layers needed after a host is gone are therefore protected by records, not by that host’s lease; a lease only protects what its live process holds (running guests, persisted paused sandboxes, in-flight restores and publications). A host that is gone or stopped exports no metrics, so the lease-age alert below pairs with node-down alerting.</p>
+<h2 id="the-snapshot-image-export-tool"><a class="header" href="#the-snapshot-image-export-tool">The snapshot image export tool</a></h2>
+<p><code>aenv-snapshot-image</code> reads managed layers without a lease, and the grace period does not protect it (it only exempts objects younger than <code>grace_secs</code>). If its snapshot is deleted while it exports, a later delete pass may remove the layers and the export fails cleanly (<code>ManagedLayerNotFound</code>, or <code>IntegrityMismatch</code> on a short read). Export snapshots that are not being deleted.</p>
+<h2 id="observability-and-alerts"><a class="header" href="#observability-and-alerts">Observability and alerts</a></h2>
+<p>Every pass logs <code>snapshot layer gc pass complete</code> (warn on abort) with mode, runner, pass id, outcome, the degrade reason, duration and every count below; delete passes also log <code>snapshot layer gc deleted managed layer</code> per object (digest, size, <code>LastModified</code>). The run report <code>layer-gc/runs/{runner}.json</code> carries the same counts, up to 20 garbage digests, up to 20 non-gating lease keys and the full deleted list. Restores log the phase <code>managed_layers_gated</code> (outcome <code>fast</code>, <code>cold</code>, <code>intent_wait</code> or <code>failed</code>, and elapsed time); delete-mode publications log the same phase.</p>
+<p>Metrics on the node’s <code>/metrics</code>:</p>
+<ul>
+<li><code>agentenv_snapshot_layer_lease_age_seconds</code>: boot-clock seconds since this process’s last successful lease write, or since it started when it has none yet (so a process that never wrote its lease alerts too); normally under one hour.</li>
+<li><code>agentenv_snapshot_layer_lease_writes_total{reason,outcome}</code> (<code>reason</code> in <code>grow</code>, <code>shrink</code>, <code>liveness</code>, <code>cancelled</code>), <code>agentenv_snapshot_layer_lease_digests</code></li>
+<li><code>agentenv_snapshot_layer_gate_seconds{path,outcome}</code> and <code>agentenv_snapshot_layer_gate_failures_total{path,reason}</code> (<code>reason</code> in <code>lease</code>, <code>timeout</code>, <code>check</code>, <code>missing</code>) for <code>path</code> in <code>restore</code>, <code>publish</code>, <code>startup</code>, <code>resume</code> (delete mode only)</li>
+<li><code>agentenv_snapshot_layer_intent_waits_total{path}</code></li>
+<li><code>agentenv_snapshot_layer_gc_passes_total{mode,outcome}</code> with <code>outcome</code> in <code>ok</code>, <code>degraded</code>, <code>skipped</code>, <code>aborted</code></li>
+<li><code>agentenv_snapshot_layer_gc_non_gating_leases</code></li>
+<li><code>agentenv_snapshot_layer_gc_objects{class}</code> and <code>agentenv_snapshot_layer_gc_bytes{class}</code> for <code>referenced</code>, <code>leased</code>, <code>young</code>, <code>unrecognized</code> and <code>garbage</code></li>
+<li><code>agentenv_snapshot_layer_gc_deleted_objects_total</code>, <code>agentenv_snapshot_layer_gc_deleted_bytes_total</code>, <code>agentenv_snapshot_layer_gc_delete_failures_total</code>, <code>agentenv_snapshot_layer_gc_not_issued_total</code></li>
+<li><code>agentenv_snapshot_layer_gc_last_success_timestamp_seconds</code></li>
+<li><code>agentenv_snapshot_layer_retention_contended_total</code>: runtime refreshes that could not observe every sandbox and only grew the set</li>
+<li><code>agentenv_snapshot_layer_lease_unreadable_image_configs_total</code> (each such config is also logged at warn, at most hourly per path)</li>
+</ul>
+<p>Recommended alerts:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Condition</th><th>Severity</th></tr>
+</thead>
+<tbody>
+<tr><td><code>agentenv_snapshot_layer_lease_age_seconds &gt; 7200</code> for 15 min</td><td>Warn</td></tr>
+<tr><td><code>agentenv_snapshot_layer_lease_age_seconds &gt; 21600</code> (6 h, well under the 24 h TTL)</td><td>Page</td></tr>
+<tr><td><code>agentenv_snapshot_layer_lease_writes_total{outcome="error"}</code> increasing for 15 min with no <code>outcome="ok"</code> increase</td><td>Warn</td></tr>
+<tr><td>Restore gate p99 above the cold-restore budget, or gate failures for 15 min</td><td>Ticket</td></tr>
+<tr><td>Three consecutive <code>aborted</code> passes</td><td>Ticket</td></tr>
+<tr><td><code>degraded</code> passes more than 48 h after enabling <code>delete</code></td><td>Ticket</td></tr>
+<tr><td><code>agentenv_snapshot_layer_gc_last_success_timestamp_seconds</code> older than three intervals</td><td>Ticket</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="rules-for-new-code"><a class="header" href="#rules-for-new-code">Rules for new code</a></h2>
+<p>A path that reads managed layers must <code>hold()</code> them for as long as it relies on them and, when the leases are gating (<code>is_gating()</code>), <code>gate()</code> them before trusting that they exist, or be covered by the runtime set. Reference extraction lives only in <code>layer_refs.rs</code>. Records must keep naming their layers as <code>sha256:&lt;64 lowercase hex&gt;</code> tokens; a parseable record that names layers any other way is invisible to older runners and needs a coordinated runner change first.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="agentenv-proxy-design-and-usage"><a class="header" href="#agentenv-proxy-design-and-usage">AgentENV Proxy Design and Usage</a></h1>
 <p>This document describes the per-node reverse proxy that forwards requests into individual sandboxes. For the distributed routing layer (gateway to scheduler to node), see <a href="#agentenv-architecture">System Architecture</a>.</p>

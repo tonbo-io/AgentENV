@@ -1,0 +1,400 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Snapshot Layer GC - AgentENV Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-e96d0476.css">
+        <link rel="stylesheet" href="../css/chrome-d279d366.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/version-selector-d91336b6.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-bb4fea61.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-83fad3c2.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">AgentENV Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/AgentENV" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/AgentENV/edit/main/docs/src/internals/snapshot-layer-gc.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="snapshot-layer-gc"><a class="header" href="#snapshot-layer-gc">Snapshot Layer GC</a></h1>
+<p>The OSS snapshot repository stores rootfs, attached-drive, memory and tools-drive layers once, content-addressed, under <code>managed-layers/sha256:&lt;digest&gt;</code>, and shares them across snapshots. Deleting a snapshot removes its alias, catalog record, disk publications and <code>artifacts/{id}/</code> prefix, never its managed layers. Managed-layer GC removes the layers nothing needs any more. These layers hold guest memory images and disk deltas, so retaining them after their snapshots are deleted keeps customer data.</p>
+<p>A catalog-only GC is not safe: a restored guest reads its source snapshot’s memory and rootfs lowers lazily from object storage for its whole lifetime, and a caller may delete the source snapshot right after the restore commits. Node processes therefore publish leases, and deleting runners publish deletion intents first.</p>
+<p>Code: <code>src/snapshot/repository/backends/oss/{layer_refs,layer_store,layer_leases,layer_gc,boot_clock}.rs</code>.</p>
+<h2 id="modes"><a class="header" href="#modes">Modes</a></h2>
+<p><code>[snapshot.layer_gc].mode</code> decides how far a node process takes part. Only <code>delete</code> changes what serving paths do.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th><code>off</code> (default)</th><th><code>report</code></th><th><code>delete</code></th></tr>
+</thead>
+<tbody>
+<tr><td>Restore</td><td>As without GC: managed rootfs, drive and memory lowers are HEADed inside the image-config cache fill on a cache miss.</td><td>As <code>off</code>, plus an in-memory hold of the restore’s layers (no request, no wait, no failure).</td><td>Hold, then the gate (below) as one more branch of the restore’s concurrent fetches. A missing layer fails with <code>ArtifactNotFound</code>; any other gate failure is a retryable backend error.</td></tr>
+<tr><td>Publication</td><td>As without GC.</td><td>As <code>off</code>, plus an in-memory hold of every layer the record names until the record write.</td><td>Hold and gate every layer the record names before the alias and record writes; failures are retryable backend errors raised before the record exists.</td></tr>
+<tr><td>Resume of a paused sandbox</td><td>As without GC.</td><td>As without GC.</td><td>Every resume gates the sandbox’s remote managed lowers; layers verified earlier and held in a fresh lease cost no request. A missing layer fails the resume (<code>SandboxOperationFailed(Resume)</code>) and leaves the sandbox paused.</td></tr>
+<tr><td>Startup</td><td>As without GC.</td><td>Nothing extra; the first refresh covers persisted paused sandboxes.</td><td>Restored paused sandboxes are verified in a background task, which warms the gate for their resumes and logs missing layers. Nothing blocks the API listener.</td></tr>
+<tr><td>Shutdown</td><td>As without GC.</td><td>Sends a stop signal; waits for nothing.</td><td>Sends a stop signal; waits for nothing. A pass stops issuing deletes; an interrupted pass leaves its intent for any runner’s stale-intent cleanup.</td></tr>
+<tr><td>Background</td><td>Nothing.</td><td>Lease refresher, the orchestrator’s 60 s runtime refresh, report passes.</td><td>As <code>report</code>, with delete passes.</td></tr>
+<tr><td>Writes under <code>layer-gc/</code></td><td>None.</td><td>Its lease (declaring <code>report</code>), its run report, removal of stale intents and week-old leases.</td><td>As <code>report</code> with a lease declaring <code>delete</code>, plus deletion intents.</td></tr>
+</tbody>
+</table>
+</div>
+<p>The gate (rule N1) makes no request when every needed digest was verified by an earlier gate and the lease holding it was written successfully less than 12 hours ago (boot clock). Otherwise it makes the digests durable in the node’s lease (at most one coalesced PUT), lists <code>layer-gc/intents/</code> once and reads each listed intent (16 concurrent), sleeps 120 s only when an intent names a needed digest, HEADs the unverified digests (16 concurrent, stopping at the first error) and marks them verified. Every request has a 15 s timeout. Lease writes share failures: a gate whose digests are not yet durable returns the error of any write that started after it registered them and failed, instead of writing again, so during a store brownout queued restores and publications share failed writes rather than each issuing one. The lease writer is a FIFO lock that the refresher and the GC’s pre-pass rewrite also take, so a gate may wait behind more than one write; a write cancelled with its gate records no outcome (and keeps any failure recorded before it), so gates queued only behind that write issue their own. The whole gate has a 45 s deadline, extended by the 120 s intent wait only when an intent names a needed digest, so a gate fails after at most 45 s (165 s with an intent wait). A cancelled gate (deadline or dropped request) abandons the lease key of a write it left in flight, like a failed write. In a restore, nothing reads a managed layer before the resolve returns, and the resolve returns only after the gate and every fetch succeeded, so the gate runs alongside the vm_state, manifest, image-config and tools-drive fetches; materialization skips its own HEADs because the gate checks them. The tools drive is not gated on restore: restore downloads it and checks its digest, so it is never read lazily.</p>
+<h2 id="what-keeps-a-layer"><a class="header" href="#what-keeps-a-layer">What keeps a layer</a></h2>
+<p>A pass recomputes holders from scratch; there are no persistent counters to drift.</p>
+<ul>
+<li>
+<p><strong>Catalog records</strong> (<code>catalog/records/*.json</code>). The digest set is the union of a structured extraction of the committed payload (rootfs layers whether managed or external, attached-drive layers, memory layers, tools drive) and a raw scan of the record bytes for <code>sha256:&lt;64 lowercase hex&gt;</code>. A committed record that yields no digest aborts the pass. A record that does not parse makes a delete pass degrade (G6).</p>
+</li>
+<li>
+<p><strong>Aliases hold nothing.</strong> Publication binds the alias before it writes the record, inside its held pre-commit window.</p>
+</li>
+<li>
+<p><strong>Node leases</strong> (<code>layer-gc/leases/{node}-{instance}[-g{n}].json</code>, version 2), written only by <code>report</code> and <code>delete</code> processes. Each declares its writer’s <code>mode</code> and lists every digest the process may read:</p>
+<ul>
+<li>the runtime set: every lower <code>digest</code>/<code>targetDigest</code> in the overlaybd image configs (rootfs, attached drives and memory) of running sandboxes and of paused sandboxes in the store, refreshed every 60 s by the orchestrator (config files are read off the async runtime; a sandbox whose handle is locked by a long operation is skipped, and while any is skipped the set only grows);</li>
+<li>active holds: a restore’s hold lives in the <code>RunnableSnapshot</code> until launch completes (template builds hold their base snapshot through publication); a publication’s hold covers its record write;</li>
+<li>a 2-hour tail of every digest that left the runtime set or lost its last hold, which bridges hand-offs (hold dropped before the next runtime refresh, pause and detach, a record written after a GC’s catalog read).</li>
+</ul>
+<p>The resolver records which digests each materialized runtime image config names, so an evicted memory config in the local artifact cache still contributes its digests. A lease is live while its object-store <code>LastModified</code> is within 24 h of the GC’s reference time. The refresher rewrites it promptly on growth (coalesced), on shrink after 5 minutes, and at least hourly; after a failed write it waits a full minute before writing again. Every lease write is a single PUT request with no client retry (see A3), so once a write is reported successful no attempt of it can land afterwards. A write that fails (for example times out) may still land later with older content, so the owner abandons that key and writes the next lease to a new <code>-g{n}</code> key; the abandoned key keeps every digest that both its last successful content and the failed attempt carry until it expires, and the node keeps treating exactly those digests as durable (and verified ones as verified) while its last success is fresh. A key a GC runner may have removed is never written again.</p>
+</li>
+</ul>
+<h2 id="deletion-rule"><a class="header" href="#deletion-rule">Deletion rule</a></h2>
+<p>A pass P deletes <code>managed-layers/{d}</code> only if all of these hold. <code>T0</code> is the <code>LastModified</code> of the runner’s own lease, rewritten and stat’ed before the catalog listing starts.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Rule</th><th>Condition</th><th>Clock</th></tr>
+</thead>
+<tbody>
+<tr><td>G1</td><td><code>LastModified(d) &lt; T0 - grace</code>.</td><td>Object store</td></tr>
+<tr><td>G2</td><td>No catalog record read by P names <code>d</code>.</td><td>—</td></tr>
+<tr><td>G3</td><td>P’s deletion intent <code>layer-gc/intents/{runner}-{pass}.json</code> naming <code>d</code> was written and stat’ed (<code>I_lm</code>) before P started its final lease listing, and no live lease returned by that listing names <code>d</code>.</td><td>—</td></tr>
+<tr><td>G4a</td><td>After the final lease read, P rewrites the intent with the same bytes and stats it (<code>T_end</code>); <code>T_end - I_lm &lt;= 19 s</code> (a 20 s budget minus 1 s of <code>LastModified</code> precision).</td><td>Object store</td></tr>
+<tr><td>G4b</td><td>Each DELETE is issued within 20 s of taking the boot-clock time just before that rewrite was sent; candidates past it are counted as <code>not_issued</code> and wait for the next pass. With G4a every DELETE is issued within 41 s of <code>I_lm</code>, inside the 45 s issue window.</td><td><code>CLOCK_BOOTTIME</code></td></tr>
+<tr><td>G5</td><td><code>T_end - T0 &lt;= 30 min - 1 s</code>, so the catalog listing and the end of the final lease read are at most 30 minutes apart.</td><td>Object store</td></tr>
+<tr><td>G6</td><td>Both lease reads found only live leases declaring <code>mode = "delete"</code>, and every catalog record parsed. Otherwise the pass degrades to a report pass: no intent (or its intent is removed) and no DELETE, outcome <code>degraded</code>.</td><td>—</td></tr>
+</tbody>
+</table>
+</div>
+<p>After its DELETEs, P removes its intent at once only when it issued none; otherwise it keeps the intent until 120 s after the intent write was acknowledged (boot clock), then removes it. A failed DELETE may still land later; a pass that issued any DELETE keeps the same hold whatever their outcomes, which keeps one rule. A pass that is interrupted keeps it; any runner removes intents at least 10 minutes old (object-store time).</p>
+<p>Node rules, in <code>delete</code> mode only:</p>
+<ul>
+<li><strong>N1.</strong> Before a process trusts that <code>managed-layers/{d}</code> exists, either <code>d</code> is verified (checked by an earlier N1 run and continuously in a lease key whose last successful write is under 12 h old on the boot clock), or, in order: a lease PUT carrying <code>d</code> was acknowledged at <code>t_L</code>; the process listed intents at <code>L &gt; t_L</code>; it slept 120 s if a listed intent names <code>d</code>; it HEADed <code>d</code> and refuses it when missing.</li>
+<li><strong>N2.</strong> <code>d</code> stays in the live set while anything on the node can read it, plus a 2-hour tail (boot clock), and leaves the lease only after a 5-minute debounce.</li>
+</ul>
+<h2 id="why-this-is-safe"><a class="header" href="#why-this-is-safe">Why this is safe</a></h2>
+<p>Assumptions:</p>
+<ul>
+<li><strong>A1.</strong> The store has strong read-after-write and list-after-write consistency (AWS S3 since December 2020, Alibaba Cloud OSS). A weaker S3-compatible store voids the argument.</li>
+<li><strong>A2 (rollout precondition).</strong> While any process runs <code>delete</code> on a bucket and prefix, every other process that reads its managed layers runs this release in <code>delete</code>, or in <code>report</code> with a live lease (which makes every delete pass degrade). <code>off</code> processes, older releases and other tools (<code>aenv-snapshot-image</code>) are invisible to the GC and must be excluded operationally; see Rollout.</li>
+<li><strong>A3.</strong> Every protocol write (lease PUTs, intent PUTs and DELETEs, lease DELETEs, managed-layer DELETEs) is a single request: the protocol’s object-store operator has no retry layer, so a reported success means that one request landed, and a failure (including a timeout) abandons the request, which may still land. The only second request is the credential-refresh path, sent after the store answered the first with permission denied, so the first never lands. A DELETE whose request failed lands, if at all, within 60 s after its 15 s timeout. SigV4’s 15-minute request validity bounds the worst case, since the one request is signed once.</li>
+<li><strong>A4 (liveness).</strong> A delete-mode process rewrites its lease at least every 24 h. Alerted on at 2 h and 6 h.</li>
+<li><strong>A5.</strong> <code>LastModified</code> has whole-second precision; every object-store comparison carries 1 s of slack.</li>
+</ul>
+<p>Suppose P deletes <code>d</code> at time <code>x</code>.</p>
+<ol>
+<li><strong>Gated readers.</strong> Let R trust <code>d</code>, with <code>d</code> durable in R’s lease from <code>t_L</code> (A4 keeps that key live). If <code>t_L</code> is before P’s final listing began, that listing read R’s lease after <code>t_L</code> and found <code>d</code>, so P skipped <code>d</code>. Every write that can land on that key after <code>t_L</code>, while R trusts <code>d</code> through it, carries <code>d</code>: R’s writes are serialized; an acknowledged PUT is a single request (A3), so no earlier attempt of an acknowledged write lands after it; and a write that fails abandons the key and leaves <code>d</code> trusted only if that write carried <code>d</code>. Otherwise <code>t_L</code> is after P’s intent was committed, and R’s intent listing at <code>L &gt; t_L</code> either saw P’s intent, so R HEADed <code>d</code> at least 120 s after <code>I_lm</code>, by which time every DELETE of P had landed (issued within 45 s of <code>I_lm</code>, timed out within 15 s more, landed within 60 s more by A3); or did not see it, because P issued no DELETE or removed it no earlier than 120 s after the intent write (after every landing). Either way R’s HEAD observes the deletion and R refuses <code>d</code>. If R trusted <code>d</code> because it was verified, apply the same argument to the N1 run that verified it.</li>
+<li><strong>Records.</strong> Let a committed record naming <code>d</code> exist at <code>x</code>. If it existed when P listed the catalog, P read <code>d</code> (G2). Otherwise it was written later by a publisher that, by A2 and G6, gates (a report-mode publisher has a live report lease, and P would have degraded). The publication made <code>d</code> durable at <code>t_P</code> before the record write <code>w</code> and held it until at least <code>w + 2 h</code>; P’s final lease read ended at most 30 minutes after the catalog listing (G5), which is before <code>w + 2 h</code>. If <code>t_P</code> precedes P’s final listing, P saw <code>d</code>; otherwise the publication’s gate ran after it and, as in step 1, observed the deletion and failed before the record was written.</li>
+<li><strong>Formats and grace.</strong> Unparsed records degrade the pass (G6); unknown fields in parsed records are covered by the raw scan; a committed record naming no digest aborts the pass. G1 is not needed for steps 1 and 2; it covers multipart uploads in progress (their <code>LastModified</code> is the initiation time) and writers outside the protocol.</li>
+</ol>
+<p>This is a Dekker pair: delete-mode nodes write their lease and then read intents; GC runners write their intent and then read leases.</p>
+<p><code>off</code> and <code>report</code> never delete a managed layer: <code>off</code> constructs no GC, and a report pass returns before the delete phase. Their only deletes are intents at least 10 minutes old and leases at least 7 days old (object-store time); such intents are past every landing bound and expired leases protect nothing.</p>
+<h2 id="clocks"><a class="header" href="#clocks">Clocks</a></h2>
+<ul>
+<li>Object-store times are compared only with object-store times: G1, G4a, G5, lease liveness and hygiene.</li>
+<li>In-process durations that bound safety use <code>CLOCK_BOOTTIME</code>, which keeps counting while the host is suspended or hibernated: G4b, the intent hold, the gate’s 12-hour freshness, the tail and the shrink debounce.</li>
+<li>Tokio sleeps are used only for waits (the node’s 120 s intent wait); a clock that stops only lengthens the real wait. The pass-level Tokio timeouts are liveness guards, not safety rules.</li>
+<li>Residual: no in-guest clock sees a hypervisor pause of a VM-hosted process. The object-store checks cover everything up to the pre-delete rewrite; a VM pause of a runner inside the 20 s delete phase, or of a node for more than 12 hours, is not covered.</li>
+<li>Residual: host suspend inside the delete phase, between a managed-layer DELETE’s G4b check and the request reaching the store. G4b reads the boot clock only when it starts each DELETE, and the 15 s request timeout runs on <code>CLOCK_MONOTONIC</code>, which stops during suspend, so after a long enough suspend the request can land after P’s own hold and after another runner removed the intent as stale, past the window nodes wait out. SigV4 validity bounds the delay to about 15 minutes after signing, since the request is never re-signed (A3), but that is longer than the 120 s nodes wait.</li>
+<li>Tonbo’s hosts are EC2 bare metal (<code>m6g.metal</code>), which cannot be paused, suspended or hibernated; deployments on VMs that can be paused, or on hosts that can suspend, depend on neither happening inside the delete phase.</li>
+</ul>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<p><code>[snapshot.layer_gc]</code> (see the <a href="../configuration/reference.html#snapshotlayer_gc">configuration reference</a>):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Default</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>mode</code></td><td><code>off</code></td><td><code>off</code>, <code>report</code> or <code>delete</code>. Env <code>AENV_SNAPSHOT_LAYER_GC_MODE</code>.</td></tr>
+<tr><td><code>interval_secs</code></td><td><code>3600</code></td><td>At least 300; ±10% jitter; the first pass runs at a random point 5 to 10 minutes after start.</td></tr>
+<tr><td><code>grace_secs</code></td><td><code>86400</code></td><td>At least 3600.</td></tr>
+<tr><td><code>max_deletes_per_pass</code></td><td><code>1000</code></td><td>1 to 10000; oldest candidates first.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Protocol constants live in code: lease TTL 24 h, liveness rewrite 1 h, shrink debounce 5 min, tail 2 h, gate freshness 12 h, intent wait 120 s, issue window 45 s (pre-delete budget 20 s, delete phase 20 s), request timeout 15 s, pass span 30 min, stale intents 10 min, stale leases 7 days.</p>
+<p>The GC runs inside the node server process; there is no separate worker. A runner skips its pass when another runner of at least its mode reported <code>ok</code> within half an interval (a <code>degraded</code> run counts as a report run). This is best effort and not needed for safety: intents are per pass, runners never write leases or records, and DELETE is idempotent.</p>
+<p>Each process start (for example every scale-to-zero wake) and each failed write creates a new lease key. Keys stay live for 24 h and any runner removes them after 7 days; in a versioned bucket every rewrite also leaves a noncurrent version for the bucket’s lifecycle window. A delete pass reads every live lease.</p>
+<h2 id="rollout-and-rollback"><a class="header" href="#rollout-and-rollback">Rollout and rollback</a></h2>
+<ol>
+<li>Every process that reads managed layers from a bucket and prefix must run this release in <code>report</code> or <code>delete</code> before any process enables <code>delete</code> (A2). <code>off</code> processes, older releases and <code>aenv-snapshot-image</code> are invisible to the GC. Verify with a read-only listing of <code>layer-gc/leases/</code> owners against the cell’s node inventory, and confirm that no other process or cluster generation reads the prefix.</li>
+<li>Order: <code>off</code> to <code>report</code> everywhere, then <code>delete</code> everywhere. Never <code>off</code> straight to <code>delete</code>.</li>
+<li>After switching to <code>delete</code>, passes stay <code>degraded</code> until every report-mode lease has expired, up to 24 h after the last report-mode write. The run report’s <code>non_gating_sample</code> lists the blocking keys.</li>
+<li>Rollback: <code>delete</code> to <code>report</code> everywhere first; only after no process runs <code>delete</code> may any process run <code>off</code> or an older release. Older releases ignore <code>layer-gc/</code> objects.</li>
+</ol>
+<p>Deletes use <code>DeleteObject</code> without a version id. In a versioned bucket the bytes stay as a noncurrent version under the bucket’s lifecycle rule; recovering a wrongly deleted layer means copying that version back (or removing the delete marker) with a principal that holds <code>GetObjectVersion</code>, which the node role does not. The run report and the per-layer audit log lines list what each pass deleted.</p>
+<h2 id="tonbo-cloud"><a class="header" href="#tonbo-cloud">Tonbo Cloud</a></h2>
+<p>Tonbo’s idle reclamation publishes every paused guest as a catalog record before its host leaves, and every wake restores from those records. Layers needed after a host is gone are therefore protected by records, not by that host’s lease; a lease only protects what its live process holds (running guests, persisted paused sandboxes, in-flight restores and publications). A host that is gone or stopped exports no metrics, so the lease-age alert below pairs with node-down alerting.</p>
+<h2 id="the-snapshot-image-export-tool"><a class="header" href="#the-snapshot-image-export-tool">The snapshot image export tool</a></h2>
+<p><code>aenv-snapshot-image</code> reads managed layers without a lease, and the grace period does not protect it (it only exempts objects younger than <code>grace_secs</code>). If its snapshot is deleted while it exports, a later delete pass may remove the layers and the export fails cleanly (<code>ManagedLayerNotFound</code>, or <code>IntegrityMismatch</code> on a short read). Export snapshots that are not being deleted.</p>
+<h2 id="observability-and-alerts"><a class="header" href="#observability-and-alerts">Observability and alerts</a></h2>
+<p>Every pass logs <code>snapshot layer gc pass complete</code> (warn on abort) with mode, runner, pass id, outcome, the degrade reason, duration and every count below; delete passes also log <code>snapshot layer gc deleted managed layer</code> per object (digest, size, <code>LastModified</code>). The run report <code>layer-gc/runs/{runner}.json</code> carries the same counts, up to 20 garbage digests, up to 20 non-gating lease keys and the full deleted list. Restores log the phase <code>managed_layers_gated</code> (outcome <code>fast</code>, <code>cold</code>, <code>intent_wait</code> or <code>failed</code>, and elapsed time); delete-mode publications log the same phase.</p>
+<p>Metrics on the node’s <code>/metrics</code>:</p>
+<ul>
+<li><code>agentenv_snapshot_layer_lease_age_seconds</code>: boot-clock seconds since this process’s last successful lease write, or since it started when it has none yet (so a process that never wrote its lease alerts too); normally under one hour.</li>
+<li><code>agentenv_snapshot_layer_lease_writes_total{reason,outcome}</code> (<code>reason</code> in <code>grow</code>, <code>shrink</code>, <code>liveness</code>, <code>cancelled</code>), <code>agentenv_snapshot_layer_lease_digests</code></li>
+<li><code>agentenv_snapshot_layer_gate_seconds{path,outcome}</code> and <code>agentenv_snapshot_layer_gate_failures_total{path,reason}</code> (<code>reason</code> in <code>lease</code>, <code>timeout</code>, <code>check</code>, <code>missing</code>) for <code>path</code> in <code>restore</code>, <code>publish</code>, <code>startup</code>, <code>resume</code> (delete mode only)</li>
+<li><code>agentenv_snapshot_layer_intent_waits_total{path}</code></li>
+<li><code>agentenv_snapshot_layer_gc_passes_total{mode,outcome}</code> with <code>outcome</code> in <code>ok</code>, <code>degraded</code>, <code>skipped</code>, <code>aborted</code></li>
+<li><code>agentenv_snapshot_layer_gc_non_gating_leases</code></li>
+<li><code>agentenv_snapshot_layer_gc_objects{class}</code> and <code>agentenv_snapshot_layer_gc_bytes{class}</code> for <code>referenced</code>, <code>leased</code>, <code>young</code>, <code>unrecognized</code> and <code>garbage</code></li>
+<li><code>agentenv_snapshot_layer_gc_deleted_objects_total</code>, <code>agentenv_snapshot_layer_gc_deleted_bytes_total</code>, <code>agentenv_snapshot_layer_gc_delete_failures_total</code>, <code>agentenv_snapshot_layer_gc_not_issued_total</code></li>
+<li><code>agentenv_snapshot_layer_gc_last_success_timestamp_seconds</code></li>
+<li><code>agentenv_snapshot_layer_retention_contended_total</code>: runtime refreshes that could not observe every sandbox and only grew the set</li>
+<li><code>agentenv_snapshot_layer_lease_unreadable_image_configs_total</code> (each such config is also logged at warn, at most hourly per path)</li>
+</ul>
+<p>Recommended alerts:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Condition</th><th>Severity</th></tr>
+</thead>
+<tbody>
+<tr><td><code>agentenv_snapshot_layer_lease_age_seconds &gt; 7200</code> for 15 min</td><td>Warn</td></tr>
+<tr><td><code>agentenv_snapshot_layer_lease_age_seconds &gt; 21600</code> (6 h, well under the 24 h TTL)</td><td>Page</td></tr>
+<tr><td><code>agentenv_snapshot_layer_lease_writes_total{outcome="error"}</code> increasing for 15 min with no <code>outcome="ok"</code> increase</td><td>Warn</td></tr>
+<tr><td>Restore gate p99 above the cold-restore budget, or gate failures for 15 min</td><td>Ticket</td></tr>
+<tr><td>Three consecutive <code>aborted</code> passes</td><td>Ticket</td></tr>
+<tr><td><code>degraded</code> passes more than 48 h after enabling <code>delete</code></td><td>Ticket</td></tr>
+<tr><td><code>agentenv_snapshot_layer_gc_last_success_timestamp_seconds</code> older than three intervals</td><td>Ticket</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="rules-for-new-code"><a class="header" href="#rules-for-new-code">Rules for new code</a></h2>
+<p>A path that reads managed layers must <code>hold()</code> them for as long as it relies on them and, when the leases are gating (<code>is_gating()</code>), <code>gate()</code> them before trusting that they exist, or be covered by the runtime set. Reference extraction lives only in <code>layer_refs.rs</code>. Records must keep naming their layers as <code>sha256:&lt;64 lowercase hex&gt;</code> tokens; a parseable record that names layers any other way is invisible to older runners and needs a coordinated runner change first.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../internals/persistence-artifact-inventory.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../internals/proxy-design.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../internals/persistence-artifact-inventory.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../internals/proxy-design.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-609e4cb8.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/version-selector-067fd7db.js"></script>
+        <script src="../mermaid-init-3bdacd7b.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

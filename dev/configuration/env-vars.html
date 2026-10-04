@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7685e5f4.js";
+            window.path_to_searchindex_js = "../searchindex-bb4fea61.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-c868df7a.js"></script>
+        <script src="../toc-83fad3c2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -224,6 +224,7 @@
 <tr><td><code>AENV_TOOLS_VERSION</code></td><td>bundled dependency manifest</td><td>Select the immutable tools-drive version, including a version imported from <code>AENV_TOOLS_DRIVE_PATH</code>.</td></tr>
 <tr><td><code>AENV_VIRTUALIZATION_MODE</code></td><td><code>kvm</code></td><td>Select the node virtualization mode. Leave unset for normal installations; set to <code>pvm</code> only when following the <a href="../deployment/pvm.html">PVM Deployment</a> guide.</td></tr>
 <tr><td><code>AENV_SNAPSHOT_LOCAL_CACHE_PATH</code></td><td><code>$AENV_HOME/snapshot-local-cache</code></td><td>Override the snapshot manager’s node-local artifact/cache root</td></tr>
+<tr><td><code>AENV_SNAPSHOT_LAYER_GC_MODE</code></td><td><code>off</code></td><td>Override <code>snapshot.layer_gc.mode</code> (<code>off</code>, <code>report</code> or <code>delete</code>); anything but <code>off</code> requires the OSS repository backend</td></tr>
 <tr><td><code>AENV_SNAPSHOT_STORE</code></td><td><code>$AENV_HOME/snapshot-store</code></td><td>Override the posix_fs snapshot repository root directory</td></tr>
 <tr><td><code>AENV_UBLK_DAEMON_BINARY_PATH</code></td><td><code>$AENV_HOME/ublk/uvm-ublk-daemon</code></td><td>Override path to the <code>uvm-ublk-daemon</code> binary</td></tr>
 <tr><td><code>AENV_UBLK_DAEMON_METRICS_LISTEN_ADDR</code></td><td><code>0.0.0.0:9103</code></td><td>Override ublk daemon Prometheus metrics listen address; empty string disables it</td></tr>
