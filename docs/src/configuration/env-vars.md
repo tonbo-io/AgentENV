@@ -35,6 +35,7 @@ These variables are consumed by the repository's Docker Compose and Kubernetes h
 | `AENV_TOOLS_VERSION` | bundled dependency manifest | Select the immutable tools-drive version, including a version imported from `AENV_TOOLS_DRIVE_PATH`. |
 | `AENV_VIRTUALIZATION_MODE` | `kvm` | Select the node virtualization mode. Leave unset for normal installations; set to `pvm` only when following the [PVM Deployment](../deployment/pvm.md) guide. |
 | `AENV_SNAPSHOT_LOCAL_CACHE_PATH` | `$AENV_HOME/snapshot-local-cache` | Override the snapshot manager's node-local artifact/cache root |
+| `AENV_SNAPSHOT_LAYER_GC_MODE` | `off` | Override `snapshot.layer_gc.mode` (`off`, `report` or `delete`); anything but `off` requires the OSS repository backend |
 | `AENV_SNAPSHOT_STORE` | `$AENV_HOME/snapshot-store` | Override the posix_fs snapshot repository root directory |
 | `AENV_UBLK_DAEMON_BINARY_PATH` | `$AENV_HOME/ublk/uvm-ublk-daemon` | Override path to the `uvm-ublk-daemon` binary |
 | `AENV_UBLK_DAEMON_METRICS_LISTEN_ADDR` | `0.0.0.0:9103` | Override ublk daemon Prometheus metrics listen address; empty string disables it |

@@ -17,6 +17,9 @@ use clap::Parser;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
+/// Bounds how long shutdown waits for in-flight managed-layer GC deletes.
+const LAYER_MAINTENANCE_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -137,7 +140,18 @@ async fn server_main() -> anyhow::Result<()> {
     )));
     let image_resolver = Arc::new(ImageResolver::new(config));
     let factory = FirecrackerSandboxFactory::with_cpu_config(Arc::clone(&cluster_cpu_arc));
-    let orchestrator = Orchestrator::with_file_backed_store_and_factory(factory).await?;
+    // The orchestrator leases the repository layers of persisted paused
+    // sandboxes before it returns; layer maintenance (lease refresher and,
+    // when configured, managed-layer GC) starts only afterwards.
+    let orchestrator = Orchestrator::with_file_backed_store_and_factory(
+        factory,
+        snapshot_manager.layer_retention(),
+    )
+    .await?;
+    let (layer_maintenance_shutdown_tx, layer_maintenance_shutdown_rx) =
+        tokio::sync::watch::channel(false);
+    let layer_maintenance_tasks =
+        snapshot_manager.start_layer_maintenance(layer_maintenance_shutdown_rx);
     let observability_config = &config.observability;
     let observability = if observability_config.enabled {
         Some(Arc::new(
@@ -192,6 +206,16 @@ async fn server_main() -> anyhow::Result<()> {
 
     let shutdown_cleanup = tokio::spawn(async move {
         if let Ok(()) = shutdown_rx.await {
+            info!(target: "agentenv", "stopping snapshot layer maintenance");
+            let _ = layer_maintenance_shutdown_tx.send(true);
+            let stopped = tokio::time::timeout(
+                LAYER_MAINTENANCE_STOP_TIMEOUT,
+                futures::future::join_all(layer_maintenance_tasks),
+            )
+            .await;
+            if stopped.is_err() {
+                warn!(target: "agentenv", "snapshot layer maintenance did not stop in time; continuing shutdown");
+            }
             if let Some(mut handle) = reporter.take() {
                 info!(target: "agentenv", "stopping observability reporter before process exit");
                 if let Err(err) = handle.shutdown().await {

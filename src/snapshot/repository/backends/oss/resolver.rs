@@ -9,6 +9,9 @@ use overlaybd::config::{DownloadConfig, LayerConfig};
 use tracing::{debug, info};
 
 use super::client::OssClient;
+use super::layer_leases::{LayerLeaseGuard, LayerLeases, ProtectPath};
+use super::layer_refs::{committed_managed_layer_digests, managed_layer_ref_digest};
+use super::layer_store::LayerStore;
 use super::layout::OssSnapshotArtifactLayout;
 use crate::image::cache::OverlaybdLayerStore;
 use crate::p2p::P2pTransport;
@@ -21,8 +24,9 @@ use crate::snapshot::runtime_support::{
 };
 use crate::snapshot::types::RuntimeArtifactLease;
 use crate::snapshot::{
-    CommittedAttachedDrive, OverlaybdLayerRef, RepositoryError, RepositoryResult,
-    ResolvedAttachedDrive, RunnableSnapshot, SnapshotId, SnapshotRecord, SNAPSHOT_ARTIFACT_LAYOUT,
+    CommittedAttachedDrive, CommittedSnapshot, OverlaybdLayerRef, RepositoryError,
+    RepositoryResult, ResolvedAttachedDrive, RunnableSnapshot, SnapshotId, SnapshotRecord,
+    SNAPSHOT_ARTIFACT_LAYOUT,
 };
 
 const MANAGED_LAYER_EXISTS_CONCURRENCY: usize = 16;
@@ -32,6 +36,96 @@ struct MaterializeSpec<'a> {
     cache_key: &'a str,
     allow_empty_layers: bool,
     download: Option<DownloadConfig>,
+    /// The resolve already checked every managed layer under its lease.
+    layers_checked: bool,
+}
+
+/// Keeps a resolved snapshot's node-local cache entries and its managed-layer
+/// lease alive for as long as the [`RunnableSnapshot`] lives.
+struct OssRuntimeLease {
+    _cache: CacheArtifactLease,
+    _layers: LayerLeaseGuard,
+}
+
+impl RuntimeArtifactLease for OssRuntimeLease {}
+
+/// Indexed managed-layer digests of every subject a committed snapshot reads
+/// from this repository's `managed-layers/`, labelled like materialization
+/// errors.
+fn managed_layer_checks(
+    committed: &CommittedSnapshot,
+    managed_layers_repo_blob_url: &str,
+) -> Vec<(String, Vec<(usize, String)>)> {
+    let refs = |layers: &[OverlaybdLayerRef]| {
+        layers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, layer)| {
+                managed_layer_ref_digest(layer, managed_layers_repo_blob_url)
+                    .map(|digest| (index, digest.to_string()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut checks = vec![
+        ("rootfs".to_string(), refs(&committed.rootfs_layers)),
+        (
+            "memory".to_string(),
+            committed
+                .memory_layers
+                .iter()
+                .enumerate()
+                .map(|(index, layer)| (index, layer.digest.clone()))
+                .collect(),
+        ),
+    ];
+    for drive in &committed.attached_drives {
+        match drive {
+            CommittedAttachedDrive::Overlaybd {
+                drive_id, layers, ..
+            } => checks.push((format!("drive '{drive_id}'"), refs(layers))),
+        }
+    }
+    if let Some(tools_drive) = &committed.tools_drive {
+        checks.push((
+            "tools drive".to_string(),
+            vec![(0, tools_drive.digest.clone())],
+        ));
+    }
+    checks.retain(|(_, layers)| !layers.is_empty());
+    checks
+}
+
+/// Lease every managed layer a committed snapshot reads before trusting that
+/// any of them exists (GC rule N1), then check them unless they were already
+/// checked while continuously leased. Returns the guard and whether this call
+/// checked every layer.
+async fn protect_snapshot_layers(
+    leases: &Arc<LayerLeases>,
+    id: &SnapshotId,
+    committed: &CommittedSnapshot,
+    managed_layers_repo_blob_url: &str,
+) -> RepositoryResult<(LayerLeaseGuard, bool)> {
+    let digests = committed_managed_layer_digests(committed, managed_layers_repo_blob_url);
+    let mut guard = leases
+        .protect(digests, ProtectPath::Restore)
+        .await
+        .map_err(|error| {
+            RepositoryError::backend(format!("lease managed layers of snapshot '{id}'"), error)
+        })?;
+    if !guard.needs_verification() {
+        return Ok((guard, false));
+    }
+    let checks = managed_layer_checks(committed, managed_layers_repo_blob_url);
+    futures::future::try_join_all(checks.iter().map(|(label, layers)| {
+        let store = Arc::clone(leases.store());
+        validate_managed_layers(layers, label, move |key| {
+            let store = Arc::clone(&store);
+            async move { Ok(store.stat_object(&key).await?.is_some()) }
+        })
+    }))
+    .await?;
+    guard.mark_verified();
+    Ok((guard, true))
 }
 
 async fn validate_managed_layers<F, Fut>(
@@ -71,6 +165,7 @@ pub(crate) struct OssRuntimeResolver {
     image_materializer: RuntimeImageMaterializer,
     managed_layers_repo_blob_url: String,
     p2p_transport: Option<Arc<dyn P2pTransport>>,
+    leases: Arc<LayerLeases>,
 }
 
 impl OssRuntimeResolver {
@@ -85,6 +180,7 @@ impl OssRuntimeResolver {
         store: Arc<dyn OverlaybdLayerStore>,
         managed_layers_repo_blob_url: String,
         p2p_transport: Option<Arc<dyn P2pTransport>>,
+        leases: Arc<LayerLeases>,
     ) -> RepositoryResult<Self> {
         Ok(Self {
             client,
@@ -92,7 +188,18 @@ impl OssRuntimeResolver {
             image_materializer: RuntimeImageMaterializer::new(runtime_root, store),
             managed_layers_repo_blob_url,
             p2p_transport,
+            leases,
         })
+    }
+
+    /// Record which managed layers each materialized runtime image config
+    /// names, so the node lease keeps covering them after the evictable cache
+    /// file is gone.
+    fn record_image_configs(&self, digests: &std::collections::BTreeSet<String>, paths: &[&Path]) {
+        for path in paths {
+            self.leases
+                .record_image_config(path.to_path_buf(), digests.clone());
+        }
     }
 }
 
@@ -110,6 +217,13 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
         let layout = self.layout(&id);
         let mut handles: Vec<CacheHandle> = Vec::new();
         let resolve_started = Instant::now();
+        let (layer_guard, layers_checked) = protect_snapshot_layers(
+            &self.leases,
+            &id,
+            committed,
+            &self.managed_layers_repo_blob_url,
+        )
+        .await?;
         let memory_layers: Vec<OverlaybdLayerRef> = committed
             .memory_layers
             .iter()
@@ -135,6 +249,7 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
                         cache_key: &cache_key,
                         allow_empty_layers: true,
                         download: None,
+                        layers_checked,
                     },
                     &mut branch_handles,
                 )
@@ -153,6 +268,7 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
                         cache_key: &cache_key,
                         allow_empty_layers: false,
                         download: None,
+                        layers_checked,
                     },
                     &mut branch_handles,
                 )
@@ -162,7 +278,12 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
         let attached = async {
             let mut branch_handles = Vec::new();
             let drives = self
-                .resolve_attached_drives(&id, &committed.attached_drives, &mut branch_handles)
+                .resolve_attached_drives(
+                    &id,
+                    &committed.attached_drives,
+                    layers_checked,
+                    &mut branch_handles,
+                )
                 .await?;
             Ok::<_, RepositoryError>((drives, branch_handles))
         };
@@ -200,11 +321,26 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
             "snapshot runtime resolution phase completed"
         );
 
+        let mut config_paths = vec![
+            mem_image_config_path.as_path(),
+            rootfs_image_config_path.as_path(),
+        ];
+        config_paths.extend(attached_drives.iter().map(|drive| match drive {
+            ResolvedAttachedDrive::Overlaybd {
+                image_config_path, ..
+            } => image_config_path.as_path(),
+        }));
+        self.record_image_configs(layer_guard.digests(), &config_paths);
+
         // Runtime artifacts are protected by the sandbox start-window lease (over
         // local-only commits) + the orchestrator running set; the resolved-handle
-        // needs no separate local image ref pin.
-        let cache_lease: Arc<dyn RuntimeArtifactLease> =
-            Arc::new(CacheArtifactLease { _handles: handles });
+        // needs no separate local image ref pin. The managed-layer lease guard
+        // keeps the remote layers leased until the launch hands over to the
+        // runtime set.
+        let cache_lease: Arc<dyn RuntimeArtifactLease> = Arc::new(OssRuntimeLease {
+            _cache: CacheArtifactLease { _handles: handles },
+            _layers: layer_guard,
+        });
 
         let runtime_manifest = hydrate_runtime_manifest(
             committed_manifest,
@@ -322,7 +458,13 @@ impl OssRuntimeResolver {
                 let download = download.clone();
                 async move {
                     let path = self
-                        .materialize_image_config(layers, &dest, spec.label, download)
+                        .materialize_image_config(
+                            layers,
+                            &dest,
+                            spec.label,
+                            download,
+                            spec.layers_checked,
+                        )
                         .await
                         .map_err(anyhow::Error::new)?;
                     tokio::fs::metadata(&path)
@@ -343,28 +485,32 @@ impl OssRuntimeResolver {
         Ok(path)
     }
 
-    /// Verify remote managed layers exist, build an `ImageConfig`, and write it.
+    /// Verify remote managed layers exist (unless this resolve already checked
+    /// them under its lease), build an `ImageConfig`, and write it.
     async fn materialize_image_config(
         &self,
         layers: &[OverlaybdLayerRef],
         destination: &Path,
         label: &str,
         download: Option<DownloadConfig>,
+        layers_checked: bool,
     ) -> RepositoryResult<PathBuf> {
-        let managed_layers = layers
-            .iter()
-            .enumerate()
-            .filter_map(|(index, layer)| match layer {
-                OverlaybdLayerRef::Managed(layer) => Some((index, layer.digest.clone())),
-                OverlaybdLayerRef::External(_) => None,
+        if !layers_checked {
+            let managed_layers = layers
+                .iter()
+                .enumerate()
+                .filter_map(|(index, layer)| {
+                    managed_layer_ref_digest(layer, &self.managed_layers_repo_blob_url)
+                        .map(|digest| (index, digest.to_string()))
+                })
+                .collect::<Vec<_>>();
+            let client = Arc::clone(&self.client);
+            validate_managed_layers(&managed_layers, label, move |key| {
+                let client = Arc::clone(&client);
+                async move { client.exists(&key).await }
             })
-            .collect::<Vec<_>>();
-        let client = Arc::clone(&self.client);
-        validate_managed_layers(&managed_layers, label, move |key| {
-            let client = Arc::clone(&client);
-            async move { client.exists(&key).await }
-        })
-        .await?;
+            .await?;
+        }
 
         self.image_materializer
             .materialize_image_config(
@@ -389,6 +535,7 @@ impl OssRuntimeResolver {
         &self,
         id: &SnapshotId,
         committed_drives: &[CommittedAttachedDrive],
+        layers_checked: bool,
         handles: &mut Vec<CacheHandle>,
     ) -> RepositoryResult<Vec<ResolvedAttachedDrive>> {
         let mut drives = Vec::new();
@@ -425,6 +572,7 @@ impl OssRuntimeResolver {
                                 ),
                                 allow_empty_layers: false,
                                 download: None,
+                                layers_checked,
                             },
                             handles,
                         )
@@ -510,6 +658,100 @@ mod tests {
 
     fn digest(index: usize) -> String {
         format!("sha256:{index:064x}")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolve_protects_before_validating_and_validates_external_managed_refs() {
+        use super::super::layer_store::fake::{FakeLayerStore, OpKind};
+        use super::super::layout::{LAYER_GC_INTENTS_PREFIX, LAYER_GC_LEASES_PREFIX};
+        use crate::snapshot::{ExternalLayer, ManagedLayer};
+
+        const MANAGED_URL: &str = "s3://bucket/prefix/managed-layers";
+        let mut committed = CommittedSnapshot::mock();
+        committed.rootfs_layers = vec![
+            OverlaybdLayerRef::Managed(ManagedLayer {
+                digest: digest(1),
+                size: 1,
+                uuid: None,
+            }),
+            OverlaybdLayerRef::External(ExternalLayer {
+                digest: digest(2),
+                repo_blob_url: format!("{MANAGED_URL}/"),
+                size: 1,
+            }),
+            OverlaybdLayerRef::External(ExternalLayer {
+                digest: digest(3),
+                repo_blob_url: "https://registry.example/v2/ns/image/blobs".to_string(),
+                size: 1,
+            }),
+        ];
+        committed.memory_layers = vec![ManagedLayer {
+            digest: digest(4),
+            size: 1,
+            uuid: None,
+        }];
+        let id = SnapshotId::generate();
+        let store = Arc::new(FakeLayerStore::new());
+        for index in [1, 2, 4] {
+            store.insert(
+                &OssSnapshotArtifactLayout::managed_layer_key(&digest(index)),
+                vec![0u8],
+            );
+        }
+        let leases = LayerLeases::new(Arc::clone(&store) as Arc<dyn LayerStore>, "node");
+
+        let (guard, checked) = protect_snapshot_layers(&leases, &id, &committed, MANAGED_URL)
+            .await
+            .expect("resolve protection");
+        assert!(checked);
+        let ops = store.ops();
+        let put = ops
+            .iter()
+            .position(|op| op.kind == OpKind::Put && op.key.starts_with(LAYER_GC_LEASES_PREFIX))
+            .expect("lease put");
+        let list = ops
+            .iter()
+            .position(|op| op.kind == OpKind::List && op.key == LAYER_GC_INTENTS_PREFIX)
+            .expect("intent list");
+        let stats = ops
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.kind == OpKind::Stat)
+            .collect::<Vec<_>>();
+        assert!(put < list);
+        assert!(stats.iter().all(|(index, _)| *index > list));
+        let stat_keys = stats
+            .iter()
+            .map(|(_, op)| op.key.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [1, 2, 4]
+            .into_iter()
+            .map(|index| OssSnapshotArtifactLayout::managed_layer_key(&digest(index)))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(stat_keys, expected, "registry layers are not checked");
+        assert_eq!(
+            guard.digests(),
+            &[1, 2, 4].into_iter().map(digest).collect()
+        );
+
+        // Warm: already checked while continuously leased.
+        store.clear_ops();
+        let (_warm, checked) = protect_snapshot_layers(&leases, &id, &committed, MANAGED_URL)
+            .await
+            .expect("warm resolve protection");
+        assert!(!checked);
+        assert!(store.ops().is_empty());
+
+        // A missing external managed-URL layer fails the resolve cleanly.
+        let other = LayerLeases::new(Arc::clone(&store) as Arc<dyn LayerStore>, "other");
+        store.remove(&OssSnapshotArtifactLayout::managed_layer_key(&digest(2)));
+        let error = protect_snapshot_layers(&other, &id, &committed, MANAGED_URL)
+            .await
+            .expect_err("missing layer");
+        assert!(
+            matches!(&error, RepositoryError::ArtifactNotFound { artifact } if artifact.contains(&digest(2))),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

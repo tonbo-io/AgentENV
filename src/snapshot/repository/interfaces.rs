@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -198,4 +199,35 @@ pub trait SnapshotRepository: Send + Sync {
 pub trait SnapshotRuntimeResolver: Send + Sync {
     /// Resolves one committed snapshot record into a runtime-ready view for the current node.
     async fn resolve(&self, snapshot: Arc<SnapshotRecord>) -> RepositoryResult<RunnableSnapshot>;
+}
+
+#[async_trait]
+/// Keeps the repository layers that this node's sandboxes read protected from
+/// repository garbage collection.
+///
+/// Backends whose shared layers are collected (OSS managed layers) lease every
+/// layer named by the overlaybd image configs of the node's running and paused
+/// sandboxes; other backends use [`NoopLayerRetention`]. Paths are opaque
+/// overlaybd `image.json` files (rootfs, attached drives and memory).
+pub trait SnapshotLayerRetention: Send + Sync {
+    /// Lease the layers of paused sandboxes restored from local persistence
+    /// before the node serves requests. Errors mean the layers are not yet
+    /// protected; callers log and rely on the periodic refresh.
+    async fn protect_persisted_image_configs(&self, paths: Vec<PathBuf>) -> anyhow::Result<()>;
+
+    /// Replace the set of image configs read by running and paused sandboxes.
+    async fn set_runtime_image_configs(&self, paths: Vec<PathBuf>);
+}
+
+/// Layer retention for backends without shared-layer collection.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopLayerRetention;
+
+#[async_trait]
+impl SnapshotLayerRetention for NoopLayerRetention {
+    async fn protect_persisted_image_configs(&self, _paths: Vec<PathBuf>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn set_runtime_image_configs(&self, _paths: Vec<PathBuf>) {}
 }

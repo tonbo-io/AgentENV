@@ -110,6 +110,11 @@ pub struct SandboxForkSpec {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeArtifactSet {
     overlaybd_image_config_paths: Vec<PathBuf>,
+    /// Memory overlaybd image configs. The local image cache does not track
+    /// them (their layers are never local commits), but repository layer
+    /// retention must: a resumed guest faults memory pages from remote
+    /// managed layers for its whole lifetime.
+    memory_image_config_paths: Vec<PathBuf>,
 }
 
 impl RuntimeArtifactSet {
@@ -123,15 +128,34 @@ impl RuntimeArtifactSet {
     pub(crate) fn from_overlaybd_image_configs(overlaybd_image_config_paths: Vec<PathBuf>) -> Self {
         Self {
             overlaybd_image_config_paths,
+            memory_image_config_paths: Vec::new(),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.overlaybd_image_config_paths.is_empty()
+    /// Add the memory image config the sandbox reads, if any.
+    pub(crate) fn with_memory_image_config(mut self, path: Option<PathBuf>) -> Self {
+        self.memory_image_config_paths.extend(path);
+        self
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.overlaybd_image_config_paths.is_empty() && self.memory_image_config_paths.is_empty()
+    }
+
+    /// Image configs whose local-only layers the image cache must keep.
+    /// Memory configs are deliberately excluded.
     pub(crate) fn into_overlaybd_image_config_paths(self) -> Vec<PathBuf> {
         self.overlaybd_image_config_paths
+    }
+
+    /// Every overlaybd image config (rootfs, attached drives and memory)
+    /// whose repository layers must stay retained while the sandbox lives.
+    pub(crate) fn repository_image_config_paths(&self) -> Vec<PathBuf> {
+        self.overlaybd_image_config_paths
+            .iter()
+            .chain(&self.memory_image_config_paths)
+            .cloned()
+            .collect()
     }
 }
 
