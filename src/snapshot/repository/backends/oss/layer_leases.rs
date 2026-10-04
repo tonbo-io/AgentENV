@@ -17,7 +17,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -28,8 +28,10 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-use super::layer_refs::{image_config_digests, raw_digest_tokens};
-use super::layer_store::LayerStore;
+use super::layer_refs::{
+    image_config_digests, image_config_managed_layer_digests, raw_digest_tokens,
+};
+use super::layer_store::{LayerStore, StoredObject};
 use super::layout::{OssSnapshotArtifactLayout, LAYER_GC_INTENTS_PREFIX};
 use crate::snapshot::repository::interfaces::SnapshotLayerRetention;
 
@@ -42,9 +44,11 @@ pub(crate) const LEASE_LIVENESS_REWRITE: Duration = Duration::from_secs(60 * 60)
 pub(crate) const LEASE_SHRINK_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 /// Refresher tick for liveness and shrink rewrites.
 pub(crate) const LEASE_REFRESH_TICK: Duration = Duration::from_secs(60);
-/// After this long without a successful write the owner rotates to a new
-/// lease key, so a key the GC may have removed is never written again.
-pub(crate) const LEASE_ROTATE_AFTER: Duration = Duration::from_secs(12 * 60 * 60);
+/// The lease content counts as durable for the warm-path checks only while
+/// the last successful write is younger than this (half the TTL). The
+/// refresher rewrites the lease at least hourly, so this only bites when
+/// writes keep failing.
+pub(crate) const LEASE_FRESH_FOR: Duration = Duration::from_secs(12 * 60 * 60);
 /// Digests stay leased this long after their last holder released them.
 pub(crate) const LEASE_TAIL: Duration = Duration::from_secs(2 * 60 * 60);
 /// D_max: how long a node waits after seeing an intent that names a digest it
@@ -55,6 +59,12 @@ pub(crate) const INTENT_WAIT: Duration = Duration::from_secs(120);
 pub(crate) const STORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 const LEASE_STALE_ERROR_AGE: Duration = Duration::from_secs(60 * 60);
+/// GC intents older than this, relative to this node's lease, belong to
+/// finished or crashed passes whose deletion window closed long ago. Matches
+/// the GC's stale-intent cleanup age.
+pub(crate) const STALE_INTENT_AGE: Duration = Duration::from_secs(10 * 60);
+/// How often one unreadable, unrecorded runtime image config is logged.
+const UNREADABLE_CONFIG_WARN_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const INTENT_READ_CONCURRENCY: usize = 16;
 const LAYER_CHECK_CONCURRENCY: usize = 16;
 const LEASE_DOCUMENT_VERSION: u32 = 1;
@@ -147,8 +157,11 @@ struct RecordedConfig {
 }
 
 struct LeaseState {
+    /// Lease key generation. A failed write may still land later with older
+    /// content, so every failure moves to a new key: a late landing can then
+    /// only touch an abandoned key, which merely over-protects until it
+    /// expires.
     generation: u32,
-    generation_started: Instant,
     /// Digests read by running and paused sandboxes on this node.
     runtime: BTreeSet<String>,
     /// Digests of runtime image configs materialized by the resolver, so the
@@ -170,13 +183,14 @@ struct LeaseState {
     verified: HashSet<String>,
     last_success: Option<Instant>,
     shrink_pending_since: Option<Instant>,
+    /// When each unreadable, unrecorded runtime image config was last logged.
+    unreadable_warned: HashMap<PathBuf, Instant>,
 }
 
 impl LeaseState {
-    fn new(now: Instant) -> Self {
+    fn new() -> Self {
         Self {
             generation: 0,
-            generation_started: now,
             runtime: BTreeSet::new(),
             recorded_configs: HashMap::new(),
             guards: HashMap::new(),
@@ -186,6 +200,7 @@ impl LeaseState {
             verified: HashSet::new(),
             last_success: None,
             shrink_pending_since: None,
+            unreadable_warned: HashMap::new(),
         }
     }
 
@@ -199,7 +214,7 @@ impl LeaseState {
 
     fn durable_and_fresh(&self, digests: &BTreeSet<String>, now: Instant) -> bool {
         self.last_success
-            .is_some_and(|last| now.duration_since(last) < LEASE_ROTATE_AFTER)
+            .is_some_and(|last| now.duration_since(last) < LEASE_FRESH_FOR)
             && self
                 .durable
                 .as_ref()
@@ -221,6 +236,9 @@ pub(crate) struct LayerLeases {
     node_id: String,
     instance: String,
     owner: String,
+    /// repoBlobUrl of this repository's `managed-layers/`, to tell remote
+    /// managed lowers apart from local and foreign ones.
+    managed_layers_repo_blob_url: String,
     state: Mutex<LeaseState>,
     /// Serializes lease writes; callers queued behind a write re-check
     /// whether it already covered them (coalescing).
@@ -254,7 +272,11 @@ fn sanitize_key_component(value: &str) -> String {
 }
 
 impl LayerLeases {
-    pub(crate) fn new(store: Arc<dyn LayerStore>, node_id: &str) -> Arc<Self> {
+    pub(crate) fn new(
+        store: Arc<dyn LayerStore>,
+        node_id: &str,
+        managed_layers_repo_blob_url: &str,
+    ) -> Arc<Self> {
         let instance = uuid::Uuid::now_v7().simple().to_string();
         let owner = format!("{}-{}", sanitize_key_component(node_id), instance);
         Arc::new(Self {
@@ -262,7 +284,8 @@ impl LayerLeases {
             node_id: node_id.to_string(),
             instance,
             owner,
-            state: Mutex::new(LeaseState::new(Instant::now())),
+            managed_layers_repo_blob_url: managed_layers_repo_blob_url.to_string(),
+            state: Mutex::new(LeaseState::new()),
             writer: tokio::sync::Mutex::new(()),
         })
     }
@@ -369,6 +392,21 @@ impl LayerLeases {
         );
     }
 
+    /// Whether an unreadable, unrecorded image config should be logged now
+    /// (at most once per path per [`UNREADABLE_CONFIG_WARN_INTERVAL`]).
+    fn should_warn_unreadable(&self, path: &Path) -> bool {
+        let now = Instant::now();
+        let mut state = self.lock_state();
+        state.unreadable_warned.retain(|_, warned_at| {
+            now.duration_since(*warned_at) < UNREADABLE_CONFIG_WARN_INTERVAL
+        });
+        if state.unreadable_warned.contains_key(path) {
+            return false;
+        }
+        state.unreadable_warned.insert(path.to_path_buf(), now);
+        true
+    }
+
     fn image_config_paths_digests(&self, paths: &[PathBuf]) -> BTreeSet<String> {
         let recorded = {
             let state = self.lock_state();
@@ -392,11 +430,13 @@ impl LayerLeases {
                             "agentenv_snapshot_layer_lease_unreadable_image_configs_total"
                         )
                         .increment(1);
-                        debug!(
-                            path = %path.display(),
-                            error = %format!("{error:#}"),
-                            "runtime image config unreadable and not recorded; its layers are not leased"
-                        );
+                        if self.should_warn_unreadable(path) {
+                            warn!(
+                                path = %path.display(),
+                                error = %format!("{error:#}"),
+                                "runtime image config unreadable and not recorded; its layers leave the lease after the tail"
+                            );
+                        }
                     }
                 }
             }
@@ -441,18 +481,67 @@ impl LayerLeases {
         }
     }
 
-    /// Lease the layers of paused sandboxes restored from local persistence,
-    /// before the node serves requests.
-    pub(crate) async fn protect_persisted_image_configs(&self, paths: Vec<PathBuf>) -> Result<()> {
+    /// Rule N1 for paused sandboxes restored from local persistence: lease
+    /// every layer their image configs name, wait out any GC intent naming
+    /// them, then check that every remote managed lower exists. Returns the
+    /// configs that read a missing managed layer; their sandboxes must not
+    /// resume. Configs that cannot be read are not checked (their resume
+    /// fails opening them anyway).
+    pub(crate) async fn protect_persisted_image_configs(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<PathBuf>> {
         let digests = self.image_config_paths_digests(&paths);
         if digests.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         self.lock_state().runtime.extend(digests.iter().cloned());
         self.ensure_durable(&digests)
             .await
             .context("lease persisted paused sandbox layers")?;
-        self.wait_for_intents(&digests, ProtectPath::Startup).await
+        self.wait_for_intents(&digests, ProtectPath::Startup)
+            .await?;
+
+        let managed = paths
+            .into_iter()
+            .filter_map(|path| {
+                match image_config_managed_layer_digests(&path, &self.managed_layers_repo_blob_url)
+                {
+                    Ok(managed) => Some((path, managed)),
+                    Err(error) => {
+                        debug!(
+                            path = %path.display(),
+                            error = %format!("{error:#}"),
+                            "persisted image config unreadable; not checking its managed layers"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let to_check = managed
+            .iter()
+            .flat_map(|(_, digests)| digests.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let missing = missing_managed_layers(&self.store, &to_check)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let present = to_check
+            .difference(&missing)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        self.mark_verified(&present);
+        if !missing.is_empty() {
+            warn!(
+                missing = ?missing,
+                "managed layers of persisted paused sandboxes are missing; those sandboxes cannot resume"
+            );
+        }
+        Ok(managed
+            .into_iter()
+            .filter(|(_, digests)| !digests.is_disjoint(&missing))
+            .map(|(path, _)| path)
+            .collect())
     }
 
     async fn ensure_durable(&self, required: &BTreeSet<String>) -> Result<()> {
@@ -492,6 +581,14 @@ impl LayerLeases {
             let age = state.last_success.map(|last| now.duration_since(last));
             if let Some(age) = age {
                 metrics::gauge!("agentenv_snapshot_layer_lease_age_seconds").set(age.as_secs_f64());
+            }
+            // Only a strict shrink that persists starts or keeps the debounce.
+            if !state
+                .durable
+                .as_ref()
+                .is_some_and(|durable| live.is_subset(durable) && live != *durable)
+            {
+                state.shrink_pending_since = None;
             }
             match state.durable.as_ref() {
                 None => Some(WriteReason::Liveness),
@@ -536,22 +633,6 @@ impl LayerLeases {
         let (key, digests, last_success) = {
             let mut guard = self.lock_state();
             let state = &mut *guard;
-            // Measured from the later of the last success and the current
-            // key's start, so a fresh key is not rotated again at once.
-            let since = state.last_success.map_or(state.generation_started, |last| {
-                last.max(state.generation_started)
-            });
-            if now.duration_since(since) >= LEASE_ROTATE_AFTER {
-                state.generation += 1;
-                state.generation_started = now;
-                state.durable = None;
-                state.verified.clear();
-                warn!(
-                    owner = %self.owner,
-                    generation = state.generation,
-                    "managed-layer lease not written for half its TTL; rotating to a new lease key"
-                );
-            }
             let digests = state.live_set(now);
             state.inflight = Some(digests.clone());
             (
@@ -601,10 +682,13 @@ impl LayerLeases {
             }
             Err(error) => {
                 // A failed (for example timed-out) write may still land later
-                // and replace the previous content, so nothing counts as
-                // durable or verified until the next successful write.
+                // and replace the key's content with this older set. Abandon
+                // the key: the next write goes to a new key, the old one only
+                // over-protects until it expires, and nothing counts as
+                // durable or verified until a write to the new key succeeds.
                 state.durable = None;
                 state.verified.clear();
+                state.generation += 1;
                 drop(guard);
                 let age = last_success.map(|last| now.duration_since(last));
                 if age.is_none_or(|age| age >= LEASE_STALE_ERROR_AGE) {
@@ -629,14 +713,28 @@ impl LayerLeases {
     }
 
     /// List live GC intents and wait out the deletion window when one of
-    /// them names any of `digests`.
+    /// them names any of `digests`. Intents older than [`STALE_INTENT_AGE`]
+    /// relative to this node's lease (object-store time on both sides) are
+    /// ignored: their deletion window closed long ago, and a pass that kept
+    /// one after a failed DELETE, or crashed, must not slow every later
+    /// restore down while no runner cleans it up (for example after GC was
+    /// switched off).
     async fn wait_for_intents(&self, digests: &BTreeSet<String>, path: ProtectPath) -> Result<()> {
-        let intents = with_timeout(
+        let mut intents = with_timeout(
             "list managed-layer GC intents",
             self.store.list_objects(LAYER_GC_INTENTS_PREFIX),
         )
         .await
         .context("list managed-layer GC intents")?;
+        if intents.is_empty() {
+            return Ok(());
+        }
+        if let Some(reference) = self.lease_last_modified().await {
+            let stale_before = reference
+                .checked_sub(STALE_INTENT_AGE)
+                .unwrap_or(std::time::UNIX_EPOCH);
+            intents.retain(|intent| intent.last_modified >= stale_before);
+        }
         let store = &self.store;
         let named = stream::iter(intents)
             .map(|intent| async move {
@@ -670,6 +768,20 @@ impl LayerLeases {
             tokio::time::sleep(INTENT_WAIT).await;
         }
         Ok(())
+    }
+
+    /// Object-store `LastModified` of this node's current lease, if it can be
+    /// read. Only used to age intents; any failure keeps every intent.
+    async fn lease_last_modified(&self) -> Option<std::time::SystemTime> {
+        let key = self.lease_key();
+        match with_timeout("stat managed-layer lease", self.store.stat_object(&key)).await {
+            Ok(Some(StoredObject { last_modified, .. })) => Some(last_modified),
+            Ok(None) => None,
+            Err(error) => {
+                debug!(lease = %key, error = %format!("{error:#}"), "could not stat own managed-layer lease");
+                None
+            }
+        }
     }
 
     #[cfg(test)]
@@ -724,26 +836,41 @@ pub(crate) async fn protect_and_check(
         .await
         .map_err(LayerCheckError::Protect)?;
     if always_check || guard.needs_verification() {
-        let store = leases.store();
-        let results = stream::iter(guard.digests().iter().cloned())
-            .map(|digest| async move {
-                let key = OssSnapshotArtifactLayout::managed_layer_key(&digest);
-                let present = with_timeout("check managed layer", store.stat_object(&key)).await;
-                (digest, present)
-            })
-            .buffer_unordered(LAYER_CHECK_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
-        for (digest, present) in results {
-            match present {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(LayerCheckError::Missing { digest }),
-                Err(error) => return Err(LayerCheckError::Check { digest, error }),
-            }
+        let missing = missing_managed_layers(leases.store(), guard.digests()).await?;
+        if let Some(digest) = missing.into_iter().next() {
+            return Err(LayerCheckError::Missing { digest });
         }
         guard.mark_verified();
     }
     Ok(guard)
+}
+
+/// Stat every digest under `managed-layers/` and return the missing ones.
+/// Fails on the first check that errors.
+async fn missing_managed_layers(
+    store: &Arc<dyn LayerStore>,
+    digests: &BTreeSet<String>,
+) -> std::result::Result<BTreeSet<String>, LayerCheckError> {
+    let results = stream::iter(digests.iter().cloned())
+        .map(|digest| async move {
+            let key = OssSnapshotArtifactLayout::managed_layer_key(&digest);
+            let present = with_timeout("check managed layer", store.stat_object(&key)).await;
+            (digest, present)
+        })
+        .buffer_unordered(LAYER_CHECK_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    let mut missing = BTreeSet::new();
+    for (digest, present) in results {
+        match present {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                missing.insert(digest);
+            }
+            Err(error) => return Err(LayerCheckError::Check { digest, error }),
+        }
+    }
+    Ok(missing)
 }
 
 /// Holds digests in the node lease until dropped; they then stay in the
@@ -790,7 +917,7 @@ impl Drop for LayerLeaseGuard {
 
 #[async_trait::async_trait]
 impl SnapshotLayerRetention for LayerLeases {
-    async fn protect_persisted_image_configs(&self, paths: Vec<PathBuf>) -> Result<()> {
+    async fn protect_persisted_image_configs(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
         LayerLeases::protect_persisted_image_configs(self, paths).await
     }
 
@@ -808,12 +935,18 @@ mod tests {
     use super::super::layout::LAYER_GC_LEASES_PREFIX as LAYER_GC_LEASES_PREFIX_FOR_TESTS;
     use super::*;
 
+    const MANAGED_URL: &str = "s3://bucket/prefix/managed-layers";
+
     fn digests(indexes: &[usize]) -> BTreeSet<String> {
         indexes.iter().copied().map(test_digest).collect()
     }
 
     fn leases(store: &Arc<FakeLayerStore>) -> Arc<LayerLeases> {
-        LayerLeases::new(Arc::clone(store) as Arc<dyn LayerStore>, "node/a")
+        LayerLeases::new(
+            Arc::clone(store) as Arc<dyn LayerStore>,
+            "node/a",
+            MANAGED_URL,
+        )
     }
 
     fn lease_body(store: &FakeLayerStore, leases: &LayerLeases) -> BTreeSet<String> {
@@ -1005,23 +1138,17 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn lease_key_rotates_after_half_ttl_without_a_successful_write() {
+    async fn failed_lease_write_moves_to_a_new_key_and_never_rewrites_the_old_one() {
         let store = Arc::new(FakeLayerStore::new());
         let leases = leases(&store);
         leases.maintain().await;
         let first_key = leases.lease_key();
         assert!(store.contains(&first_key));
 
+        // A failed write may land later with older content, so the key is
+        // abandoned at once.
         store.fail(OpKind::Put, LAYER_GC_LEASES_PREFIX_FOR_TESTS);
-        tokio::time::advance(LEASE_ROTATE_AFTER - Duration::from_secs(60)).await;
-        leases.maintain().await;
-        assert_eq!(
-            leases.lease_key(),
-            first_key,
-            "no rotation before half the TTL"
-        );
-
-        tokio::time::advance(Duration::from_secs(120)).await;
+        tokio::time::advance(LEASE_LIVENESS_REWRITE).await;
         leases.maintain().await;
         let rotated = leases.lease_key();
         assert_ne!(rotated, first_key);
@@ -1031,5 +1158,95 @@ mod tests {
         store.clear_failures();
         leases.maintain().await;
         assert!(store.contains(&rotated));
+
+        store.clear_ops();
+        tokio::time::advance(LEASE_LIVENESS_REWRITE).await;
+        leases.maintain().await;
+        let puts = store
+            .ops()
+            .into_iter()
+            .filter(|op| op.kind == OpKind::Put)
+            .map(|op| op.key)
+            .collect::<Vec<_>>();
+        assert_eq!(puts, vec![rotated], "only the new key is written");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_intents_do_not_delay_protect() {
+        let store = Arc::new(FakeLayerStore::new());
+        let leases = leases(&store);
+        intent_naming(&store, "crashed-pass", &digests(&[1]));
+        tokio::time::advance(STALE_INTENT_AGE + Duration::from_secs(60)).await;
+
+        let started = Instant::now();
+        let _guard = leases
+            .protect(digests(&[1]), ProtectPath::Restore)
+            .await
+            .expect("protect");
+        assert!(
+            started.elapsed() < INTENT_WAIT,
+            "an intent older than the stale age is ignored"
+        );
+    }
+
+    fn write_image_config(path: &std::path::Path, lowers: serde_json::Value) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+                "repoBlobUrl": MANAGED_URL,
+                "lowers": lowers,
+                "upper": {},
+                "resultFile": ""
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persisted_configs_are_leased_checked_and_missing_ones_reported() {
+        let store = Arc::new(FakeLayerStore::new());
+        let leases = leases(&store);
+        let temp = tempfile::tempdir().unwrap();
+        let present = temp.path().join("present.json");
+        let missing = temp.path().join("missing.json");
+        write_image_config(
+            &present,
+            serde_json::json!([
+                { "digest": test_digest(1), "size": 1, "dir": "/cache/1" },
+                { "file": "/local/upper.commit", "digest": test_digest(3), "size": 3 }
+            ]),
+        );
+        write_image_config(
+            &missing,
+            serde_json::json!([{ "digest": test_digest(2), "size": 2, "dir": "/cache/2" }]),
+        );
+        store.insert(
+            &OssSnapshotArtifactLayout::managed_layer_key(&test_digest(1)),
+            vec![0u8],
+        );
+
+        let reported = leases
+            .protect_persisted_image_configs(vec![present.clone(), missing.clone()])
+            .await
+            .expect("protect persisted");
+        assert_eq!(reported, vec![missing]);
+        assert_eq!(lease_body(&store, &leases), digests(&[1, 2, 3]));
+        let local_key = OssSnapshotArtifactLayout::managed_layer_key(&test_digest(3));
+        assert!(
+            !store
+                .ops()
+                .iter()
+                .any(|op| op.kind == OpKind::Stat && op.key == local_key),
+            "local lowers are not checked remotely"
+        );
+
+        store.clear_ops();
+        let warm = leases
+            .protect(digests(&[1]), ProtectPath::Restore)
+            .await
+            .expect("warm protect");
+        assert!(!warm.needs_verification(), "present layers are verified");
+        assert!(store.ops().is_empty());
     }
 }

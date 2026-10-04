@@ -13,7 +13,7 @@ use crate::image::cache::local_image_services_from_app_config;
 use crate::p2p::P2pTransport;
 use crate::snapshot::artifact_cache::LocalArtifactCache;
 use crate::snapshot::repository::interfaces::{SnapshotRepository, SnapshotRuntimeResolver};
-pub use oss::OssBackend;
+pub use oss::{OssBackend, OssLayerGcPassSummary, OssLayerGcProbe};
 pub use posixfs::{PosixFsBackend, PosixFsBackendConfig};
 
 /// A configured snapshot backend: repository, runtime resolver and, for the

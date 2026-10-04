@@ -225,6 +225,34 @@ pub(crate) fn image_config_digests(path: &Path) -> Result<BTreeSet<String>> {
     Ok(digests)
 }
 
+/// Digests an overlaybd `image.json` reads remotely from this repository's
+/// `managed-layers/`: lowers without a local `file` whose effective
+/// repoBlobUrl is `managed_layers_repo_blob_url`. These are the objects that
+/// must exist before a paused sandbox using the config resumes; local lowers
+/// (`file=`) and other registries are not checked.
+pub(crate) fn image_config_managed_layer_digests(
+    path: &Path,
+    managed_layers_repo_blob_url: &str,
+) -> Result<BTreeSet<String>> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read overlaybd image config '{}'", path.display()))?;
+    let config = serde_json::from_slice::<ImageConfig>(&bytes)
+        .with_context(|| format!("parse overlaybd image config '{}'", path.display()))?;
+    Ok(config
+        .lowers
+        .iter()
+        .filter(|layer| {
+            layer.file.is_empty()
+                && is_managed_digest(&layer.digest)
+                && same_repo_blob_url(
+                    layer.effective_repo_blob_url(&config.repo_blob_url),
+                    managed_layers_repo_blob_url,
+                )
+        })
+        .map(|layer| layer.digest.clone())
+        .collect())
+}
+
 #[cfg(test)]
 pub(crate) fn test_digest(index: usize) -> String {
     format!("sha256:{index:064x}")
@@ -402,5 +430,41 @@ mod tests {
             assert_eq!(digests, expected, "{name}");
         }
         assert!(image_config_digests(&temp.path().join("missing.json")).is_err());
+    }
+
+    #[test]
+    fn image_config_managed_layer_digests_keeps_only_remote_managed_lowers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("image.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "repoBlobUrl": MANAGED_URL,
+                "lowers": [
+                    // Remote through the image-level managed URL.
+                    { "digest": test_digest(1), "size": 1, "dir": "/cache/1" },
+                    // Remote through a per-layer managed URL (trailing slash).
+                    { "digest": test_digest(2), "size": 2, "repoBlobUrl": format!("{MANAGED_URL}/") },
+                    // Local commit: never checked remotely.
+                    { "file": "/local/layer.commit", "digest": test_digest(3), "size": 3 },
+                    // Another registry.
+                    { "digest": test_digest(4), "size": 4, "repoBlobUrl": "https://registry.example/v2/repo/blobs" },
+                    // Not a managed digest.
+                    { "digest": "sha256:short", "size": 5 }
+                ],
+                "upper": {},
+                "resultFile": ""
+            }))
+            .expect("serialize image config"),
+        )
+        .expect("write image config");
+        assert_eq!(
+            image_config_managed_layer_digests(&path, MANAGED_URL).expect("managed digests"),
+            BTreeSet::from([test_digest(1), test_digest(2)])
+        );
+        assert!(
+            image_config_managed_layer_digests(&temp.path().join("missing.json"), MANAGED_URL)
+                .is_err()
+        );
     }
 }

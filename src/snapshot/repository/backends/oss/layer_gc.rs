@@ -35,7 +35,8 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::layer_leases::{
-    sleep_or_shutdown, with_timeout, LayerLeases, INTENT_WAIT, LEASE_TTL, STORE_REQUEST_TIMEOUT,
+    sleep_or_shutdown, with_timeout, LayerLeases, INTENT_WAIT, LEASE_TTL, STALE_INTENT_AGE,
+    STORE_REQUEST_TIMEOUT,
 };
 use super::layer_refs::{managed_key_digest, raw_digest_tokens, record_digests};
 use super::layer_store::{LayerStore, StoredObject};
@@ -52,13 +53,14 @@ pub(crate) const INTENT_ISSUE_WINDOW: Duration = Duration::from_secs(45);
 /// P_max: maximum span from the catalog listing to the end of the final lease
 /// read. Must stay below the lease tail (2 h).
 pub(crate) const PASS_MAX_SPAN: Duration = Duration::from_secs(30 * 60);
-/// Intents older than this (object-store time) belong to finished or crashed
-/// passes and are removed by any runner.
-pub(crate) const STALE_INTENT_AGE: Duration = Duration::from_secs(10 * 60);
 /// Leases older than this (object-store time) are removed by any runner.
-/// Their owners rotate to a new key long before.
+/// Live keys are rewritten at least hourly, and a key abandoned after a
+/// failed write is never written again.
 pub(crate) const STALE_LEASE_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// First pass after process start, off the wake-critical path.
+/// Latest first pass after process start, off the wake-critical path. The
+/// actual delay is drawn from the upper half of this bound so nodes that wake
+/// together do not all run their first pass at once, while a 15-minute wake
+/// still gets a pass.
 pub(crate) const FIRST_PASS_DELAY: Duration = Duration::from_secs(10 * 60);
 
 const RECORD_READ_CONCURRENCY: usize = 16;
@@ -124,6 +126,9 @@ pub(crate) struct LayerGcReport {
     pub(crate) deleted_objects: u64,
     pub(crate) deleted_bytes: u64,
     pub(crate) delete_failures: u64,
+    /// Delete candidates left for the next pass because the issue window
+    /// (G4) closed or shutdown began before their DELETE was issued.
+    pub(crate) not_issued: u64,
     pub(crate) stale_intents_removed: u64,
     pub(crate) stale_leases_removed: u64,
     pub(crate) garbage_sample: Vec<String>,
@@ -210,8 +215,9 @@ impl LayerGc {
         self.settings.mode == SnapshotLayerGcMode::Delete
     }
 
-    /// Run passes until shutdown: the first after [`FIRST_PASS_DELAY`], then
-    /// every interval with ±10% jitter.
+    /// Run passes until shutdown: the first after a random delay between half
+    /// of and the full [`FIRST_PASS_DELAY`], then every interval with ±10%
+    /// jitter.
     pub(crate) async fn run(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
         if self.settings.mode == SnapshotLayerGcMode::Off {
             return;
@@ -224,7 +230,8 @@ impl LayerGc {
             max_deletes_per_pass = self.settings.max_deletes_per_pass,
             "snapshot layer gc started"
         );
-        if sleep_or_shutdown(FIRST_PASS_DELAY, &mut shutdown).await {
+        let first_delay = FIRST_PASS_DELAY.mul_f64(rand::rng().random_range(0.5..=1.0));
+        if sleep_or_shutdown(first_delay, &mut shutdown).await {
             return;
         }
         loop {
@@ -311,6 +318,8 @@ impl LayerGc {
             .increment(report.deleted_bytes);
         metrics::counter!("agentenv_snapshot_layer_gc_delete_failures_total")
             .increment(report.delete_failures);
+        metrics::counter!("agentenv_snapshot_layer_gc_not_issued_total")
+            .increment(report.not_issued);
 
         macro_rules! pass_line {
             ($level:ident) => {
@@ -338,6 +347,7 @@ impl LayerGc {
                     deleted_objects = report.deleted_objects,
                     deleted_bytes = report.deleted_bytes,
                     delete_failures = report.delete_failures,
+                    not_issued = report.not_issued,
                     stale_intents_removed = report.stale_intents_removed,
                     stale_leases_removed = report.stale_leases_removed,
                     "snapshot layer gc pass complete"
@@ -404,7 +414,11 @@ impl LayerGc {
             mut leased,
         }) = classified
         else {
-            // Report mode: classification is the whole pass.
+            // Report mode deletes no managed layer, but it still removes
+            // stale protocol objects so that intents and leases left behind
+            // (for example after switching back from delete mode) do not
+            // accumulate.
+            self.remove_stale_protocol_objects(report, t0).await;
             return Ok(Completion::Done);
         };
 
@@ -694,7 +708,6 @@ impl LayerGc {
             .await;
 
         let mut deleted = Vec::new();
-        let mut not_issued = 0u64;
         for (digest, object, outcome) in outcomes {
             match outcome {
                 Some(Ok(())) => {
@@ -719,14 +732,14 @@ impl LayerGc {
                         "snapshot layer gc failed to delete managed layer"
                     );
                 }
-                None => not_issued += 1,
+                None => report.not_issued += 1,
             }
         }
-        if not_issued > 0 {
-            info!(
-                not_issued,
+        if report.not_issued > 0 {
+            warn!(
+                not_issued = report.not_issued,
                 window_secs = INTENT_ISSUE_WINDOW.as_secs(),
-                "snapshot layer gc left candidates for the next pass"
+                "snapshot layer gc issue window closed before every delete was issued; the rest wait for the next pass"
             );
         }
         deleted.sort_by(|left, right| {
@@ -871,7 +884,7 @@ mod tests {
         settings: LayerGcSettings,
     ) -> (Arc<LayerLeases>, LayerGc) {
         let dyn_store = Arc::clone(store) as Arc<dyn LayerStore>;
-        let leases = LayerLeases::new(Arc::clone(&dyn_store), node);
+        let leases = LayerLeases::new(Arc::clone(&dyn_store), node, MANAGED_URL);
         let gc = LayerGc::new(dyn_store, Arc::clone(&leases), settings);
         (leases, gc)
     }
@@ -881,7 +894,7 @@ mod tests {
     }
 
     fn node(store: &Arc<FakeLayerStore>, name: &str) -> Arc<LayerLeases> {
-        LayerLeases::new(Arc::clone(store) as Arc<dyn LayerStore>, name)
+        LayerLeases::new(Arc::clone(store) as Arc<dyn LayerStore>, name, MANAGED_URL)
     }
 
     fn running() -> watch::Receiver<bool> {
@@ -1228,6 +1241,10 @@ mod tests {
         assert_eq!(report.outcome, "ok");
         assert_eq!(report.deleted_objects, 32);
         assert_eq!(report.delete_failures, 0);
+        assert_eq!(
+            report.not_issued, 8,
+            "candidates past the window are counted"
+        );
         assert_eq!(store.keys(MANAGED_LAYERS_PREFIX).len(), 8);
 
         let store = Arc::new(FakeLayerStore::new());
@@ -1249,39 +1266,78 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stale_intents_and_week_old_leases_are_cleaned_but_fresh_ones_are_not() {
+    async fn final_lease_read_beyond_p_max_aborts_after_the_intent_and_removes_it() {
         let store = Arc::new(FakeLayerStore::new());
-        put_intent(
-            &store,
-            "crashed",
-            &[1],
-            STALE_INTENT_AGE + Duration::from_secs(60),
+        put_layer(&store, 1, OLD);
+        let gc = Arc::new(gc(&store, SnapshotLayerGcMode::Delete));
+        let mut pause = store.pause(OpKind::Put, LAYER_GC_INTENTS_PREFIX);
+        let pass = tokio::spawn({
+            let gc = Arc::clone(&gc);
+            async move {
+                let shutdown = running();
+                gc.run_pass(&shutdown).await
+            }
+        });
+        // The intent write is reached after classification; from now on the
+        // final lease listing takes longer than the whole pass may.
+        pause.reached().await;
+        store.set_latency(
+            OpKind::List,
+            LAYER_GC_LEASES_PREFIX,
+            PASS_MAX_SPAN + Duration::from_secs(60),
         );
-        put_intent(&store, "running", &[2], Duration::from_secs(5 * 60));
-        put_lease(&store, "gone", &[3], STALE_LEASE_AGE + HOUR);
-        put_lease(&store, "expired", &[4], 2 * LEASE_TTL);
+        pause.release();
+        let report = pass.await.unwrap();
 
-        let report = gc(&store, SnapshotLayerGcMode::Report)
-            .run_pass(&running())
-            .await;
-        assert_eq!(
-            report.stale_intents_removed + report.stale_leases_removed,
-            0
+        assert!(
+            report.outcome.contains("pass span exceeded"),
+            "{}",
+            report.outcome
         );
-        assert_eq!(store.keys(LAYER_GC_INTENTS_PREFIX).len(), 2);
+        assert!(has_layer(&store, 1), "no delete after a G5 abort");
+        assert!(position(&store.ops(), OpKind::Delete, MANAGED_LAYERS_PREFIX).is_none());
+        assert!(
+            position(&store.ops(), OpKind::Put, LAYER_GC_INTENTS_PREFIX).is_some(),
+            "the intent was written"
+        );
+        assert!(
+            store.keys(LAYER_GC_INTENTS_PREFIX).is_empty(),
+            "the aborted pass removes its intent"
+        );
+    }
 
-        let report = gc(&store, SnapshotLayerGcMode::Delete)
-            .run_pass(&running())
-            .await;
-        assert_eq!(report.outcome, "ok");
-        assert_eq!(report.stale_intents_removed, 1);
-        assert_eq!(report.stale_leases_removed, 1);
-        assert_eq!(
-            store.keys(LAYER_GC_INTENTS_PREFIX),
-            vec![format!("{LAYER_GC_INTENTS_PREFIX}running.json")]
-        );
-        assert!(!store.contains(&format!("{LAYER_GC_LEASES_PREFIX}gone.json")));
-        assert!(store.contains(&format!("{LAYER_GC_LEASES_PREFIX}expired.json")));
+    #[tokio::test(start_paused = true)]
+    async fn stale_intents_and_week_old_leases_are_cleaned_in_every_mode_but_fresh_ones_are_not() {
+        for mode in [SnapshotLayerGcMode::Report, SnapshotLayerGcMode::Delete] {
+            let store = Arc::new(FakeLayerStore::new());
+            put_intent(
+                &store,
+                "crashed",
+                &[1],
+                STALE_INTENT_AGE + Duration::from_secs(60),
+            );
+            put_intent(&store, "running", &[2], Duration::from_secs(5 * 60));
+            put_lease(&store, "gone", &[3], STALE_LEASE_AGE + HOUR);
+            put_lease(&store, "expired", &[4], 2 * LEASE_TTL);
+            put_layer(&store, 5, OLD);
+
+            let report = gc(&store, mode).run_pass(&running()).await;
+            assert_eq!(report.outcome, "ok", "{mode:?}");
+            assert_eq!(report.stale_intents_removed, 1, "{mode:?}");
+            assert_eq!(report.stale_leases_removed, 1, "{mode:?}");
+            assert_eq!(
+                store.keys(LAYER_GC_INTENTS_PREFIX),
+                vec![format!("{LAYER_GC_INTENTS_PREFIX}running.json")],
+                "{mode:?}"
+            );
+            assert!(!store.contains(&format!("{LAYER_GC_LEASES_PREFIX}gone.json")));
+            assert!(store.contains(&format!("{LAYER_GC_LEASES_PREFIX}expired.json")));
+            assert_eq!(
+                has_layer(&store, 5),
+                mode == SnapshotLayerGcMode::Report,
+                "{mode:?}: only delete mode removes managed layers"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1533,7 +1589,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn crash_after_intent_write_leaves_stale_intent_that_forces_slow_path_until_cleaned() {
+    async fn crash_after_intent_write_forces_slow_path_until_the_intent_is_stale_then_cleans_it() {
         let store = Arc::new(FakeLayerStore::new());
         put_intent(&store, "crashed-runner-pass", &[5], Duration::ZERO);
 
@@ -1547,18 +1603,21 @@ mod tests {
             "stale intent forces the slow path"
         );
 
+        // Once the intent is older than the stale age, nodes ignore it even
+        // while no runner removes it (for example with GC switched off).
         store.advance_s3_clock(STALE_INTENT_AGE + Duration::from_secs(60));
-        let report = gc(&store, SnapshotLayerGcMode::Delete)
-            .run_pass(&running())
-            .await;
-        assert_eq!(report.stale_intents_removed, 1);
-
         let started = Instant::now();
         let _guard = node(&store, "node-b")
             .protect(BTreeSet::from([test_digest(5)]), ProtectPath::Restore)
             .await
             .expect("protect");
-        assert!(started.elapsed() < INTENT_WAIT, "fast again once cleaned");
+        assert!(started.elapsed() < INTENT_WAIT, "fast again once stale");
+
+        let report = gc(&store, SnapshotLayerGcMode::Report)
+            .run_pass(&running())
+            .await;
+        assert_eq!(report.stale_intents_removed, 1);
+        assert!(store.keys(LAYER_GC_INTENTS_PREFIX).is_empty());
     }
 
     /// Shared state of one randomized run.
@@ -1618,8 +1677,12 @@ mod tests {
         let node_leases = [node(&store, "node-a"), node(&store, "node-b")];
         // Grace 0: every unreferenced object is a candidate immediately, so
         // safety rests on the protocol alone.
+        // A short interval keeps the duplicate-work skip window (half the
+        // interval) below the spacing of most passes, so the two runners
+        // genuinely overlap instead of skipping each other.
         let gc_settings = LayerGcSettings {
             grace: Duration::ZERO,
+            interval: Duration::from_secs(120),
             ..settings(SnapshotLayerGcMode::Delete)
         };
         let (_, gc_a) = gc_with(&store, "gc-a", gc_settings.clone());

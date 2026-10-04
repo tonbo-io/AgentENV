@@ -64,6 +64,33 @@ impl MinioFixture {
         Ok(result.is_ok())
     }
 
+    pub async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<()> {
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(body.into())
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// Keys under `prefix` (first page of up to 1000 keys).
+    pub async fn list_keys(&self, prefix: &str) -> Result<Vec<String>> {
+        let output = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .send()
+            .await?;
+        Ok(output
+            .contents()
+            .iter()
+            .filter_map(|object| object.key().map(str::to_string))
+            .collect())
+    }
+
     pub fn object_url(&self, key: &str) -> String {
         format!(
             "s3://{}/{}?endpoint={}&region={}",

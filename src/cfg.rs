@@ -1498,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_gc_config_defaults_and_validation() -> Result<()> {
+    fn layer_gc_config_defaults_env_override_and_validation() -> Result<()> {
         let config = AppConfig::default();
         let gc = &config.snapshot.layer_gc;
         assert_eq!(gc.mode, SnapshotLayerGcMode::Off);
@@ -1549,6 +1549,24 @@ mod tests {
                 "{body}: unexpected error {error:#}"
             );
         }
+
+        // AENV_SNAPSHOT_LAYER_GC_MODE overrides the file: a file asking for
+        // "report" on the POSIX backend (rejected above) loads with the
+        // variable set to "off". Only "off" is set here, so concurrently
+        // loading tests never see a mode they would reject.
+        std::fs::write(&path, "[snapshot.layer_gc]\nmode = \"report\"\n")?;
+        // SAFETY: no other test sets or relies on this variable.
+        unsafe {
+            std::env::set_var("AENV_SNAPSHOT_LAYER_GC_MODE", "off");
+        }
+        let loaded = ConfigManager::new_from_path(&path);
+        unsafe {
+            std::env::remove_var("AENV_SNAPSHOT_LAYER_GC_MODE");
+        }
+        assert_eq!(
+            loaded?.config().snapshot.layer_gc.mode,
+            SnapshotLayerGcMode::Off
+        );
         Ok(())
     }
 

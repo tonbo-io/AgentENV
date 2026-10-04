@@ -259,7 +259,7 @@ workers = 1
 # docs/src/internals/snapshot-layer-gc.md before enabling "delete".
 # [snapshot.layer_gc]
 # mode = "off"                  # "off" | "report" | "delete"; env AENV_SNAPSHOT_LAYER_GC_MODE
-# interval_secs = 3600          # >= 300, ±10% jitter; first pass 10 min after start
+# interval_secs = 3600          # >= 300, ±10% jitter; first pass 5-10 min after start
 # grace_secs = 86400            # >= 3600
 # max_deletes_per_pass = 1000   # 1..=10000
 

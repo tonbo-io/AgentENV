@@ -75,7 +75,73 @@ impl OssLayerMaintenance {
     }
 }
 
+/// Runs managed-layer GC passes on demand against a backend's object store,
+/// sharing that backend's node lease. For integration tests against a real
+/// S3-compatible store only: production passes run from the GC loop with
+/// validated settings.
+#[doc(hidden)]
+pub struct OssLayerGcProbe {
+    leases: Arc<LayerLeases>,
+}
+
+/// Outcome of one probe pass (a subset of the run report).
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct OssLayerGcPassSummary {
+    /// `ok`, `skipped` or `aborted:<reason>`.
+    pub outcome: String,
+    pub referenced_objects: u64,
+    pub leased_only_objects: u64,
+    pub young_objects: u64,
+    pub garbage_objects: u64,
+    pub garbage_sample: Vec<String>,
+    /// Digests deleted by the pass.
+    pub deleted: Vec<String>,
+}
+
+impl OssLayerGcProbe {
+    /// Run one pass in `mode` with `grace` as the minimum object age.
+    pub async fn run_pass(
+        &self,
+        mode: SnapshotLayerGcMode,
+        grace: std::time::Duration,
+    ) -> OssLayerGcPassSummary {
+        let gc = LayerGc::new(
+            Arc::clone(self.leases.store()),
+            Arc::clone(&self.leases),
+            LayerGcSettings {
+                mode,
+                interval: std::time::Duration::from_secs(3600),
+                grace,
+                max_deletes_per_pass: 1000,
+            },
+        );
+        let report = gc.run_pass(&watch::channel(false).1).await;
+        OssLayerGcPassSummary {
+            outcome: report.outcome,
+            referenced_objects: report.referenced_objects,
+            leased_only_objects: report.leased_only_objects,
+            young_objects: report.young_objects,
+            garbage_objects: report.garbage_objects,
+            garbage_sample: report.garbage_sample,
+            deleted: report
+                .deleted
+                .into_iter()
+                .map(|layer| layer.digest)
+                .collect(),
+        }
+    }
+}
+
 impl OssBackend {
+    /// GC probe sharing this backend's lease; see [`OssLayerGcProbe`].
+    #[doc(hidden)]
+    pub fn layer_gc_probe(&self) -> OssLayerGcProbe {
+        OssLayerGcProbe {
+            leases: Arc::clone(&self.layers.leases),
+        }
+    }
+
     /// Build the OSS backend from config.
     ///
     /// This convenience constructor remains available for tests and direct
@@ -138,7 +204,11 @@ impl OssBackend {
         )?);
 
         let layer_store = Arc::clone(&client) as Arc<dyn LayerStore>;
-        let leases = LayerLeases::new(Arc::clone(&layer_store), node_id);
+        let leases = LayerLeases::new(
+            Arc::clone(&layer_store),
+            node_id,
+            &managed_layers_repo_blob_url,
+        );
         let gc = Arc::new(LayerGc::new(
             layer_store,
             Arc::clone(&leases),

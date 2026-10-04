@@ -431,8 +431,8 @@ Collection of OSS managed layers (`managed-layers/sha256:*`) that no catalog rec
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mode` | string | `"off"` | `off` runs no passes. `report` classifies every managed layer (referenced, leased, young, unrecognized, garbage) and writes a run report and metrics without deleting anything. `delete` additionally deletes garbage layers under the deletion-intent protocol. |
-| `interval_secs` | integer | `3600` | Seconds between passes, with ±10% jitter. The first pass runs 10 minutes after process start. Minimum `300`. |
+| `mode` | string | `"off"` | `off` runs no passes. `report` classifies every managed layer (referenced, leased, young, unrecognized, garbage) and writes a run report and metrics without deleting any managed layer; like `delete`, it removes stale GC intents and week-old leases. `delete` additionally deletes garbage layers under the deletion-intent protocol. |
+| `interval_secs` | integer | `3600` | Seconds between passes, with ±10% jitter. The first pass runs at a random point 5 to 10 minutes after process start. Minimum `300`. |
 | `grace_secs` | integer | `86400` | Only objects whose object-store `LastModified` is older than this are collected. Minimum `3600`. |
 | `max_deletes_per_pass` | integer | `1000` | Upper bound on deletions (and deletion-intent size) per pass, oldest first. Valid range `1..=10000`. |
 

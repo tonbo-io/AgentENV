@@ -698,7 +698,11 @@ mod tests {
                 vec![0u8],
             );
         }
-        let leases = LayerLeases::new(Arc::clone(&store) as Arc<dyn LayerStore>, "node");
+        let leases = LayerLeases::new(
+            Arc::clone(&store) as Arc<dyn LayerStore>,
+            "node",
+            MANAGED_URL,
+        );
 
         let (guard, checked) = protect_snapshot_layers(&leases, &id, &committed, MANAGED_URL)
             .await
@@ -743,7 +747,11 @@ mod tests {
         assert!(store.ops().is_empty());
 
         // A missing external managed-URL layer fails the resolve cleanly.
-        let other = LayerLeases::new(Arc::clone(&store) as Arc<dyn LayerStore>, "other");
+        let other = LayerLeases::new(
+            Arc::clone(&store) as Arc<dyn LayerStore>,
+            "other",
+            MANAGED_URL,
+        );
         store.remove(&OssSnapshotArtifactLayout::managed_layer_key(&digest(2)));
         let error = protect_snapshot_layers(&other, &id, &committed, MANAGED_URL)
             .await

@@ -15,7 +15,7 @@ A pass recomputes holders from scratch; there are no persistent counters to drif
   - active guards: a restore's guard lives in the `RunnableSnapshot` until launch completes (template builds hold their base snapshot through publication); a publication's pre-commit guard covers its record write;
   - a 2-hour tail of every digest that left the runtime set or lost its last guard, which bridges hand-offs (guard dropped before the next runtime refresh, pause and detach, a record written after a GC's catalog read).
 
-  The resolver records which digests each materialized runtime image config names, so an evicted memory config in the local artifact cache still contributes its digests. A lease is live while its object-store `LastModified` is within 24 h of the GC's reference time. The owner rewrites it on growth (immediately, coalesced), on shrink (after 5 minutes), and at least hourly; after 12 hours without a successful write it rotates to a new key, so a key a GC runner may have removed is never written again.
+  The resolver records which digests each materialized runtime image config names, so an evicted memory config in the local artifact cache still contributes its digests. A lease is live while its object-store `LastModified` is within 24 h of the GC's reference time. The owner rewrites it on growth (immediately, coalesced), on shrink (after 5 minutes), and at least hourly. A write that fails (for example times out) may still land later with older content, so the owner abandons that key and writes the next lease to a new key; the abandoned key can only over-protect until it expires, and a key a GC runner may have removed is never written again.
 
 ## Deletion rule
 
@@ -31,7 +31,7 @@ A pass P deletes `managed-layers/{d}` only if all of these hold:
 
 Node rules:
 
-- **N1.** Before a node trusts that `managed-layers/{d}` exists (restore, writing a record that names `d`, resuming persisted paused state), `d` is durable in its lease, the node has listed intents, and when a live intent names `d` it has waited 120 s. Only then does it check `d`, failing cleanly (restore: `ArtifactNotFound`; publication: a retryable backend error before any record exists) when it is missing. Digests checked earlier and continuously leased since skip the lease write, the intent listing and the check.
+- **N1.** Before a node trusts that `managed-layers/{d}` exists (restore, writing a record that names `d`, resuming persisted paused state), `d` is durable in its lease, the node has listed intents, and when a live intent names `d` it has waited 120 s. Only then does it check `d`, failing cleanly when it is missing: a restore fails with `ArtifactNotFound`; a publication fails with a retryable backend error before any record exists; a paused sandbox restored from local persistence whose remote managed lower is missing (or whose startup check could not run) is not resumed: its resume re-checks and fails before the VM starts until the layer is present. Digests checked earlier and continuously leased since skip the lease write, the intent listing and the check. Intents older than 10 minutes relative to the node's own lease (object-store time on both sides) are ignored: their deletion window closed long ago.
 - **N2.** `d` stays in the lease while anything on the node can read it, and for 2 hours after.
 
 ### Why this is safe
@@ -44,7 +44,7 @@ Suppose P deletes `d` at time `x`.
 
 This is a Dekker pair over a store with strong read-after-write and list-after-write consistency (AWS S3 since December 2020, Alibaba Cloud OSS): nodes write their lease and then read intents; GC runners write their intent and then read leases. A weaker S3-compatible store invalidates the argument. Correctness never compares two clocks: object ages and lease liveness compare object-store `LastModified` values with the object-store time of the runner's own lease, and every other bound is a monotonic duration within one process. The grace period is not needed for the argument; it protects writers outside the protocol (older releases during a rollout, the `aenv-snapshot-image` export tool) and multipart uploads, whose `LastModified` is their initiation time.
 
-A crash leaves at most a stale intent: nodes take the 120 s slow path for the digests it names until any runner removes intents older than 10 minutes. Concurrent runners are safe: intents are per pass, runners never write leases or records, and DELETE is idempotent. A runner skips its pass when another runner of at least its mode reported success within half an interval (best effort, not needed for safety).
+A crash leaves at most a stale intent: nodes take the 120 s slow path for the digests it names until it is 10 minutes old; after that nodes ignore it and any runner (report or delete mode) removes it. Ignoring it is as safe as removing it, which the protocol already does at the same age. Concurrent runners are safe: intents are per pass, runners never write leases or records, and DELETE is idempotent. A runner skips its pass when another runner of at least its mode reported success within half an interval (best effort, not needed for safety).
 
 ## Modes and configuration
 
@@ -53,11 +53,11 @@ A crash leaves at most a stale intent: nodes take the 120 s slow path for the di
 | Key | Default | Notes |
 | --- | --- | --- |
 | `mode` | `off` | `off`, `report` or `delete`. Env `AENV_SNAPSHOT_LAYER_GC_MODE`. |
-| `interval_secs` | `3600` | At least 300; ±10% jitter; the first pass runs 10 minutes after start. |
+| `interval_secs` | `3600` | At least 300; ±10% jitter; the first pass runs at a random point 5 to 10 minutes after start, so nodes that wake together do not all run it at once. |
 | `grace_secs` | `86400` | At least 3600. |
 | `max_deletes_per_pass` | `1000` | 1 to 10000; oldest candidates first. |
 
-`report` runs the full classification, including the lease read, and writes the run report and metrics, but writes no intent and deletes nothing. Protocol constants (lease TTL 24 h, liveness rewrite 1 h, shrink debounce 5 min, tail 2 h, key rotation 12 h, intent wait 120 s, issue window 45 s, request timeout 15 s, pass span 30 min, stale intents 10 min, stale leases 7 days) live in code.
+`report` runs the full classification, including the lease read, and writes the run report and metrics, but writes no intent and deletes no managed layer. Both `report` and `delete` remove stale protocol objects (intents older than 10 minutes, leases older than 7 days), so switching from `delete` back to `report` leaves nothing behind; with `off` no runner cleans them up, and nodes simply ignore stale intents. Protocol constants (lease TTL 24 h, liveness rewrite 1 h, shrink debounce 5 min, tail 2 h, warm-path freshness 12 h, intent wait 120 s, issue window 45 s, request timeout 15 s, pass span 30 min, stale intents 10 min, stale leases 7 days) live in code.
 
 The GC runs inside the node server process; there is no separate worker. It starts after the orchestrator has leased the layers of persisted paused sandboxes. On shutdown it stops issuing deletes and the server waits up to 20 s for in-flight requests.
 
@@ -66,7 +66,7 @@ The GC runs inside the node server process; there is no separate worker. It star
 1. Ship the lease-writing release with `mode = "report"` everywhere. Report mode never deletes, so mixing old and new nodes is safe.
 2. Observe at least two report passes per cell: no aborts, lease age under an hour, `leased` non-zero only while restored guests run.
 3. Switch to `mode = "delete"` only after every node writing to the same bucket and prefix (including other cluster generations) runs the lease-writing release. A pre-lease node's restored guests are unleased.
-4. To roll back, first set `mode` to `off` or `report` and let it reach every node; only then revert the release.
+4. To roll back, first set `mode` to `off` or `report` and let it reach every node; only then revert the release. Prefer `report`: it keeps cleaning up intents and leases left behind.
 
 Deletes use `DeleteObject` without a version id. In a versioned bucket the bytes stay as a noncurrent version under the bucket's lifecycle rule; recovering a wrongly deleted layer means copying that version back (or removing the delete marker) with a principal that holds `GetObjectVersion`, which the node role does not. The run report and the per-layer audit log lines list what each pass deleted.
 
@@ -79,10 +79,11 @@ Metrics on the node's `/metrics`:
 - `agentenv_snapshot_layer_gc_passes_total{mode,outcome}`
 - `agentenv_snapshot_layer_gc_objects{class}` and `agentenv_snapshot_layer_gc_bytes{class}` for `referenced`, `leased`, `young`, `unrecognized` and `garbage`
 - `agentenv_snapshot_layer_gc_deleted_objects_total`, `agentenv_snapshot_layer_gc_deleted_bytes_total`, `agentenv_snapshot_layer_gc_delete_failures_total`
+- `agentenv_snapshot_layer_gc_not_issued_total`: candidates left for the next pass because the 45 s issue window closed (also `not_issued` in the pass log line and run report); a pass can report `ok` and still delete little when this grows
 - `agentenv_snapshot_layer_gc_last_success_timestamp_seconds`
 - `agentenv_snapshot_layer_lease_writes_total{reason,outcome}`, `agentenv_snapshot_layer_lease_age_seconds`, `agentenv_snapshot_layer_lease_digests`
 - `agentenv_snapshot_layer_intent_waits_total{path}` (`restore`, `publish`, `startup`)
-- `agentenv_snapshot_layer_lease_unreadable_image_configs_total`
+- `agentenv_snapshot_layer_lease_unreadable_image_configs_total` (each such config is also logged at warn, at most hourly per path)
 
 The one liveness assumption: a live node that cannot write its lease for 24 hours loses protection for guests restored from deleted snapshots. Alert on lease age.
 

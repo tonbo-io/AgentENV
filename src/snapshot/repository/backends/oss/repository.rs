@@ -1440,7 +1440,11 @@ mod tests {
                 vec![0u8],
             );
         }
-        let leases = LayerLeases::new(Arc::clone(&store) as Arc<dyn LayerStore>, "publisher");
+        let leases = LayerLeases::new(
+            Arc::clone(&store) as Arc<dyn LayerStore>,
+            "publisher",
+            "s3://bucket/prefix/managed-layers",
+        );
         let id = SnapshotId::generate();
 
         let guard = pre_commit_protect(&leases, &id, digests.clone())

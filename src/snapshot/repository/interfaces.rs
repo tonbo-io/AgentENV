@@ -210,10 +210,16 @@ pub trait SnapshotRuntimeResolver: Send + Sync {
 /// sandboxes; other backends use [`NoopLayerRetention`]. Paths are opaque
 /// overlaybd `image.json` files (rootfs, attached drives and memory).
 pub trait SnapshotLayerRetention: Send + Sync {
-    /// Lease the layers of paused sandboxes restored from local persistence
-    /// before the node serves requests. Errors mean the layers are not yet
-    /// protected; callers log and rely on the periodic refresh.
-    async fn protect_persisted_image_configs(&self, paths: Vec<PathBuf>) -> anyhow::Result<()>;
+    /// Lease the layers named by paused sandboxes' image configs restored
+    /// from local persistence, wait until no GC pass can still delete them,
+    /// and check that every repository layer they read exists. Returns the
+    /// configs that read a missing layer: their sandboxes must not resume.
+    /// An error means nothing was checked; callers must check again (with
+    /// the same call) before resuming those sandboxes.
+    async fn protect_persisted_image_configs(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> anyhow::Result<Vec<PathBuf>>;
 
     /// Replace the set of image configs read by running and paused sandboxes.
     async fn set_runtime_image_configs(&self, paths: Vec<PathBuf>);
@@ -225,8 +231,11 @@ pub struct NoopLayerRetention;
 
 #[async_trait]
 impl SnapshotLayerRetention for NoopLayerRetention {
-    async fn protect_persisted_image_configs(&self, _paths: Vec<PathBuf>) -> anyhow::Result<()> {
-        Ok(())
+    async fn protect_persisted_image_configs(
+        &self,
+        _paths: Vec<PathBuf>,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(Vec::new())
     }
 
     async fn set_runtime_image_configs(&self, _paths: Vec<PathBuf>) {}
