@@ -536,7 +536,11 @@ impl LayerLeases {
         let (key, digests, last_success) = {
             let mut guard = self.lock_state();
             let state = &mut *guard;
-            let since = state.last_success.unwrap_or(state.generation_started);
+            // Measured from the later of the last success and the current
+            // key's start, so a fresh key is not rotated again at once.
+            let since = state.last_success.map_or(state.generation_started, |last| {
+                last.max(state.generation_started)
+            });
             if now.duration_since(since) >= LEASE_ROTATE_AFTER {
                 state.generation += 1;
                 state.generation_started = now;
