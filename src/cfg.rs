@@ -348,7 +348,60 @@ pub struct SnapshotConfig {
     pub image_publish: SnapshotImagePublishConfig,
     #[config(nested)]
     pub publish_compression: SnapshotPublishCompressionConfig,
+    #[config(nested)]
+    pub layer_gc: SnapshotLayerGcConfig,
 }
+
+/// Collection of OSS managed layers that no catalog record references and no
+/// node lease holds. The mode decides how far this node takes part in the
+/// protocol; see `docs/src/internals/snapshot-layer-gc.md`.
+#[derive(Debug, Config, Clone)]
+pub struct SnapshotLayerGcConfig {
+    /// `off` (default): no protocol participation, no lease, no GC and no
+    /// object-store traffic under `layer-gc/`; serving paths run as without
+    /// GC. `report`: writes a lease declaring `report` and runs report-only
+    /// passes; serving paths never wait for or fail on it. `delete`: writes a
+    /// lease declaring `delete`, gates restores, publications and resumes of
+    /// persisted paused sandboxes (rule N1), and deletes garbage. Anything
+    /// other than `off` requires the OSS repository backend; every reader of
+    /// the bucket prefix must run `report` or `delete` before any node runs
+    /// `delete`.
+    #[config(default = "off", env = "AENV_SNAPSHOT_LAYER_GC_MODE")]
+    pub mode: SnapshotLayerGcMode,
+    /// Seconds between passes (±10% jitter). Minimum 300.
+    #[config(default = 3600u64)]
+    pub interval_secs: u64,
+    /// Only objects whose `LastModified` is older than this many seconds are
+    /// collected. Minimum 3600.
+    #[config(default = 86400u64)]
+    pub grace_secs: u64,
+    /// Upper bound on deletions per pass, in 1..=10000.
+    #[config(default = 1000usize)]
+    pub max_deletes_per_pass: usize,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotLayerGcMode {
+    #[default]
+    Off,
+    Report,
+    Delete,
+}
+
+impl SnapshotLayerGcMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Report => "report",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+const SNAPSHOT_LAYER_GC_MIN_INTERVAL_SECS: u64 = 300;
+const SNAPSHOT_LAYER_GC_MIN_GRACE_SECS: u64 = 3600;
+const SNAPSHOT_LAYER_GC_MAX_DELETES_PER_PASS: usize = 10_000;
 
 #[derive(Debug, Config, Clone)]
 pub struct SnapshotImagePublishConfig {
@@ -695,6 +748,7 @@ impl_config_default!(
     SnapshotConfig,
     SnapshotImagePublishConfig,
     SnapshotPublishCompressionConfig,
+    SnapshotLayerGcConfig,
     UblkTomlConfig,
     UblkOverlaybdTomlConfig,
     MemorySnapshotConfig,
@@ -1002,6 +1056,33 @@ impl AppConfig {
         self.validate_memory_snapshot_background_download()?;
         self.validate_overlaybd_global_config_paths()?;
         self.validate_disk_rate_limit()?;
+        self.validate_snapshot_layer_gc()?;
+        Ok(())
+    }
+
+    fn validate_snapshot_layer_gc(&self) -> Result<()> {
+        let gc = &self.snapshot.layer_gc;
+        if gc.mode != SnapshotLayerGcMode::Off
+            && self.snapshot.repository_backend != SnapshotRepositoryBackendKind::Oss
+        {
+            bail!(
+                "snapshot.layer_gc.mode = \"{}\" requires snapshot.repository_backend = \"oss\"",
+                gc.mode.as_str()
+            );
+        }
+        if gc.interval_secs < SNAPSHOT_LAYER_GC_MIN_INTERVAL_SECS {
+            bail!(
+                "snapshot.layer_gc.interval_secs must be >= {SNAPSHOT_LAYER_GC_MIN_INTERVAL_SECS}"
+            );
+        }
+        if gc.grace_secs < SNAPSHOT_LAYER_GC_MIN_GRACE_SECS {
+            bail!("snapshot.layer_gc.grace_secs must be >= {SNAPSHOT_LAYER_GC_MIN_GRACE_SECS}");
+        }
+        if !(1..=SNAPSHOT_LAYER_GC_MAX_DELETES_PER_PASS).contains(&gc.max_deletes_per_pass) {
+            bail!(
+                "snapshot.layer_gc.max_deletes_per_pass must be in 1..={SNAPSHOT_LAYER_GC_MAX_DELETES_PER_PASS}"
+            );
+        }
         Ok(())
     }
 
@@ -1418,6 +1499,79 @@ mod tests {
                 .memory_snapshot
                 .background_download
                 .prefetch_before_resume
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn layer_gc_config_defaults_env_override_and_validation() -> Result<()> {
+        let config = AppConfig::default();
+        let gc = &config.snapshot.layer_gc;
+        assert_eq!(gc.mode, SnapshotLayerGcMode::Off);
+        assert_eq!(gc.interval_secs, 3600);
+        assert_eq!(gc.grace_secs, 86400);
+        assert_eq!(gc.max_deletes_per_pass, 1000);
+        config.validate()?;
+
+        let temp = tempdir()?;
+        let path = temp.path().join("layer-gc.toml");
+        std::fs::write(
+            &path,
+            "[snapshot.layer_gc]\nmode = \"off\"\ninterval_secs = 300\ngrace_secs = 3600\nmax_deletes_per_pass = 10000\n",
+        )?;
+        let loaded = ConfigManager::new_from_path(&path)?;
+        assert_eq!(loaded.config().snapshot.layer_gc.interval_secs, 300);
+        assert_eq!(
+            loaded.config().snapshot.layer_gc.max_deletes_per_pass,
+            10000
+        );
+
+        for (body, expected) in [
+            (
+                "mode = \"report\"",
+                "requires snapshot.repository_backend = \"oss\"",
+            ),
+            (
+                "mode = \"delete\"",
+                "requires snapshot.repository_backend = \"oss\"",
+            ),
+            ("interval_secs = 299", "interval_secs must be >= 300"),
+            ("grace_secs = 3599", "grace_secs must be >= 3600"),
+            (
+                "max_deletes_per_pass = 0",
+                "max_deletes_per_pass must be in",
+            ),
+            (
+                "max_deletes_per_pass = 10001",
+                "max_deletes_per_pass must be in",
+            ),
+        ] {
+            std::fs::write(&path, format!("[snapshot.layer_gc]\n{body}\n"))?;
+            let error = ConfigManager::new_from_path(&path)
+                .err()
+                .unwrap_or_else(|| panic!("{body} must be rejected"));
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{body}: unexpected error {error:#}"
+            );
+        }
+
+        // AENV_SNAPSHOT_LAYER_GC_MODE overrides the file: a file asking for
+        // "report" on the POSIX backend (rejected above) loads with the
+        // variable set to "off". Only "off" is set here, so concurrently
+        // loading tests never see a mode they would reject.
+        std::fs::write(&path, "[snapshot.layer_gc]\nmode = \"report\"\n")?;
+        // SAFETY: no other test sets or relies on this variable.
+        unsafe {
+            std::env::set_var("AENV_SNAPSHOT_LAYER_GC_MODE", "off");
+        }
+        let loaded = ConfigManager::new_from_path(&path);
+        unsafe {
+            std::env::remove_var("AENV_SNAPSHOT_LAYER_GC_MODE");
+        }
+        assert_eq!(
+            loaded?.config().snapshot.layer_gc.mode,
+            SnapshotLayerGcMode::Off
         );
         Ok(())
     }

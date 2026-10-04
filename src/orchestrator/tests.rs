@@ -120,6 +120,7 @@ fn make_orchestrator_without_background_with_factory_and_persister<
         shutdown_tx: tokio::sync::watch::channel(false).0,
         shutdown_outcome: tokio::sync::OnceCell::new(),
         image_refs: test_runtime_image_refs(),
+        layer_retention: None,
         access_tokens: SandboxAccessTokenGenerator::new("orchestrator-test-seed").unwrap(),
     })
 }
@@ -1322,6 +1323,360 @@ async fn pause_uses_runtime_config_when_source_config_was_evicted() -> Result<()
         summary.retained >= 1,
         "paused commit must be retained by its durable pin"
     );
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LayerRetentionCall {
+    Verify(
+        crate::snapshot::repository::PersistedLayerCheck,
+        Vec<PathBuf>,
+    ),
+    SetRuntime(Vec<PathBuf>),
+    AddRuntime(Vec<PathBuf>),
+}
+
+#[derive(Default)]
+struct RecordingLayerRetention {
+    gating: bool,
+    /// The startup verification never completes.
+    block_startup: bool,
+    calls: StdMutex<Vec<LayerRetentionCall>>,
+    /// Image configs reported as reading a missing repository layer.
+    missing: StdMutex<Vec<PathBuf>>,
+}
+
+impl RecordingLayerRetention {
+    fn gating() -> Self {
+        Self {
+            gating: true,
+            ..Default::default()
+        }
+    }
+
+    fn calls(&self) -> Vec<LayerRetentionCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn verify_calls(&self) -> usize {
+        self.calls()
+            .iter()
+            .filter(|call| matches!(call, LayerRetentionCall::Verify(..)))
+            .count()
+    }
+
+    fn set_missing(&self, missing: Vec<PathBuf>) {
+        *self.missing.lock().unwrap() = missing;
+    }
+}
+
+#[async_trait]
+impl crate::snapshot::repository::SnapshotLayerRetention for RecordingLayerRetention {
+    fn is_gating(&self) -> bool {
+        self.gating
+    }
+
+    async fn verify_persisted_image_configs(
+        &self,
+        paths: Vec<PathBuf>,
+        check: crate::snapshot::repository::PersistedLayerCheck,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(LayerRetentionCall::Verify(check, paths.clone()));
+        if self.block_startup && check == crate::snapshot::repository::PersistedLayerCheck::Startup
+        {
+            std::future::pending::<()>().await;
+        }
+        let missing = self.missing.lock().unwrap().clone();
+        Ok(paths
+            .iter()
+            .filter(|path| missing.contains(path))
+            .cloned()
+            .collect())
+    }
+
+    async fn set_runtime_image_configs(&self, paths: Vec<PathBuf>) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(LayerRetentionCall::SetRuntime(paths));
+    }
+
+    async fn add_runtime_image_configs(&self, paths: Vec<PathBuf>) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(LayerRetentionCall::AddRuntime(paths));
+    }
+}
+
+#[derive(Debug)]
+struct MemoryConfigPausedState(PathBuf);
+
+impl PausedSandboxState for MemoryConfigPausedState {
+    fn encode(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(json!({}))
+    }
+
+    fn runtime_artifacts(&self) -> RuntimeArtifactSet {
+        RuntimeArtifactSet::from_overlaybd_image_configs(vec![self.0.join("rootfs.json")])
+            .with_memory_image_config(Some(self.0.join("mem_image.json")))
+    }
+}
+
+fn paused_configs(paused_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        paused_dir.join("rootfs.json"),
+        paused_dir.join("mem_image.json"),
+    ]
+}
+
+async fn orchestrator_with_persisted_paused_sandbox(
+    paused_id: SandboxId,
+    paused_dir: &Path,
+    behavior: Arc<MockBehavior>,
+    retention: Option<Arc<RecordingLayerRetention>>,
+) -> Result<Arc<Orchestrator<InMemoryMetadataStore, MockBackendFactory, RecordingPersister>>> {
+    let persister = RecordingPersister::with_loaded(vec![SandboxMetadata {
+        id: paused_id,
+        state: SandboxState::Paused,
+        virtualization_mode: ConfigManager::global_config().virtualization_mode,
+        paused_state: Some(Arc::new(MemoryConfigPausedState(paused_dir.to_path_buf()))),
+        ..Default::default()
+    }]);
+    Orchestrator::new_inner_with_admission(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::with_behavior(behavior),
+        persister,
+        test_runtime_image_refs(),
+        NodeAdmission::default(),
+        retention.map(|retention| {
+            retention as Arc<dyn crate::snapshot::repository::SnapshotLayerRetention>
+        }),
+    )
+    .await
+}
+
+/// Wait (in real time) for background layer-retention work.
+async fn eventually(mut condition: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if condition() {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    panic!("condition not reached");
+}
+
+#[tokio::test]
+async fn gating_retention_verifies_paused_layers_in_the_background_and_sees_running_configs(
+) -> Result<()> {
+    setup();
+    let paused_id = SandboxId::new();
+    let paused_dir = PathBuf::from("/persisted/paused");
+    let behavior = Arc::new(MockBehavior::new());
+    let running_rootfs = PathBuf::from("/runtime/running/rootfs.json");
+    let running_memory = PathBuf::from("/runtime/running/memory/image.json");
+    behavior.set_runtime_info(SandboxRuntimeInfo {
+        runtime_artifacts: RuntimeArtifactSet::from_overlaybd_image_configs(vec![
+            running_rootfs.clone()
+        ])
+        .with_memory_image_config(Some(running_memory.clone())),
+        ..Default::default()
+    });
+    let retention = Arc::new(RecordingLayerRetention::gating());
+    let orchestrator = orchestrator_with_persisted_paused_sandbox(
+        paused_id,
+        &paused_dir,
+        behavior,
+        Some(Arc::clone(&retention)),
+    )
+    .await?;
+
+    eventually(|| retention.verify_calls() == 1).await;
+    assert!(retention.calls().contains(&LayerRetentionCall::Verify(
+        crate::snapshot::repository::PersistedLayerCheck::Startup,
+        paused_configs(&paused_dir)
+    )));
+
+    orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    orchestrator.refresh_layer_retention().await;
+    let mut expected = paused_configs(&paused_dir);
+    expected.extend([running_memory, running_rootfs]);
+    expected.sort();
+    assert_eq!(
+        retention.calls().last(),
+        Some(&LayerRetentionCall::SetRuntime(expected)),
+        "running and paused image configs reach layer retention"
+    );
+
+    // A sandbox whose handle is held by a long operation is not waited for:
+    // the runtime set only grows until it can be observed again.
+    let handle = orchestrator
+        .sandboxes
+        .read()
+        .await
+        .values()
+        .next()
+        .cloned()
+        .expect("running sandbox");
+    let _held = handle.lock().await;
+    orchestrator.refresh_layer_retention().await;
+    let mut paused = paused_configs(&paused_dir);
+    paused.sort();
+    assert_eq!(
+        retention.calls().last(),
+        Some(&LayerRetentionCall::AddRuntime(paused))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_blocked_startup_verification_never_delays_serving_and_resume_verifies_its_own_sandbox(
+) -> Result<()> {
+    setup();
+    let paused_id = SandboxId::new();
+    let paused_dir = PathBuf::from("/persisted/blocked");
+    let retention = Arc::new(RecordingLayerRetention {
+        block_startup: true,
+        ..RecordingLayerRetention::gating()
+    });
+    let orchestrator = orchestrator_with_persisted_paused_sandbox(
+        paused_id,
+        &paused_dir,
+        Arc::new(MockBehavior::new()),
+        Some(Arc::clone(&retention)),
+    )
+    .await?;
+
+    let _ = orchestrator
+        .resume_sandbox(paused_id, NewTimeout::None)
+        .await;
+    assert!(retention.calls().contains(&LayerRetentionCall::Verify(
+        crate::snapshot::repository::PersistedLayerCheck::Resume,
+        paused_configs(&paused_dir)
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_paused_sandbox_with_a_missing_layer_fails_resume_cleanly_until_present(
+) -> Result<()> {
+    setup();
+    let paused_id = SandboxId::new();
+    let paused_dir = PathBuf::from("/persisted/missing-layer");
+    let retention = Arc::new(RecordingLayerRetention::gating());
+    retention.set_missing(vec![paused_dir.join("mem_image.json")]);
+    let orchestrator = orchestrator_with_persisted_paused_sandbox(
+        paused_id,
+        &paused_dir,
+        Arc::new(MockBehavior::new()),
+        Some(Arc::clone(&retention)),
+    )
+    .await?;
+    eventually(|| retention.verify_calls() == 1).await;
+
+    let error = orchestrator
+        .resume_sandbox(paused_id, NewTimeout::None)
+        .await
+        .expect_err("resume must refuse a missing repository layer");
+    match &error {
+        OrchestratorError::SandboxOperationFailed {
+            operation: SandboxOperation::Resume,
+            source,
+            ..
+        } => assert!(
+            format!("{source:#}").contains("are missing"),
+            "unexpected error: {source:#}"
+        ),
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(retention.verify_calls(), 2, "resume re-checks the layers");
+    let metadata = orchestrator
+        .store
+        .get(&paused_id)
+        .await
+        .unwrap()
+        .expect("sandbox still exists");
+    assert_eq!(
+        metadata.state,
+        SandboxState::Paused,
+        "a refused resume leaves the sandbox paused"
+    );
+
+    // Once the layer is present again the check passes.
+    retention.set_missing(Vec::new());
+    let _ = orchestrator
+        .resume_sandbox(paused_id, NewTimeout::None)
+        .await;
+    assert_eq!(retention.verify_calls(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_paused_sandbox_verified_at_startup_is_gated_again_on_resume() -> Result<()> {
+    setup();
+    let paused_id = SandboxId::new();
+    let paused_dir = PathBuf::from("/persisted/verified");
+    let retention = Arc::new(RecordingLayerRetention::gating());
+    let orchestrator = orchestrator_with_persisted_paused_sandbox(
+        paused_id,
+        &paused_dir,
+        Arc::new(MockBehavior::new()),
+        Some(Arc::clone(&retention)),
+    )
+    .await?;
+    eventually(|| retention.verify_calls() == 1).await;
+    let _ = orchestrator
+        .resume_sandbox(paused_id, NewTimeout::None)
+        .await;
+    // The gate's fast path makes this free while the lease is fresh; after
+    // 12 hours without a successful lease write it fails closed.
+    assert_eq!(
+        retention.verify_calls(),
+        2,
+        "every resume gates, even after startup verified the layers"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn report_mode_retention_and_no_retention_never_gate_startup_or_resume() -> Result<()> {
+    setup();
+    let paused_dir = PathBuf::from("/persisted/report");
+    let report = Arc::new(RecordingLayerRetention::default());
+    let paused_id = SandboxId::new();
+    let orchestrator = orchestrator_with_persisted_paused_sandbox(
+        paused_id,
+        &paused_dir,
+        Arc::new(MockBehavior::new()),
+        Some(Arc::clone(&report)),
+    )
+    .await?;
+    let _ = orchestrator
+        .resume_sandbox(paused_id, NewTimeout::None)
+        .await;
+    assert_eq!(report.verify_calls(), 0, "report mode never verifies");
+    orchestrator.refresh_layer_retention().await;
+    assert!(matches!(
+        report.calls().last(),
+        Some(LayerRetentionCall::SetRuntime(_))
+    ));
+
+    let paused_id = SandboxId::new();
+    let orchestrator = orchestrator_with_persisted_paused_sandbox(
+        paused_id,
+        &paused_dir,
+        Arc::new(MockBehavior::new()),
+        None,
+    )
+    .await?;
+    assert!(orchestrator.layer_retention.is_none());
+    orchestrator.refresh_layer_retention().await;
     Ok(())
 }
 

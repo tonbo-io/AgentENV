@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use futures::{stream, StreamExt};
+use tokio::sync::watch;
 use tracing::warn;
 
 use super::p2p::SnapshotP2pArtifact;
@@ -12,7 +13,10 @@ use crate::sandbox::{
     CapturedSandboxSnapshot, FirecrackerCapturedSnapshot, FirecrackerSnapshotManifest,
 };
 use crate::snapshot::repository::backends::build_snapshot_backend;
-use crate::snapshot::repository::interfaces::{SnapshotRepository, SnapshotRuntimeResolver};
+use crate::snapshot::repository::backends::oss::OssLayerMaintenance;
+use crate::snapshot::repository::interfaces::{
+    SnapshotLayerRetention, SnapshotRepository, SnapshotRuntimeResolver,
+};
 use crate::snapshot::repository::{RepositoryError, SnapshotListFilter};
 use crate::snapshot::{
     ManagedLayer, OverlaybdLayerRef, RunnableSnapshot, SnapshotId, SnapshotPublishMetadata,
@@ -67,17 +71,36 @@ pub struct SnapshotManager {
     repository: Arc<dyn SnapshotRepository>,
     runtime_resolver: Arc<dyn SnapshotRuntimeResolver>,
     p2p_transport: Option<Arc<dyn P2pTransport>>,
+    layer_maintenance: Option<OssLayerMaintenance>,
 }
 
 impl SnapshotManager {
     /// Builds a manager using the configured repository backend.
     pub fn new(p2p_transport: Option<Arc<dyn P2pTransport>>) -> anyhow::Result<Self> {
-        let (repository, runtime_resolver) = build_snapshot_backend(p2p_transport.clone())?;
-        Ok(Self::from_parts(
-            repository,
-            runtime_resolver,
-            p2p_transport,
-        ))
+        let backend = build_snapshot_backend(p2p_transport.clone())?;
+        let mut manager =
+            Self::from_parts(backend.repository, backend.runtime_resolver, p2p_transport);
+        manager.layer_maintenance = backend.layer_maintenance;
+        Ok(manager)
+    }
+
+    /// Layer retention the orchestrator feeds with the image configs of its
+    /// running and paused sandboxes. `None` for backends without managed
+    /// layer collection and for `[snapshot.layer_gc].mode = "off"`, where
+    /// the orchestrator does none of this work.
+    pub fn layer_retention(&self) -> Option<Arc<dyn SnapshotLayerRetention>> {
+        self.layer_maintenance
+            .as_ref()
+            .map(|maintenance| maintenance.retention())
+    }
+
+    /// Start the managed-layer lease refresher and GC loop (`report` and
+    /// `delete` modes only). The tasks stop when `shutdown` turns true;
+    /// nothing waits for them.
+    pub fn start_layer_maintenance(&self, shutdown: watch::Receiver<bool>) {
+        if let Some(maintenance) = &self.layer_maintenance {
+            maintenance.start(shutdown);
+        }
     }
 
     /// Builds a manager from the given components.
@@ -90,6 +113,7 @@ impl SnapshotManager {
             repository,
             runtime_resolver,
             p2p_transport,
+            layer_maintenance: None,
         }
     }
 

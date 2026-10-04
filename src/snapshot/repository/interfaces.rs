@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -198,4 +199,50 @@ pub trait SnapshotRepository: Send + Sync {
 pub trait SnapshotRuntimeResolver: Send + Sync {
     /// Resolves one committed snapshot record into a runtime-ready view for the current node.
     async fn resolve(&self, snapshot: Arc<SnapshotRecord>) -> RepositoryResult<RunnableSnapshot>;
+}
+
+/// When persisted paused sandboxes' layers are verified (metric label).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistedLayerCheck {
+    /// In the background after the node restored its persisted sandboxes.
+    Startup,
+    /// Before resuming any paused sandbox.
+    Resume,
+}
+
+#[async_trait]
+/// Keeps the repository layers that this node's sandboxes read protected from
+/// repository garbage collection.
+///
+/// Only the OSS backend with `[snapshot.layer_gc].mode` `report` or `delete`
+/// provides one; elsewhere the orchestrator has none and does none of this
+/// work. Paths are opaque overlaybd `image.json` files (rootfs, attached
+/// drives and memory).
+pub trait SnapshotLayerRetention: Send + Sync {
+    /// Whether serving paths must wait for [`verify_persisted_image_configs`]
+    /// before trusting persisted layers (`delete` mode). In `report` mode
+    /// nothing gates.
+    ///
+    /// [`verify_persisted_image_configs`]: Self::verify_persisted_image_configs
+    fn is_gating(&self) -> bool;
+
+    /// Keep the layers named by paused sandboxes' image configs restored from
+    /// local persistence protected and, when gating, check that every remote
+    /// repository layer they read exists after no GC pass can still delete
+    /// it. Returns the configs that read a missing layer: their sandboxes
+    /// must not resume. An error means nothing was checked; callers must
+    /// check again before resuming those sandboxes.
+    async fn verify_persisted_image_configs(
+        &self,
+        paths: Vec<PathBuf>,
+        check: PersistedLayerCheck,
+    ) -> anyhow::Result<Vec<PathBuf>>;
+
+    /// Replace the set of image configs read by running and paused
+    /// sandboxes. Never waits for the object store.
+    async fn set_runtime_image_configs(&self, paths: Vec<PathBuf>);
+
+    /// Add image configs without removing any, when the caller could not
+    /// observe every sandbox. Never waits for the object store.
+    async fn add_runtime_image_configs(&self, paths: Vec<PathBuf>);
 }

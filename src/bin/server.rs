@@ -137,7 +137,17 @@ async fn server_main() -> anyhow::Result<()> {
     )));
     let image_resolver = Arc::new(ImageResolver::new(config));
     let factory = FirecrackerSandboxFactory::with_cpu_config(Arc::clone(&cluster_cpu_arc));
-    let orchestrator = Orchestrator::with_file_backed_store_and_factory(factory).await?;
+    // Managed-layer retention, lease refresher and GC exist only in
+    // `[snapshot.layer_gc].mode` report or delete; none of them delays
+    // startup or shutdown.
+    let orchestrator = Orchestrator::with_file_backed_store_and_factory(
+        factory,
+        snapshot_manager.layer_retention(),
+    )
+    .await?;
+    let (layer_maintenance_shutdown_tx, layer_maintenance_shutdown_rx) =
+        tokio::sync::watch::channel(false);
+    snapshot_manager.start_layer_maintenance(layer_maintenance_shutdown_rx);
     let observability_config = &config.observability;
     let observability = if observability_config.enabled {
         Some(Arc::new(
@@ -192,6 +202,9 @@ async fn server_main() -> anyhow::Result<()> {
 
     let shutdown_cleanup = tokio::spawn(async move {
         if let Ok(()) = shutdown_rx.await {
+            // Signal only: the lease refresher stops and a GC pass stops
+            // issuing deletes; nothing here waits for either.
+            let _ = layer_maintenance_shutdown_tx.send(true);
             if let Some(mut handle) = reporter.take() {
                 info!(target: "agentenv", "stopping observability reporter before process exit");
                 if let Err(err) = handle.shutdown().await {

@@ -33,6 +33,8 @@ pub struct ObjectStoreOperatorConfig {
     pub region: String,
     pub addressing_style: AddressingStyle,
     pub timeout: Option<Duration>,
+    /// Retries per operation; `None` uses [`DEFAULT_MAX_RETRIES`] and
+    /// `Some(0)` disables retries entirely.
     pub max_retries: Option<usize>,
 }
 
@@ -102,10 +104,13 @@ pub fn build_object_store_operator(
             TimeoutLayer::new()
                 .with_timeout(timeout)
                 .with_io_timeout(timeout),
-        )
-        .layer(RetryLayer::new().with_max_times(max_retries));
-
-    Ok(operator)
+        );
+    // `max_retries = Some(0)` builds a single-attempt operator: no retry
+    // layer, so a reported success means the only request landed.
+    if max_retries == 0 {
+        return Ok(operator);
+    }
+    Ok(operator.layer(RetryLayer::new().with_max_times(max_retries)))
 }
 
 pub async fn run_with_refresh<T, F, Fut>(

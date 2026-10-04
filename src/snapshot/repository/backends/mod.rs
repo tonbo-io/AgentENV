@@ -8,20 +8,26 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::cfg::{ConfigManager, SnapshotImageStoragePolicy, SnapshotRepositoryBackendKind};
+use crate::identity::NodeIdentity;
 use crate::image::cache::local_image_services_from_app_config;
 use crate::p2p::P2pTransport;
 use crate::snapshot::artifact_cache::LocalArtifactCache;
 use crate::snapshot::repository::interfaces::{SnapshotRepository, SnapshotRuntimeResolver};
-pub use oss::OssBackend;
+pub use oss::{OssBackend, OssLayerGcPassSummary, OssLayerGcProbe};
 pub use posixfs::{PosixFsBackend, PosixFsBackendConfig};
+
+/// A configured snapshot backend: repository, runtime resolver and, for the
+/// OSS backend, its managed-layer lease and GC maintenance.
+pub struct SnapshotBackendParts {
+    pub repository: Arc<dyn SnapshotRepository>,
+    pub runtime_resolver: Arc<dyn SnapshotRuntimeResolver>,
+    pub(crate) layer_maintenance: Option<oss::OssLayerMaintenance>,
+}
 
 /// Builds the configured snapshot repository backend and its matching runtime resolver from the global configuration.
 pub fn build_snapshot_backend(
     p2p_transport: Option<Arc<dyn P2pTransport>>,
-) -> Result<(
-    Arc<dyn SnapshotRepository>,
-    Arc<dyn SnapshotRuntimeResolver>,
-)> {
+) -> Result<SnapshotBackendParts> {
     let config = ConfigManager::global_config();
     let shared_cache_root = shared_runtime_cache_root();
     let overlaybd_layers = local_image_services_from_app_config(config).overlaybd_layers;
@@ -35,7 +41,7 @@ pub fn build_snapshot_backend(
                 .snapshot_store
                 .join("repository");
             let cache = LocalArtifactCache::new(shared_cache_root.clone(), None)?;
-            Ok(PosixFsBackend::from_parts(
+            let (repository, runtime_resolver) = PosixFsBackend::from_parts(
                 PosixFsBackendConfig {
                     root,
                     cache_root: Some(shared_cache_root.clone()),
@@ -44,7 +50,12 @@ pub fn build_snapshot_backend(
                 overlaybd_layers,
                 cache,
             )
-            .into_parts())
+            .into_parts();
+            Ok(SnapshotBackendParts {
+                repository,
+                runtime_resolver,
+                layer_maintenance: None,
+            })
         }
         SnapshotRepositoryBackendKind::Oss => {
             let oss_config = config
@@ -59,16 +70,26 @@ pub fn build_snapshot_backend(
             };
             let cache =
                 LocalArtifactCache::new(shared_cache_root.clone(), oss_config.cache_max_size_gb)?;
-            Ok(OssBackend::from_parts(
+            let backend = OssBackend::from_parts(
                 oss_config,
                 snapshot_image_storage,
                 &config.snapshot.publish_compression,
+                &config.snapshot.layer_gc,
+                // Only report and delete modes name the node in a lease; off
+                // never resolves the identity here.
+                || NodeIdentity::from_config(&config.node_identity).id,
                 cache,
                 shared_cache_root.join("runtime"),
                 overlaybd_layers,
                 p2p_transport,
-            )?
-            .into_parts())
+            )?;
+            let layer_maintenance = backend.layer_maintenance();
+            let (repository, runtime_resolver) = backend.into_parts();
+            Ok(SnapshotBackendParts {
+                repository,
+                runtime_resolver,
+                layer_maintenance,
+            })
         }
     }
 }

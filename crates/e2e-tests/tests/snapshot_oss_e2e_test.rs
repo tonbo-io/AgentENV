@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agentenv::cfg::{
-    ConfigManager, OssBackendConfig, OverlaybdCompressionAlgorithm,
-    SnapshotPublishCompressionConfig,
+    ConfigManager, OssBackendConfig, OverlaybdCompressionAlgorithm, SnapshotLayerGcConfig,
+    SnapshotLayerGcMode, SnapshotPublishCompressionConfig,
 };
 use agentenv::sandbox::FirecrackerSnapshotManifest;
 use agentenv::snapshot::mock::write_mock_built_artifacts;
@@ -215,6 +215,7 @@ async fn snapshot_oss_publish_and_resolve_remote_managed_layers() -> Result<()> 
             enabled: false,
             ..Default::default()
         },
+        &SnapshotLayerGcConfig::default(),
     )?
     .into_parts();
     let artifacts_root = workspace.path().join("local-artifacts");
@@ -346,6 +347,7 @@ async fn snapshot_oss_publish_compresses_raw_layers_when_enabled() -> Result<()>
             algorithm: OverlaybdCompressionAlgorithm::Lz4,
             workers: 1,
         },
+        &SnapshotLayerGcConfig::default(),
     )?
     .into_parts();
     let artifacts_root = workspace.path().join("local-artifacts");
@@ -468,6 +470,7 @@ async fn snapshot_oss_resolve_alias_cleans_up_stale_binding() -> Result<()> {
             enabled: false,
             ..Default::default()
         },
+        &SnapshotLayerGcConfig::default(),
     )?
     .into_parts();
     let artifacts_root = workspace.path().join("local-artifacts");
@@ -531,6 +534,7 @@ async fn snapshot_oss_resolve_reports_missing_managed_layer() -> Result<()> {
             enabled: false,
             ..Default::default()
         },
+        &SnapshotLayerGcConfig::default(),
     )?
     .into_parts();
     let artifacts_root = workspace.path().join("local-artifacts");
@@ -597,6 +601,7 @@ async fn snapshot_oss_delete_by_alias_removes_manifest_and_listing() -> Result<(
             enabled: false,
             ..Default::default()
         },
+        &SnapshotLayerGcConfig::default(),
     )?
     .into_parts();
     let artifacts_root = workspace.path().join("local-artifacts");
@@ -642,5 +647,200 @@ async fn snapshot_oss_delete_by_alias_removes_manifest_and_listing() -> Result<(
             .await?
     );
 
+    Ok(())
+}
+
+fn publish_metadata(id: SnapshotId) -> SnapshotPublishMetadata {
+    SnapshotPublishMetadata {
+        id,
+        alias: None,
+        source: SnapshotPublishSource::Template,
+        context: agentenv::snapshot::CommandContext::default(),
+        startup: None,
+        resources: SandboxResources::default(),
+        runtime_versions: test_runtime_versions(),
+        virtualization_mode: ConfigManager::global_config().virtualization_mode,
+        image_configs: agentenv::types::ImageConfigs::new(),
+        custom_extension_params: None,
+    }
+}
+
+/// Managed-layer GC against a real S3-compatible store in delete mode: the
+/// node lease (declaring `delete`), deletion intents, listing with
+/// `LastModified`, and deletes. A published snapshot's layers stay
+/// (referenced), a snapshot resolved on this node and then deleted keeps its
+/// layers while the restore holds them (leased), and an object nothing
+/// references or leases is reported in `report` mode and deleted only by a
+/// `delete` pass, and only while every live lease declares `delete`.
+#[tokio::test]
+#[ignore = "requires docker"]
+async fn snapshot_oss_layer_gc_deletes_only_unreferenced_unleased_layers() -> Result<()> {
+    let fixture = MinioFixture::start().await?;
+    let workspace = TempDir::new()?;
+    let prefix = "snapshots/layer-gc";
+    let oss = test_oss_config(&fixture, prefix);
+    ensure_test_config()?;
+
+    let backend = OssBackend::new_with_publish_compression(
+        &oss,
+        workspace.path().join("oss-cache"),
+        &SnapshotPublishCompressionConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        &SnapshotLayerGcConfig {
+            mode: SnapshotLayerGcMode::Delete,
+            ..Default::default()
+        },
+    )?;
+    let gc = backend
+        .layer_gc_probe()
+        .expect("delete mode builds the lease");
+    let (repository, resolver) = backend.into_parts();
+
+    // Referenced: a published snapshot.
+    let (kept_rootfs, kept_memory, _, kept_manifest) =
+        write_built_artifacts(&workspace.path().join("kept")).await?;
+    repository
+        .publish(publish_metadata(SnapshotId::generate()), kept_manifest)
+        .await?;
+
+    // Leased only: a snapshot restored on this node, then deleted while the
+    // restore still holds its layers.
+    let (_, _, leased_manifest) =
+        write_raw_built_artifacts(&workspace.path().join("leased")).await?;
+    let leased = repository
+        .publish(publish_metadata(SnapshotId::generate()), leased_manifest)
+        .await?;
+    let leased_memory = leased
+        .committed
+        .as_ref()
+        .expect("published snapshot should be committed")
+        .memory_layers[0]
+        .digest
+        .clone();
+    let runnable = resolver.resolve(Arc::new(leased.clone())).await?;
+    repository.delete(&leased.id.to_string()).await?;
+    gc.flush_lease().await?;
+    let leases = fixture
+        .list_keys(&prefixed_key(prefix, "layer-gc/leases/"))
+        .await?;
+    assert!(!leases.is_empty());
+    for key in &leases {
+        let body = fixture.get_object(key).await?;
+        let lease: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(lease["mode"], "delete", "{key}: {lease}");
+    }
+
+    // Garbage: an object nothing references or leases.
+    let orphan = digest_for_bytes(b"orphaned managed layer");
+    let layer_key = |digest: &str| prefixed_key(prefix, &format!("managed-layers/{digest}"));
+    fixture
+        .put_object(&layer_key(&orphan), b"orphaned managed layer".to_vec())
+        .await?;
+    // Object-store LastModified has second precision; with a zero grace
+    // period only objects strictly older than the pass start are candidates.
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+
+    let report = gc
+        .run_pass(SnapshotLayerGcMode::Report, std::time::Duration::ZERO)
+        .await;
+    assert_eq!(report.outcome, "ok", "{report:?}");
+    assert_eq!(report.garbage_objects, 1, "{report:?}");
+    assert_eq!(report.garbage_sample, vec![orphan.clone()], "{report:?}");
+    assert!(report.referenced_objects >= 2, "{report:?}");
+    assert!(report.leased_only_objects >= 1, "{report:?}");
+    assert!(report.deleted.is_empty(), "report mode deletes nothing");
+    assert!(fixture.object_exists(&layer_key(&orphan)).await?);
+    assert!(fixture
+        .list_keys(&prefixed_key(prefix, "layer-gc/intents/"))
+        .await?
+        .is_empty());
+
+    // A live report-mode lease (a node that does not gate) degrades the
+    // delete pass: nothing is deleted.
+    let report_lease = prefixed_key(prefix, "layer-gc/leases/report-node.json");
+    fixture
+        .put_object(
+            &report_lease,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "mode": "report",
+                "digests": [],
+            }))?,
+        )
+        .await?;
+    let report = gc
+        .run_pass(SnapshotLayerGcMode::Delete, std::time::Duration::ZERO)
+        .await;
+    assert_eq!(report.outcome, "degraded", "{report:?}");
+    assert_eq!(report.non_gating_leases, 1, "{report:?}");
+    assert!(report.deleted.is_empty(), "{report:?}");
+    assert!(fixture.object_exists(&layer_key(&orphan)).await?);
+
+    fixture.delete_object(&report_lease).await?;
+    let report = gc
+        .run_pass(SnapshotLayerGcMode::Delete, std::time::Duration::ZERO)
+        .await;
+    assert_eq!(report.outcome, "ok", "{report:?}");
+    assert_eq!(report.deleted, vec![orphan.clone()], "{report:?}");
+    assert!(!fixture.object_exists(&layer_key(&orphan)).await?);
+    for digest in [&kept_rootfs, &kept_memory, &leased_memory] {
+        assert!(
+            fixture.object_exists(&layer_key(digest)).await?,
+            "layer {digest} kept"
+        );
+    }
+    assert!(
+        fixture
+            .list_keys(&prefixed_key(prefix, "layer-gc/intents/"))
+            .await?
+            .is_empty(),
+        "the pass removes its intent"
+    );
+    assert!(!fixture
+        .list_keys(&prefixed_key(prefix, "layer-gc/runs/"))
+        .await?
+        .is_empty());
+
+    drop(runnable);
+    Ok(())
+}
+
+/// `[snapshot.layer_gc].mode = "off"` (the default) takes no part in the
+/// protocol: publish, resolve and delete touch nothing under `layer-gc/`.
+#[tokio::test]
+#[ignore = "requires docker"]
+async fn snapshot_oss_layer_gc_off_writes_nothing_under_layer_gc() -> Result<()> {
+    let fixture = MinioFixture::start().await?;
+    let workspace = TempDir::new()?;
+    let prefix = "snapshots/layer-gc-off";
+    let oss = test_oss_config(&fixture, prefix);
+    ensure_test_config()?;
+
+    let backend = OssBackend::new_with_publish_compression(
+        &oss,
+        workspace.path().join("oss-cache"),
+        &SnapshotPublishCompressionConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        &SnapshotLayerGcConfig::default(),
+    )?;
+    assert!(backend.layer_gc_probe().is_none(), "off builds no lease");
+    let (repository, resolver) = backend.into_parts();
+
+    let (_, _, manifest) = write_raw_built_artifacts(&workspace.path().join("off")).await?;
+    let published = repository
+        .publish(publish_metadata(SnapshotId::generate()), manifest)
+        .await?;
+    let runnable = resolver.resolve(Arc::new(published.clone())).await?;
+    drop(runnable);
+    repository.delete(&published.id.to_string()).await?;
+
+    assert!(fixture
+        .list_keys(&prefixed_key(prefix, "layer-gc/"))
+        .await?
+        .is_empty());
     Ok(())
 }

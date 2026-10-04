@@ -425,6 +425,21 @@ local raw layers whose digest is absent from the committed record — the
 record names the compressed bytes, so the raw digest key would never be
 looked up by consumers.
 
+## `[snapshot.layer_gc]`
+
+Collection of OSS managed layers (`managed-layers/sha256:*`) that no catalog record references and no live node lease holds. Any mode other than `off` requires `snapshot.repository_backend = "oss"`. Read [Snapshot Layer GC](../internals/snapshot-layer-gc.md) before enabling `delete`: every process that reads managed layers from the same bucket and prefix must run this release in `report` or `delete` first.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | string | `"off"` | `off` takes no part in the protocol: no lease, no GC pass and no request under `layer-gc/`; restore, publication, startup and shutdown behave as without GC. `report` writes this node's lease (declaring `report`) in the background and runs passes that classify every managed layer (referenced, leased, young, unrecognized, garbage) and write a run report and metrics without deleting any managed layer; no serving path waits for or fails on it. `delete` writes a lease declaring `delete`, gates restores, publications and resumes of persisted paused sandboxes on the lease protocol, and deletes garbage layers under the deletion-intent protocol; a delete pass degrades to a report pass while any live lease does not declare `delete`. |
+| `interval_secs` | integer | `3600` | Seconds between passes, with ±10% jitter. The first pass runs at a random point 5 to 10 minutes after process start. Minimum `300`. |
+| `grace_secs` | integer | `86400` | Only objects whose object-store `LastModified` is older than this are collected. Minimum `3600`. |
+| `max_deletes_per_pass` | integer | `1000` | Upper bound on deletions (and deletion-intent size) per pass, oldest first. Valid range `1..=10000`. |
+
+Environment variable overrides:
+
+- `AENV_SNAPSHOT_LAYER_GC_MODE`
+
 ## `[backend.posix_fs]`
 
 POSIX filesystem-backed snapshot repository configuration. This section is used when `snapshot.repository_backend = "posix_fs"`.

@@ -9,6 +9,8 @@ use overlaybd::config::{DownloadConfig, LayerConfig};
 use tracing::{debug, info};
 
 use super::client::OssClient;
+use super::layer_leases::{GateOutcome, GatePath, LayerCheckError, LayerLeaseGuard, LayerLeases};
+use super::layer_refs::committed_restore_layer_digests;
 use super::layout::OssSnapshotArtifactLayout;
 use crate::image::cache::OverlaybdLayerStore;
 use crate::p2p::P2pTransport;
@@ -32,6 +34,63 @@ struct MaterializeSpec<'a> {
     cache_key: &'a str,
     allow_empty_layers: bool,
     download: Option<DownloadConfig>,
+    /// The resolve gates every managed layer it reads (delete mode), so
+    /// materialization does not check them again.
+    gated: bool,
+}
+
+/// Keeps a resolved snapshot's node-local cache entries and its managed-layer
+/// lease guard alive for as long as the [`RunnableSnapshot`] lives.
+struct OssRuntimeLease {
+    _cache: CacheArtifactLease,
+    _layers: LayerLeaseGuard,
+}
+
+impl RuntimeArtifactLease for OssRuntimeLease {}
+
+/// Run `fetch` and, when present, `gate` concurrently. The gate's error wins,
+/// but only after `fetch` finished (so its cache cleanup ran); a resolve
+/// returns only when both succeeded, and nothing reads a managed layer
+/// before it returns.
+async fn fetch_alongside_gate<T, F, G>(fetch: F, gate: Option<G>) -> RepositoryResult<T>
+where
+    F: Future<Output = RepositoryResult<T>>,
+    G: Future<Output = RepositoryResult<()>>,
+{
+    let gate = async {
+        match gate {
+            Some(gate) => gate.await,
+            None => Ok(()),
+        }
+    };
+    let (fetched, gated) = tokio::join!(fetch, gate);
+    gated?;
+    fetched
+}
+
+/// Base-release existence check before materializing an image config: only
+/// `Managed` refs, inside the cache fill. Used when the resolve is not gated.
+fn managed_refs_to_check(layers: &[OverlaybdLayerRef]) -> Vec<(usize, String)> {
+    layers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, layer)| match layer {
+            OverlaybdLayerRef::Managed(layer) => Some((index, layer.digest.clone())),
+            OverlaybdLayerRef::External(_) => None,
+        })
+        .collect()
+}
+
+fn gate_error(id: &SnapshotId, error: LayerCheckError) -> RepositoryError {
+    match error {
+        LayerCheckError::Missing { digest } => RepositoryError::ArtifactNotFound {
+            artifact: format!("managed layer '{digest}' of snapshot '{id}' is missing"),
+        },
+        other => RepositoryError::backend(
+            format!("gate managed layers of snapshot '{id}'"),
+            anyhow::anyhow!("{other}"),
+        ),
+    }
 }
 
 async fn validate_managed_layers<F, Fut>(
@@ -71,6 +130,8 @@ pub(crate) struct OssRuntimeResolver {
     image_materializer: RuntimeImageMaterializer,
     managed_layers_repo_blob_url: String,
     p2p_transport: Option<Arc<dyn P2pTransport>>,
+    /// Node managed-layer leases; `None` in `off` mode.
+    leases: Option<Arc<LayerLeases>>,
 }
 
 impl OssRuntimeResolver {
@@ -85,6 +146,7 @@ impl OssRuntimeResolver {
         store: Arc<dyn OverlaybdLayerStore>,
         managed_layers_repo_blob_url: String,
         p2p_transport: Option<Arc<dyn P2pTransport>>,
+        leases: Option<Arc<LayerLeases>>,
     ) -> RepositoryResult<Self> {
         Ok(Self {
             client,
@@ -92,7 +154,21 @@ impl OssRuntimeResolver {
             image_materializer: RuntimeImageMaterializer::new(runtime_root, store),
             managed_layers_repo_blob_url,
             p2p_transport,
+            leases,
         })
+    }
+
+    /// Record which managed layers each materialized runtime image config
+    /// names, so the node lease keeps covering them after the evictable cache
+    /// file is gone.
+    fn record_image_configs(
+        leases: &LayerLeases,
+        digests: &std::collections::BTreeSet<String>,
+        paths: &[&Path],
+    ) {
+        for path in paths {
+            leases.record_image_config(path.to_path_buf(), digests.clone());
+        }
     }
 }
 
@@ -110,6 +186,47 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
         let layout = self.layout(&id);
         let mut handles: Vec<CacheHandle> = Vec::new();
         let resolve_started = Instant::now();
+        // Lease what the guest will read lazily (report and delete modes);
+        // only delete mode gates, concurrently with the fetches below.
+        let restore_digests = self.leases.as_ref().map(|_| {
+            committed_restore_layer_digests(committed, &self.managed_layers_repo_blob_url)
+        });
+        let layer_guard = self
+            .leases
+            .as_ref()
+            .zip(restore_digests.as_ref())
+            .map(|(leases, digests)| leases.hold(digests.clone()));
+        let gated = self
+            .leases
+            .as_ref()
+            .is_some_and(|leases| leases.is_gating());
+        let gate = self
+            .leases
+            .as_ref()
+            .zip(restore_digests.as_ref())
+            .filter(|_| gated)
+            .map(|(leases, digests)| {
+                let id = &id;
+                async move {
+                    let started = Instant::now();
+                    let result = leases.gate(digests, GatePath::Restore).await;
+                    let outcome = match &result {
+                        Ok(outcome) => outcome.as_str(),
+                        Err(_) => "failed",
+                    };
+                    info!(
+                        snapshot_id = %id,
+                        phase = "managed_layers_gated",
+                        outcome,
+                        layers = digests.len(),
+                        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        "snapshot runtime resolution phase completed"
+                    );
+                    result
+                        .map(|_: GateOutcome| ())
+                        .map_err(|error| gate_error(id, error))
+                }
+            });
         let memory_layers: Vec<OverlaybdLayerRef> = committed
             .memory_layers
             .iter()
@@ -135,6 +252,7 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
                         cache_key: &cache_key,
                         allow_empty_layers: true,
                         download: None,
+                        gated,
                     },
                     &mut branch_handles,
                 )
@@ -153,6 +271,7 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
                         cache_key: &cache_key,
                         allow_empty_layers: false,
                         download: None,
+                        gated,
                     },
                     &mut branch_handles,
                 )
@@ -162,7 +281,12 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
         let attached = async {
             let mut branch_handles = Vec::new();
             let drives = self
-                .resolve_attached_drives(&id, &committed.attached_drives, &mut branch_handles)
+                .resolve_attached_drives(
+                    &id,
+                    &committed.attached_drives,
+                    gated,
+                    &mut branch_handles,
+                )
                 .await?;
             Ok::<_, RepositoryError>((drives, branch_handles))
         };
@@ -174,14 +298,18 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
             Ok::<_, RepositoryError>((path, branch_handles))
         };
 
-        let (vm_state, committed_manifest, memory, rootfs, attached, tools) = tokio::join!(
-            vm_state,
-            firecracker_manifest,
-            memory,
-            rootfs,
-            attached,
-            tools
-        );
+        let fetch = async {
+            Ok::<_, RepositoryError>(tokio::join!(
+                vm_state,
+                firecracker_manifest,
+                memory,
+                rootfs,
+                attached,
+                tools
+            ))
+        };
+        let (vm_state, committed_manifest, memory, rootfs, attached, tools) =
+            fetch_alongside_gate(fetch, gate).await?;
         let (vm_state_path, vm_state_handle) = vm_state?;
         let committed_manifest = committed_manifest?;
         let (mem_image_config_path, mut memory_handles) = memory?;
@@ -203,8 +331,28 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
         // Runtime artifacts are protected by the sandbox start-window lease (over
         // local-only commits) + the orchestrator running set; the resolved-handle
         // needs no separate local image ref pin.
-        let cache_lease: Arc<dyn RuntimeArtifactLease> =
-            Arc::new(CacheArtifactLease { _handles: handles });
+        let cache = CacheArtifactLease { _handles: handles };
+        let cache_lease: Arc<dyn RuntimeArtifactLease> = match (&self.leases, layer_guard) {
+            (Some(leases), Some(layer_guard)) => {
+                let mut config_paths = vec![
+                    mem_image_config_path.as_path(),
+                    rootfs_image_config_path.as_path(),
+                ];
+                config_paths.extend(attached_drives.iter().map(|drive| match drive {
+                    ResolvedAttachedDrive::Overlaybd {
+                        image_config_path, ..
+                    } => image_config_path.as_path(),
+                }));
+                Self::record_image_configs(leases, layer_guard.digests(), &config_paths);
+                // The managed-layer guard keeps the remote layers leased until
+                // the launch hands over to the runtime set.
+                Arc::new(OssRuntimeLease {
+                    _cache: cache,
+                    _layers: layer_guard,
+                })
+            }
+            _ => Arc::new(cache),
+        };
 
         let runtime_manifest = hydrate_runtime_manifest(
             committed_manifest,
@@ -322,7 +470,7 @@ impl OssRuntimeResolver {
                 let download = download.clone();
                 async move {
                     let path = self
-                        .materialize_image_config(layers, &dest, spec.label, download)
+                        .materialize_image_config(layers, &dest, spec.label, download, spec.gated)
                         .await
                         .map_err(anyhow::Error::new)?;
                     tokio::fs::metadata(&path)
@@ -343,28 +491,25 @@ impl OssRuntimeResolver {
         Ok(path)
     }
 
-    /// Verify remote managed layers exist, build an `ImageConfig`, and write it.
+    /// Verify remote managed layers exist (unless the resolve gates them),
+    /// build an `ImageConfig`, and write it.
     async fn materialize_image_config(
         &self,
         layers: &[OverlaybdLayerRef],
         destination: &Path,
         label: &str,
         download: Option<DownloadConfig>,
+        gated: bool,
     ) -> RepositoryResult<PathBuf> {
-        let managed_layers = layers
-            .iter()
-            .enumerate()
-            .filter_map(|(index, layer)| match layer {
-                OverlaybdLayerRef::Managed(layer) => Some((index, layer.digest.clone())),
-                OverlaybdLayerRef::External(_) => None,
+        if !gated {
+            let managed_layers = managed_refs_to_check(layers);
+            let client = Arc::clone(&self.client);
+            validate_managed_layers(&managed_layers, label, move |key| {
+                let client = Arc::clone(&client);
+                async move { client.exists(&key).await }
             })
-            .collect::<Vec<_>>();
-        let client = Arc::clone(&self.client);
-        validate_managed_layers(&managed_layers, label, move |key| {
-            let client = Arc::clone(&client);
-            async move { client.exists(&key).await }
-        })
-        .await?;
+            .await?;
+        }
 
         self.image_materializer
             .materialize_image_config(
@@ -389,6 +534,7 @@ impl OssRuntimeResolver {
         &self,
         id: &SnapshotId,
         committed_drives: &[CommittedAttachedDrive],
+        gated: bool,
         handles: &mut Vec<CacheHandle>,
     ) -> RepositoryResult<Vec<ResolvedAttachedDrive>> {
         let mut drives = Vec::new();
@@ -425,6 +571,7 @@ impl OssRuntimeResolver {
                                 ),
                                 allow_empty_layers: false,
                                 download: None,
+                                gated,
                             },
                             handles,
                         )
@@ -510,6 +657,93 @@ mod tests {
 
     fn digest(index: usize) -> String {
         format!("sha256:{index:064x}")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_gate_runs_alongside_the_fetches_and_its_error_waits_for_them() {
+        let fetch = async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            Ok::<_, RepositoryError>("fetched")
+        };
+        let gate = async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            Ok::<(), RepositoryError>(())
+        };
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            fetch_alongside_gate(fetch, Some(gate)).await.unwrap(),
+            "fetched"
+        );
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(3),
+            "gate and fetch overlap"
+        );
+
+        let fetch_done = Arc::new(AtomicUsize::new(0));
+        let fetch = {
+            let fetch_done = Arc::clone(&fetch_done);
+            async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                fetch_done.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, RepositoryError>(())
+            }
+        };
+        let gate = async {
+            Err::<(), _>(RepositoryError::ArtifactNotFound {
+                artifact: "managed layer".to_string(),
+            })
+        };
+        let error = fetch_alongside_gate(fetch, Some(gate))
+            .await
+            .expect_err("gate failure fails the resolve");
+        assert!(matches!(error, RepositoryError::ArtifactNotFound { .. }));
+        assert_eq!(
+            fetch_done.load(Ordering::SeqCst),
+            1,
+            "the fetch branches finished (and cleaned up) first"
+        );
+
+        let ungated = fetch_alongside_gate(
+            async { Ok::<_, RepositoryError>(7) },
+            None::<std::future::Ready<RepositoryResult<()>>>,
+        )
+        .await;
+        assert_eq!(ungated.unwrap(), 7);
+    }
+
+    #[test]
+    fn ungated_materialization_checks_only_managed_refs_like_the_base_release() {
+        use crate::snapshot::{ExternalLayer, ManagedLayer};
+        let layers = vec![
+            OverlaybdLayerRef::Managed(ManagedLayer {
+                digest: digest(1),
+                size: 1,
+                uuid: None,
+            }),
+            OverlaybdLayerRef::External(ExternalLayer {
+                digest: digest(2),
+                repo_blob_url: "s3://bucket/prefix/managed-layers".to_string(),
+                size: 1,
+            }),
+        ];
+        assert_eq!(managed_refs_to_check(&layers), vec![(0, digest(1))]);
+    }
+
+    #[test]
+    fn gate_errors_map_missing_to_not_found_and_the_rest_to_retryable_backend_errors() {
+        let id = SnapshotId::generate();
+        assert!(matches!(
+            gate_error(&id, LayerCheckError::Missing { digest: digest(1) }),
+            RepositoryError::ArtifactNotFound { artifact } if artifact.contains(&digest(1))
+        ));
+        assert!(matches!(
+            gate_error(
+                &id,
+                LayerCheckError::Protect(anyhow::anyhow!("lease put failed"))
+            ),
+            RepositoryError::Backend { .. }
+        ));
     }
 
     #[tokio::test]
