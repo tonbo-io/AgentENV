@@ -11,7 +11,6 @@ use tracing::{debug, info};
 use super::client::OssClient;
 use super::layer_leases::{LayerLeaseGuard, LayerLeases, ProtectPath};
 use super::layer_refs::{committed_managed_layer_digests, managed_layer_ref_digest};
-use super::layer_store::LayerStore;
 use super::layout::OssSnapshotArtifactLayout;
 use crate::image::cache::OverlaybdLayerStore;
 use crate::p2p::P2pTransport;
@@ -663,6 +662,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn resolve_protects_before_validating_and_validates_external_managed_refs() {
         use super::super::layer_store::fake::{FakeLayerStore, OpKind};
+        use super::super::layer_store::LayerStore;
         use super::super::layout::{LAYER_GC_INTENTS_PREFIX, LAYER_GC_LEASES_PREFIX};
         use crate::snapshot::{ExternalLayer, ManagedLayer};
 
