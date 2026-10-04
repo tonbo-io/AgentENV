@@ -150,7 +150,9 @@ ts_sdk_script="${SUITE_DIR}/../e2b_ts_sdk_compat.ts"
 tsx_bin="${SUITE_DIR}/../node_modules/.bin/tsx"
 if [[ -f "$ts_sdk_script" ]] && command -v npm >/dev/null 2>&1; then
   log "Installing TypeScript SDK dependencies"
-  (cd "${SUITE_DIR}/.." && npm install --no-save --package-lock=false e2b@latest 2>&1)
+  # package.json pins the SDK: e2b 2.51+ creates sandboxes with
+  # POST /v2/sandboxes, which this API does not serve yet.
+  (cd "${SUITE_DIR}/.." && npm install --no-save --package-lock=false 2>&1)
   if ! "$tsx_bin" --version >/dev/null 2>&1; then
     warn "tsx not available after npm install; skipping TypeScript SDK checks"
     _pass "skipped TypeScript SDK checks (tsx not available)"

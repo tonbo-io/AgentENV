@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -22,6 +23,7 @@ use crate::sandbox::{
     SandboxNetworkPolicy, SandboxRuntimeInfo, SandboxSnapshotCaptureOutcome,
     SandboxSnapshotCaptureRequest, SandboxSnapshotSourceDisposition,
 };
+use crate::snapshot::repository::{NoopLayerRetention, SnapshotLayerRetention};
 use crate::snapshot::SnapshotRuntimeVersions;
 use crate::types::{bytes_to_mib_ceil, SandboxId, SandboxResources};
 
@@ -48,6 +50,9 @@ type SandboxHandle = Arc<Mutex<Box<dyn SandboxBackend>>>;
 /// never completes (e.g. the task holding the state panics without rolling back).
 const WAIT_TRANSITION_TIMEOUT: Duration = Duration::from_secs(60);
 const SANDBOX_EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// How often the repository layers read by running and paused sandboxes are
+/// handed to layer retention.
+const LAYER_RETENTION_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
 enum ShutdownOutcome {
@@ -114,6 +119,14 @@ pub struct Orchestrator<
     shutdown_tx: watch::Sender<bool>,
     shutdown_outcome: OnceCell<ShutdownOutcome>,
     image_refs: Arc<dyn RuntimeImageRefs>,
+    /// Keeps repository layers read by this node's sandboxes protected from
+    /// repository GC (OSS managed-layer leases; a no-op otherwise).
+    layer_retention: Arc<dyn SnapshotLayerRetention>,
+    /// Paused sandboxes restored from local persistence whose repository
+    /// layers have not been checked present since this process started (the
+    /// startup check failed or found a missing layer). Their resume re-checks
+    /// first and fails cleanly while a layer is missing.
+    unverified_paused_layers: std::sync::Mutex<HashSet<SandboxId>>,
     access_tokens: SandboxAccessTokenGenerator,
 }
 
@@ -133,7 +146,10 @@ impl<F> Orchestrator<InMemoryMetadataStore, F>
 where
     F: SandboxBackendFactory,
 {
-    pub async fn with_file_backed_store_and_factory(factory: F) -> Result<Arc<Self>> {
+    pub async fn with_file_backed_store_and_factory(
+        factory: F,
+        layer_retention: Arc<dyn SnapshotLayerRetention>,
+    ) -> Result<Arc<Self>> {
         let config = ConfigManager::global_config();
         let store = InMemoryMetadataStore::new();
         let persister = FileBackedSandboxPersister::new(
@@ -158,7 +174,15 @@ where
         .context("join node admission restore")?
         .context("restore durable node admission")?;
         let image_refs = local_image_services_from_global_config().runtime_refs;
-        Self::new_inner_with_admission(store, factory, persister, image_refs, admission).await
+        Self::new_inner_with_admission(
+            store,
+            factory,
+            persister,
+            image_refs,
+            admission,
+            layer_retention,
+        )
+        .await
     }
 }
 
@@ -185,6 +209,7 @@ where
             persister,
             image_refs,
             NodeAdmission::default(),
+            Arc::new(NoopLayerRetention),
         )
         .await
     }
@@ -195,6 +220,7 @@ where
         persister: P,
         image_refs: Arc<dyn RuntimeImageRefs>,
         admission: NodeAdmission,
+        layer_retention: Arc<dyn SnapshotLayerRetention>,
     ) -> Result<Arc<Self>> {
         let app_config = ConfigManager::global_config();
         let config = &app_config.orchestrator;
@@ -242,8 +268,23 @@ where
             shutdown_tx,
             shutdown_outcome: OnceCell::new(),
             image_refs,
+            layer_retention,
+            unverified_paused_layers: std::sync::Mutex::new(HashSet::new()),
             access_tokens,
         });
+
+        // Lease and check the repository layers of restored paused sandboxes
+        // before the node serves requests. Sandboxes whose layers could not be
+        // checked, or are missing, re-check on resume and fail cleanly there.
+        // Until the lease is written the previous process's lease still
+        // covers them for its TTL, and the refresh task below retries.
+        orchestrator
+            .protect_persisted_paused_layers(&restored_paused)
+            .await;
+        Self::start_layer_retention_task(
+            Arc::clone(&orchestrator),
+            orchestrator.shutdown_tx.subscribe(),
+        );
 
         // Start the auto-evict task.
         let evict_interval = Duration::from_millis(config.auto_evict_interval_ms);
@@ -342,6 +383,178 @@ where
             running.push((sandbox_id, artifacts));
         }
         running
+    }
+
+    /// Startup half of rule N1 for persisted paused sandboxes: records in
+    /// `unverified_paused_layers` every sandbox whose layers could not be
+    /// checked or are missing.
+    async fn protect_persisted_paused_layers(
+        &self,
+        restored_paused: &[(SandboxId, Arc<dyn PausedSandboxState>)],
+    ) {
+        let configs = restored_paused
+            .iter()
+            .map(|(sandbox_id, paused_state)| {
+                (
+                    *sandbox_id,
+                    paused_state
+                        .runtime_artifacts()
+                        .repository_image_config_paths(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let unverified = match self
+            .layer_retention
+            .protect_persisted_image_configs(
+                configs
+                    .iter()
+                    .flat_map(|(_, paths)| paths.iter().cloned())
+                    .collect(),
+            )
+            .await
+        {
+            Ok(missing) => {
+                let missing = missing.into_iter().collect::<HashSet<_>>();
+                configs
+                    .iter()
+                    .filter(|(_, paths)| paths.iter().any(|path| missing.contains(path)))
+                    .map(|(sandbox_id, _)| *sandbox_id)
+                    .collect::<HashSet<_>>()
+            }
+            Err(error) => {
+                warn!(
+                    error = %format!("{error:#}"),
+                    "failed to lease and check repository layers of persisted paused sandboxes; each resume checks them first"
+                );
+                configs.iter().map(|(sandbox_id, _)| *sandbox_id).collect()
+            }
+        };
+        for sandbox_id in &unverified {
+            warn!(
+                sandbox_id = %sandbox_id,
+                "persisted paused sandbox has unverified repository layers; its resume re-checks them"
+            );
+        }
+        *self
+            .unverified_paused_layers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = unverified;
+    }
+
+    /// Resume half of rule N1: before a persisted paused sandbox whose layers
+    /// were not verified at startup resumes, lease and check them again and
+    /// refuse to resume while one is missing.
+    async fn check_persisted_paused_layers(
+        &self,
+        sandbox_id: SandboxId,
+        paused_state: Option<&Arc<dyn PausedSandboxState>>,
+    ) -> Result<()> {
+        let unverified = self
+            .unverified_paused_layers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&sandbox_id);
+        let Some(paused_state) = paused_state.filter(|_| unverified) else {
+            return Ok(());
+        };
+        let failed = |source: anyhow::Error| OrchestratorError::SandboxOperationFailed {
+            sandbox_id,
+            operation: SandboxOperation::Resume,
+            source,
+        };
+        let missing = self
+            .layer_retention
+            .protect_persisted_image_configs(
+                paused_state
+                    .runtime_artifacts()
+                    .repository_image_config_paths(),
+            )
+            .await
+            .map_err(|error| failed(error.context("check repository layers of paused sandbox")))?;
+        if !missing.is_empty() {
+            return Err(failed(anyhow::anyhow!(
+                "repository layers read by {} are missing; the paused sandbox cannot resume",
+                missing
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        self.unverified_paused_layers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&sandbox_id);
+        Ok(())
+    }
+
+    /// Every repository image config (rootfs, attached drives and memory) read
+    /// by running sandboxes and by paused sandboxes in the store. `None` when
+    /// the paused sandboxes cannot be listed: a partial set would move their
+    /// layers into the tail as if they were gone.
+    async fn collect_layer_retention_configs(&self) -> Option<Vec<PathBuf>> {
+        let mut paths = self
+            .collect_running_artifacts()
+            .await
+            .into_iter()
+            .flat_map(|(_, artifacts)| artifacts.repository_image_config_paths())
+            .collect::<Vec<_>>();
+        match self.store.list().await {
+            Ok(sandboxes) => paths.extend(
+                sandboxes
+                    .iter()
+                    .filter_map(|metadata| metadata.paused_state.as_ref())
+                    .flat_map(|paused_state| {
+                        paused_state
+                            .runtime_artifacts()
+                            .repository_image_config_paths()
+                    }),
+            ),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "failed to list sandboxes for layer retention; keeping the previous runtime set"
+                );
+                return None;
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Some(paths)
+    }
+
+    /// Hand the current running and paused image configs to layer retention.
+    async fn refresh_layer_retention(&self) {
+        if let Some(paths) = self.collect_layer_retention_configs().await {
+            self.layer_retention.set_runtime_image_configs(paths).await;
+        }
+    }
+
+    fn start_layer_retention_task(this: Arc<Self>, mut shutdown_rx: watch::Receiver<bool>) {
+        let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
+            warn!("layer retention task not started: no Tokio runtime available");
+            return;
+        };
+        let this = Arc::downgrade(&this);
+        runtime_handle.spawn(async move {
+            let mut ticker = tokio::time::interval(LAYER_RETENTION_REFRESH_INTERVAL);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        let Some(this) = this.upgrade() else {
+                            break;
+                        };
+                        this.refresh_layer_retention().await;
+                    }
+                }
+            }
+        });
     }
 
     /// Fail-closed startup reconcile before maintenance can run: durably protect
@@ -1476,6 +1689,8 @@ where
                 node_mode,
             });
         }
+        self.check_persisted_paused_layers(sandbox_id, metadata.paused_state.as_ref())
+            .await?;
 
         match self
             .store

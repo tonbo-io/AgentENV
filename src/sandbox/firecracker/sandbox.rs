@@ -249,6 +249,12 @@ impl PausedSandboxState for FirecrackerPausedState {
         RuntimeArtifactSet::from_overlaybd_image_configs(rootfs_and_extra_drive_image_config_paths(
             &self.snapshot_config.common,
         ))
+        .with_memory_image_config(Some(
+            self.snapshot_config
+                .mem_overlaybd_config
+                .image_config_path
+                .clone(),
+        ))
     }
 }
 
@@ -445,18 +451,23 @@ impl SandboxBackend for FirecrackerSandbox {
             rootfs_virtual_size: self.current_rootfs_virtual_size,
             runtime_artifacts: RuntimeArtifactSet::from_overlaybd_image_configs(
                 self.runtime_image_config_paths(),
-            ),
+            )
+            .with_memory_image_config(self.mem_snapshot_image_config_path.clone()),
         }
     }
 
     fn startup_artifacts(&self) -> RuntimeArtifactSet {
-        let common = match &self.launch {
-            LaunchMode::Fresh(config) => &config.common,
-            LaunchMode::Resume(config) => &config.common,
+        let (common, memory) = match &self.launch {
+            LaunchMode::Fresh(config) => (&config.common, None),
+            LaunchMode::Resume(config) => (
+                &config.common,
+                Some(config.mem_overlaybd_config.image_config_path.clone()),
+            ),
         };
         RuntimeArtifactSet::from_overlaybd_image_configs(rootfs_and_extra_drive_image_config_paths(
             common,
         ))
+        .with_memory_image_config(memory)
     }
 
     async fn update_network_policy(&mut self, policy: Option<SandboxNetworkPolicy>) -> Result<()> {
@@ -2421,6 +2432,67 @@ mod tests {
     }
 
     #[test]
+    fn runtime_artifacts_include_memory_image_config_for_resumed_running_and_paused_states() {
+        let mut common = fresh_config().common;
+        common
+            .rootfs_image_config
+            .as_mut()
+            .expect("fresh config has a rootfs")
+            .image_config_path = "snapshot/rootfs/image.json".into();
+        let snapshot_config = FirecrackerSnapshotConfig {
+            common,
+            vm_state_path: "snapshot/vm_state.bin".into(),
+            mem_overlaybd_config: OverlaybdConfig {
+                image_config_path: "snapshot/mem_image.json".into(),
+                read_only: true,
+                runtime_upper_mode: overlaybd::config::UpperMode::LogStructured,
+            },
+            mem_virtual_size: 4096,
+            managed_snapshot_root: None,
+        };
+        let expected_repository = vec![
+            PathBuf::from("snapshot/rootfs/image.json"),
+            PathBuf::from("snapshot/mem_image.json"),
+        ];
+
+        let paused = FirecrackerPausedState::new(snapshot_config.clone()).runtime_artifacts();
+        assert_eq!(paused.repository_image_config_paths(), expected_repository);
+        assert_eq!(
+            paused.into_overlaybd_image_config_paths(),
+            vec![PathBuf::from("snapshot/rootfs/image.json")],
+            "image cache paths unchanged"
+        );
+
+        let resumed = FirecrackerSandbox::from_snapshot_config_with_override(
+            snapshot_config,
+            SandboxId::new(),
+            None,
+        )
+        .expect("resume sandbox");
+        let startup = resumed.startup_artifacts();
+        assert_eq!(startup.repository_image_config_paths(), expected_repository);
+        assert_eq!(
+            startup.into_overlaybd_image_config_paths(),
+            vec![PathBuf::from("snapshot/rootfs/image.json")]
+        );
+
+        let mut running = FirecrackerSandbox::new(fresh_config()).expect("fresh sandbox");
+        assert!(running
+            .runtime_info()
+            .runtime_artifacts
+            .repository_image_config_paths()
+            .is_empty());
+        running.mem_snapshot_image_config_path = Some("runtime/memory/image.json".into());
+        assert_eq!(
+            running
+                .runtime_info()
+                .runtime_artifacts
+                .repository_image_config_paths(),
+            vec![PathBuf::from("runtime/memory/image.json")]
+        );
+    }
+
+    #[test]
     fn paused_state_image_cache_paths_use_snapshot_artifact_config() {
         let mut common = fresh_config().common;
         common
@@ -2445,6 +2517,7 @@ mod tests {
             RuntimeArtifactSet::from_overlaybd_image_configs(vec![PathBuf::from(
                 "snapshot/rootfs/image.json"
             )])
+            .with_memory_image_config(Some(PathBuf::from("snapshot/mem_image.json")))
         );
     }
 

@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -43,6 +43,7 @@ pub(crate) enum OssUploadArtifact {
     FirecrackerManifest,
     CatalogRecord,
     Alias,
+    LayerGc,
 }
 
 impl OssUploadArtifact {
@@ -56,8 +57,21 @@ impl OssUploadArtifact {
             Self::FirecrackerManifest => "manifest",
             Self::CatalogRecord => "record",
             Self::Alias => "alias",
+            Self::LayerGc => "layer_gc",
         }
     }
+}
+
+/// One listed or stat'ed object with the metadata managed-layer GC relies on.
+///
+/// `last_modified` is the object store's own timestamp, so comparisons between
+/// two of these values never depend on node wall clocks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredObject {
+    /// Repository-relative key (the configured backend prefix is stripped).
+    pub(crate) key: String,
+    pub(crate) size: u64,
+    pub(crate) last_modified: SystemTime,
 }
 
 /// Thin wrapper around the OSS client used by the repository and resolver.
@@ -191,6 +205,83 @@ impl OssClient {
             .into_iter()
             .map(|p| p.strip_prefix(&strip).unwrap_or(&p).to_string())
             .collect())
+    }
+
+    /// List all files recursively under a prefix with their size and
+    /// object-store `LastModified`. Fails closed when the store omits
+    /// `LastModified` for any entry.
+    pub(crate) async fn list_objects_recursive(&self, prefix: &str) -> Result<Vec<StoredObject>> {
+        let mut metric = MetricGuard::operation(OSS_OPERATION_DURATION, "list_objects");
+        let result = self
+            .run_with_key(prefix, |operator, prefix| async move {
+                let entries = operator.list_with(&prefix).recursive(true).await?;
+                Ok(entries
+                    .into_iter()
+                    .filter(|entry| !entry.metadata().mode().is_dir())
+                    .map(|entry| {
+                        let metadata = entry.metadata();
+                        (
+                            entry.path().to_string(),
+                            metadata.content_length(),
+                            metadata.last_modified().map(SystemTime::from),
+                        )
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .await
+            .with_context(|| format!("oss list objects '{prefix}'"));
+        metric.finish(&result);
+        result?
+            .into_iter()
+            .map(|(path, size, last_modified)| {
+                let key = self.strip_prefix(&path);
+                let last_modified = last_modified.ok_or_else(|| {
+                    anyhow::anyhow!("oss listing omitted LastModified for '{key}'")
+                })?;
+                Ok(StoredObject {
+                    key,
+                    size,
+                    last_modified,
+                })
+            })
+            .collect()
+    }
+
+    /// Read one object's size and `LastModified`. Returns `None` when the
+    /// object does not exist.
+    pub(crate) async fn stat(&self, key: &str) -> Result<Option<StoredObject>> {
+        let mut metric = MetricGuard::operation(OSS_OPERATION_DURATION, "stat");
+        let result = self
+            .run_with_key(
+                key,
+                |operator, key| async move { operator.stat(&key).await },
+            )
+            .await;
+        let result = match result {
+            Ok(metadata) => metadata
+                .last_modified()
+                .map(SystemTime::from)
+                .ok_or_else(|| anyhow::anyhow!("oss stat omitted LastModified for '{key}'"))
+                .map(|last_modified| {
+                    Some(StoredObject {
+                        key: key.to_string(),
+                        size: metadata.content_length(),
+                        last_modified,
+                    })
+                }),
+            Err(error) if Self::is_not_found_error(&error) => Ok(None),
+            Err(error) => Err(error.context(format!("oss stat '{key}'"))),
+        };
+        metric.finish(&result);
+        result
+    }
+
+    fn strip_prefix(&self, path: &str) -> String {
+        if self.prefix.is_empty() {
+            return path.to_string();
+        }
+        let strip = format!("{}/", self.prefix);
+        path.strip_prefix(&strip).unwrap_or(path).to_string()
     }
 
     /// Write small data (catalog JSON, alias JSON, etc.).

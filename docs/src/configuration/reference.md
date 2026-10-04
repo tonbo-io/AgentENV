@@ -425,6 +425,21 @@ local raw layers whose digest is absent from the committed record — the
 record names the compressed bytes, so the raw digest key would never be
 looked up by consumers.
 
+## `[snapshot.layer_gc]`
+
+Collection of OSS managed layers (`managed-layers/sha256:*`) that no catalog record references and no live node lease holds. Every node using the OSS backend always writes its managed-layer lease under `layer-gc/leases/`, whatever this section says; the section only decides whether this node also runs GC passes. Any mode other than `off` requires `snapshot.repository_backend = "oss"`. Read [Snapshot Layer GC](../internals/snapshot-layer-gc.md) before enabling `delete`: every node writing to the same bucket and prefix must run a lease-writing release first.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | string | `"off"` | `off` runs no passes. `report` classifies every managed layer (referenced, leased, young, unrecognized, garbage) and writes a run report and metrics without deleting any managed layer; like `delete`, it removes stale GC intents and week-old leases. `delete` additionally deletes garbage layers under the deletion-intent protocol. |
+| `interval_secs` | integer | `3600` | Seconds between passes, with ±10% jitter. The first pass runs at a random point 5 to 10 minutes after process start. Minimum `300`. |
+| `grace_secs` | integer | `86400` | Only objects whose object-store `LastModified` is older than this are collected. Minimum `3600`. |
+| `max_deletes_per_pass` | integer | `1000` | Upper bound on deletions (and deletion-intent size) per pass, oldest first. Valid range `1..=10000`. |
+
+Environment variable overrides:
+
+- `AENV_SNAPSHOT_LAYER_GC_MODE`
+
 ## `[backend.posix_fs]`
 
 POSIX filesystem-backed snapshot repository configuration. This section is used when `snapshot.repository_backend = "posix_fs"`.

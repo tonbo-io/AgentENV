@@ -2,9 +2,9 @@ use anyhow::Result;
 use aws_config::{meta::region::RegionProviderChain, BehaviorVersion};
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::Client as S3Client;
+use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, ImageExt};
-use testcontainers_modules::minio::MinIO;
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 pub const MINIO_USER: &str = "minioadmin";
 pub const MINIO_PASS: &str = "minioadmin";
@@ -16,18 +16,29 @@ pub struct MinioFixture {
     pub bucket: String,
     pub region: String,
     pub client: S3Client,
-    _container: ContainerAsync<MinIO>,
+    _container: ContainerAsync<GenericImage>,
 }
 
 impl MinioFixture {
     pub async fn start() -> Result<Self> {
-        // Docker Hub removed this historical image. Keep the same release from
-        // the publisher's Quay registry, pinned to its multi-platform manifest.
-        let container = MinIO::default()
-            .with_name("quay.io/minio/minio")
-            .with_tag("RELEASE.2022-02-07T08-17-33Z@sha256:7dda745aefd6152f0d04fdd23377f9e52549df3fc4307f16b8bc562ae2b8119f")
-            .start()
-            .await?;
+        // MinIO no longer publishes pullable server images on Docker Hub or
+        // Quay. Bitnami's frozen legacy build (MinIO 2025.7.23) stays public;
+        // pin its multi-platform manifest and run the server binary directly
+        // instead of Bitnami's setup entrypoint. The image runs as UID 1001,
+        // so the data directory lives under /tmp.
+        let container = GenericImage::new(
+            "bitnamilegacy/minio",
+            "2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20",
+        )
+        .with_entrypoint("/opt/bitnami/minio/bin/minio")
+        .with_exposed_port(9000.tcp())
+        // MinIO releases since 2023 print the startup banner on stderr.
+        .with_wait_for(WaitFor::message_on_stderr("API:"))
+        .with_env_var("MINIO_ROOT_USER", MINIO_USER)
+        .with_env_var("MINIO_ROOT_PASSWORD", MINIO_PASS)
+        .with_cmd(["server", "/tmp/minio-data"])
+        .start()
+        .await?;
         let port = container.get_host_port_ipv4(9000).await?;
         let endpoint = format!("http://127.0.0.1:{port}");
         let client = build_s3_client(&endpoint).await;
@@ -51,6 +62,33 @@ impl MinioFixture {
             .send()
             .await;
         Ok(result.is_ok())
+    }
+
+    pub async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<()> {
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(body.into())
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// Keys under `prefix` (first page of up to 1000 keys).
+    pub async fn list_keys(&self, prefix: &str) -> Result<Vec<String>> {
+        let output = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .send()
+            .await?;
+        Ok(output
+            .contents()
+            .iter()
+            .filter_map(|object| object.key().map(str::to_string))
+            .collect())
     }
 
     pub fn object_url(&self, key: &str) -> String {

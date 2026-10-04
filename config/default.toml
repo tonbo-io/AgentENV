@@ -251,6 +251,18 @@ algorithm = "lz4"
 # parallel without changing the output layout.
 workers = 1
 
+# OSS only: collect managed layers (managed-layers/sha256:*) that no catalog
+# record references and no node lease holds. Every OSS-backed node always
+# writes its lease under layer-gc/leases/; this section only decides whether
+# this node also runs GC passes. "report" classifies and reports without
+# deleting; "delete" removes unreferenced layers older than grace_secs. See
+# docs/src/internals/snapshot-layer-gc.md before enabling "delete".
+# [snapshot.layer_gc]
+# mode = "off"                  # "off" | "report" | "delete"; env AENV_SNAPSHOT_LAYER_GC_MODE
+# interval_secs = 3600          # >= 300, ±10% jitter; first pass 5-10 min after start
+# grace_secs = 86400            # >= 3600
+# max_deletes_per_pass = 1000   # 1..=10000
+
 # POSIX storage defaults under AENV_HOME. Set this for a shared or independent
 # snapshot filesystem.
 # [backend.posix_fs]

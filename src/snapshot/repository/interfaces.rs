@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -198,4 +199,44 @@ pub trait SnapshotRepository: Send + Sync {
 pub trait SnapshotRuntimeResolver: Send + Sync {
     /// Resolves one committed snapshot record into a runtime-ready view for the current node.
     async fn resolve(&self, snapshot: Arc<SnapshotRecord>) -> RepositoryResult<RunnableSnapshot>;
+}
+
+#[async_trait]
+/// Keeps the repository layers that this node's sandboxes read protected from
+/// repository garbage collection.
+///
+/// Backends whose shared layers are collected (OSS managed layers) lease every
+/// layer named by the overlaybd image configs of the node's running and paused
+/// sandboxes; other backends use [`NoopLayerRetention`]. Paths are opaque
+/// overlaybd `image.json` files (rootfs, attached drives and memory).
+pub trait SnapshotLayerRetention: Send + Sync {
+    /// Lease the layers named by paused sandboxes' image configs restored
+    /// from local persistence, wait until no GC pass can still delete them,
+    /// and check that every repository layer they read exists. Returns the
+    /// configs that read a missing layer: their sandboxes must not resume.
+    /// An error means nothing was checked; callers must check again (with
+    /// the same call) before resuming those sandboxes.
+    async fn protect_persisted_image_configs(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> anyhow::Result<Vec<PathBuf>>;
+
+    /// Replace the set of image configs read by running and paused sandboxes.
+    async fn set_runtime_image_configs(&self, paths: Vec<PathBuf>);
+}
+
+/// Layer retention for backends without shared-layer collection.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopLayerRetention;
+
+#[async_trait]
+impl SnapshotLayerRetention for NoopLayerRetention {
+    async fn protect_persisted_image_configs(
+        &self,
+        _paths: Vec<PathBuf>,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    async fn set_runtime_image_configs(&self, _paths: Vec<PathBuf>) {}
 }
