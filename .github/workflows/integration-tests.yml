@@ -128,14 +128,23 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
+      # e2b SDK 2.51+ (CLI 2.21+) creates sandboxes with POST /v2/sandboxes,
+      # which the AgentENV API does not serve yet; pin the last releases that
+      # use POST /sandboxes. The CLI is installed into a private prefix so the
+      # override also pins the SDK it depends on.
       - name: Install e2b CLI
-        run: npm install -g @e2b/cli
+        run: |
+          cli_dir="$RUNNER_TEMP/e2b-cli"
+          mkdir -p "$cli_dir"
+          echo '{"private":true,"overrides":{"e2b":"2.50.0"}}' > "$cli_dir/package.json"
+          npm install --prefix "$cli_dir" --no-audit --no-fund @e2b/cli@2.20.0
+          echo "$cli_dir/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Install Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install e2b Python SDK
-        run: python3 -m pip install --upgrade e2b e2b-code-interpreter
+        run: python3 -m pip install e2b==2.50.0 e2b-code-interpreter==2.10.0
       - name: E2E tests (${{ matrix.e2e_name }})
         run: |
           if [[ "${{ matrix.e2e_name }}" == "single-node" ]]; then
