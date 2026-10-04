@@ -1269,6 +1269,12 @@ mod tests {
     async fn final_lease_read_beyond_p_max_aborts_after_the_intent_and_removes_it() {
         let store = Arc::new(FakeLayerStore::new());
         put_layer(&store, 1, OLD);
+        // Classification ends 5 s before the pass span runs out.
+        store.set_latency(
+            OpKind::List,
+            CATALOG_RECORDS_PREFIX,
+            PASS_MAX_SPAN - Duration::from_secs(5),
+        );
         let gc = Arc::new(gc(&store, SnapshotLayerGcMode::Delete));
         let mut pause = store.pause(OpKind::Put, LAYER_GC_INTENTS_PREFIX);
         let pass = tokio::spawn({
@@ -1279,12 +1285,13 @@ mod tests {
             }
         });
         // The intent write is reached after classification; from now on the
-        // final lease listing takes longer than the whole pass may.
+        // final lease listing (within its own request timeout) outlasts the
+        // remaining pass span.
         pause.reached().await;
         store.set_latency(
             OpKind::List,
             LAYER_GC_LEASES_PREFIX,
-            PASS_MAX_SPAN + Duration::from_secs(60),
+            Duration::from_secs(10),
         );
         pause.release();
         let report = pass.await.unwrap();
