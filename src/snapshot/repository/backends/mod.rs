@@ -70,13 +70,14 @@ pub fn build_snapshot_backend(
             };
             let cache =
                 LocalArtifactCache::new(shared_cache_root.clone(), oss_config.cache_max_size_gb)?;
-            let node_id = NodeIdentity::from_config(&config.node_identity).id;
             let backend = OssBackend::from_parts(
                 oss_config,
                 snapshot_image_storage,
                 &config.snapshot.publish_compression,
                 &config.snapshot.layer_gc,
-                &node_id,
+                // Only report and delete modes name the node in a lease; off
+                // never resolves the identity here.
+                || NodeIdentity::from_config(&config.node_identity).id,
                 cache,
                 shared_cache_root.join("runtime"),
                 overlaybd_layers,

@@ -19,11 +19,14 @@ pub(crate) trait LayerStore: Send + Sync + 'static {
     async fn list_objects(&self, prefix: &str) -> Result<Vec<StoredObject>>;
     /// Read a small object; `None` when it does not exist.
     async fn get_object(&self, key: &str) -> Result<Option<Bytes>>;
-    /// Write a small object.
+    /// Write a small object with a single request: a reported success means
+    /// that request landed (no earlier attempt can land after it), and a
+    /// failure may still land later.
     async fn put_object(&self, key: &str, data: Bytes) -> Result<()>;
     /// Stat one object; `None` when it does not exist.
     async fn stat_object(&self, key: &str) -> Result<Option<StoredObject>>;
-    /// Delete one object. Deleting a missing object succeeds.
+    /// Delete one object with a single request (as `put_object`). Deleting a
+    /// missing object succeeds.
     async fn delete_object(&self, key: &str) -> Result<()>;
 }
 
@@ -42,7 +45,8 @@ impl LayerStore for OssClient {
     }
 
     async fn put_object(&self, key: &str, data: Bytes) -> Result<()> {
-        self.put_bytes(key, data, OssUploadArtifact::LayerGc).await
+        self.put_bytes_single_attempt(key, data, OssUploadArtifact::LayerGc)
+            .await
     }
 
     async fn stat_object(&self, key: &str) -> Result<Option<StoredObject>> {
@@ -50,7 +54,7 @@ impl LayerStore for OssClient {
     }
 
     async fn delete_object(&self, key: &str) -> Result<()> {
-        self.delete(key).await
+        self.delete_single_attempt(key).await
     }
 }
 

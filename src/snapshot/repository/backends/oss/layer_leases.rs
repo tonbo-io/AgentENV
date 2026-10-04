@@ -64,10 +64,10 @@ pub(crate) const LEASE_TAIL: Duration = Duration::from_secs(2 * 60 * 60);
 pub(crate) const INTENT_WAIT: Duration = Duration::from_secs(120);
 /// D_req: timeout of every lease, intent, existence-check and GC request.
 pub(crate) const STORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// Overall bound of one gate, not counting the [`INTENT_WAIT`] sleep. Lease
-/// writes are single-flight, so a gate waits for at most the write in
-/// flight and one more write (2 × 15 s) and then lists and reads intents
-/// and checks layers.
+/// Overall bound of one gate, not counting the [`INTENT_WAIT`] sleep. It
+/// covers waiting for the lease writer (a FIFO lock shared with the
+/// refresher and the GC, so a gate may queue behind several writes),
+/// listing and reading intents and checking layers; a gate past it fails.
 pub(crate) const GATE_TIMEOUT: Duration = Duration::from_secs(45);
 
 const LEASE_STALE_ERROR_AGE: Duration = Duration::from_secs(60 * 60);
@@ -229,8 +229,8 @@ struct LeaseState {
     last_success: Option<BootInstant>,
     /// Number of lease writes started so far (single-flight ticket).
     writes_started: u64,
-    /// Ticket and error of the last write if it failed; `None` after a
-    /// success or a cancelled write.
+    /// Ticket and error of the last write that failed; `None` after a
+    /// success. A cancelled write leaves it unchanged.
     last_failure: Option<(u64, String)>,
     shrink_pending_since: Option<BootInstant>,
     /// When each unreadable, unrecorded runtime image config was last logged.
@@ -341,8 +341,11 @@ impl Drop for PendingWrite<'_> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.abandon_key(&attempted);
-            // Not a store failure: waiters queued behind it write themselves.
-            state.last_failure = None;
+            // A cancellation is not a store outcome, so it records none; it
+            // also keeps any failure already recorded, so gates that were
+            // queued behind that failed write still take its outcome instead
+            // of writing again. Gates whose only awaited write was this one
+            // write themselves.
             metrics::counter!(
                 "agentenv_snapshot_layer_lease_writes_total",
                 "reason" => "cancelled",
@@ -365,9 +368,9 @@ pub(crate) struct LayerLeases {
     /// managed lowers apart from local and foreign ones.
     managed_layers_repo_blob_url: String,
     state: Mutex<LeaseState>,
-    /// Serializes lease writes. Writes are single-flight: a gate takes the
-    /// outcome of any write that started after it registered its digests
-    /// instead of issuing its own.
+    /// Serializes lease writes (FIFO, shared by gates, the refresher and the
+    /// GC). A gate takes the failure of any write that started after it
+    /// registered its digests instead of issuing its own.
     writer: tokio::sync::Mutex<()>,
     /// Boot-clock start, reported as the lease age until the first
     /// successful write.
@@ -829,10 +832,12 @@ impl LayerLeases {
 
     /// Make `required` durable in a fresh lease. The caller registered the
     /// digests in the live set first, so any write that starts after this
-    /// call carries them. Writes are single-flight: when a write that
-    /// started after this call failed, its error is returned rather than
-    /// queueing another write, so concurrent gates during a store brownout
-    /// fail together after at most the write in flight and one more.
+    /// call carries them. When a write that started after this call failed,
+    /// its error is returned rather than queueing another write, so during a
+    /// store brownout queued gates share failed writes instead of writing
+    /// one by one. The writer is a FIFO lock also taken by the refresher and
+    /// the GC, so a gate may still wait behind several writes; the gate
+    /// deadline bounds it.
     async fn ensure_durable(&self, required: &BTreeSet<String>) -> Result<()> {
         let ticket = {
             let state = self.lock_state();
@@ -1487,6 +1492,26 @@ mod tests {
             "the write in flight plus one shared write"
         );
         assert!(started.elapsed() <= Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_cancelled_lease_write_keeps_the_recorded_failure_for_queued_gates() {
+        let state = Mutex::new(LeaseState::new());
+        state.lock().unwrap().last_failure = Some((1, "store brownout".to_string()));
+        drop(PendingWrite {
+            state: &state,
+            attempted: Some(digests(&[1])),
+        });
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.last_failure,
+            Some((1, "store brownout".to_string())),
+            "a cancellation must not hide a failure queued gates should share"
+        );
+        assert_eq!(
+            state.generation, 1,
+            "the cancelled write's key is abandoned"
+        );
     }
 
     #[tokio::test(start_paused = true)]

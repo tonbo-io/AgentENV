@@ -66,8 +66,8 @@ pub(crate) const PRE_DELETE_BUDGET: Duration = Duration::from_secs(20);
 /// G4b: DELETEs are issued only within this long after the rewrite was sent,
 /// on the boot clock.
 pub(crate) const DELETE_PHASE_BUDGET: Duration = Duration::from_secs(20);
-/// A3: a DELETE that timed out lands, if at all, within this long after its
-/// timeout.
+/// A3: a DELETE is a single request (no client retry), and one that failed
+/// or timed out lands, if at all, within this long after its timeout.
 pub(crate) const DELETE_LANDING_BOUND: Duration = Duration::from_secs(60);
 /// P_max: maximum span from the catalog listing to the end of the final lease
 /// read (checked in object-store time). Must stay below the lease tail (2 h).
@@ -899,10 +899,10 @@ impl LayerGc {
             // No DELETE was issued: nothing can still land.
             self.remove_intent(&intent_key).await;
         } else {
-            // A DELETE reported as successful does not prove that no earlier
-            // attempt of it (a client retry after a connection error) is
-            // still in flight, and a failed one may land later: keep the
-            // intent until every landing bound has passed.
+            // A failed DELETE may land later. Every DELETE is a single
+            // request, so a successful one has landed, but one rule is kept:
+            // a pass that issued any DELETE holds its intent until every
+            // landing bound has passed.
             self.hold_intent(&intent_key, intent_acked, shutdown).await;
         }
         Ok(deleted)

@@ -178,7 +178,7 @@ impl OssBackend {
             SnapshotImageStoragePolicy::default(),
             publish_compression,
             layer_gc,
-            "local",
+            || "local".to_string(),
             cache,
             cache_root.join("runtime"),
             local_image_services_from_global_config().overlaybd_layers,
@@ -193,7 +193,7 @@ impl OssBackend {
         snapshot_image_storage: SnapshotImageStoragePolicy,
         publish_compression: &SnapshotPublishCompressionConfig,
         layer_gc: &SnapshotLayerGcConfig,
-        node_id: &str,
+        node_id: impl FnOnce() -> String,
         cache: Arc<LocalArtifactCache>,
         runtime_root: PathBuf,
         store: Arc<dyn OverlaybdLayerStore>,
@@ -218,7 +218,7 @@ impl OssBackend {
                 let layer_store = Arc::clone(&client) as Arc<dyn LayerStore>;
                 let leases = LayerLeases::new(
                     Arc::clone(&layer_store),
-                    node_id,
+                    &node_id(),
                     &managed_layers_repo_blob_url,
                     layer_gc.mode,
                 )?;

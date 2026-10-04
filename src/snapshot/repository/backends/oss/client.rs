@@ -74,13 +74,27 @@ pub(crate) struct StoredObject {
     pub(crate) last_modified: SystemTime,
 }
 
+/// How many requests one operation may send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Attempts {
+    /// OpenDAL's retry layer retries temporary errors.
+    Retried,
+    /// No retry layer: a reported success means the only request landed, so
+    /// no earlier attempt of the same operation can land after it. Managed-
+    /// layer GC protocol writes rely on this.
+    Single,
+}
+
 /// Thin wrapper around the OSS client used by the repository and resolver.
 #[derive(Clone, Debug)]
 pub(crate) struct OssClient {
     operator_config: ObjectStoreOperatorConfig,
+    /// `operator_config` with retries disabled, for [`Attempts::Single`].
+    single_attempt_config: ObjectStoreOperatorConfig,
     prefix: String,
     credentials: Arc<CachedCredentialSource>,
     cached_operator: Arc<RwLock<Option<OperatorWithCredential>>>,
+    cached_single_attempt_operator: Arc<RwLock<Option<OperatorWithCredential>>>,
 }
 
 impl OssClient {
@@ -96,18 +110,25 @@ impl OssClient {
         // explicit config override then wins over the detected style.
         let detected_style = detect_addressing_style(&endpoint, &bucket)?;
         let addressing_style = addressing_override.unwrap_or(detected_style);
+        let operator_config = ObjectStoreOperatorConfig {
+            addressing_style,
+            bucket,
+            endpoint,
+            region,
+            timeout: None,
+            max_retries: None,
+        };
+        let single_attempt_config = ObjectStoreOperatorConfig {
+            max_retries: Some(0),
+            ..operator_config.clone()
+        };
         Ok(Self {
-            operator_config: ObjectStoreOperatorConfig {
-                addressing_style,
-                bucket,
-                endpoint,
-                region,
-                timeout: None,
-                max_retries: None,
-            },
+            operator_config,
+            single_attempt_config,
             prefix,
             credentials: Arc::new(CachedCredentialSource::new(credential_source)),
             cached_operator: Arc::new(RwLock::new(None)),
+            cached_single_attempt_operator: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -291,13 +312,37 @@ impl OssClient {
         data: impl Into<Bytes>,
         artifact: OssUploadArtifact,
     ) -> Result<()> {
-        let data = data.into();
+        self.put_bytes_with(key, data.into(), artifact, Attempts::Retried)
+            .await
+    }
+
+    /// Write small data with exactly one PUT request: no client retry, so a
+    /// reported success means that request landed and a failure (including
+    /// a timeout) may still land later. Used by managed-layer GC protocol
+    /// writes.
+    pub(crate) async fn put_bytes_single_attempt(
+        &self,
+        key: &str,
+        data: Bytes,
+        artifact: OssUploadArtifact,
+    ) -> Result<()> {
+        self.put_bytes_with(key, data, artifact, Attempts::Single)
+            .await
+    }
+
+    async fn put_bytes_with(
+        &self,
+        key: &str,
+        data: Bytes,
+        artifact: OssUploadArtifact,
+        attempts: Attempts,
+    ) -> Result<()> {
         let size = data.len() as u64;
         let oss_key = self.full_key(key);
         let mut metric =
             MetricGuard::operation_artifact(OSS_OPERATION_DURATION, "put_bytes", artifact.as_str());
         let result = self
-            .run_with_operator(|operator| {
+            .run_with_operator_attempts(attempts, |operator| {
                 let data = data.clone();
                 let oss_key = oss_key.clone();
                 async move { write_bytes_to_operator(&operator, &oss_key, data).await }
@@ -378,11 +423,25 @@ impl OssClient {
 
     /// Delete a single object. Idempotent – missing objects are not errors.
     pub(crate) async fn delete(&self, key: &str) -> Result<()> {
-        self.run_with_key(key, |operator, key| async move {
-            match operator.delete(&key).await {
-                Ok(()) => Ok(()),
-                Err(err) if err.kind() == OpenDalErrorKind::NotFound => Ok(()),
-                Err(err) => Err(err),
+        self.delete_with(key, Attempts::Retried).await
+    }
+
+    /// Delete a single object with exactly one DELETE request (see
+    /// [`Self::put_bytes_single_attempt`]). Used by managed-layer GC.
+    pub(crate) async fn delete_single_attempt(&self, key: &str) -> Result<()> {
+        self.delete_with(key, Attempts::Single).await
+    }
+
+    async fn delete_with(&self, key: &str, attempts: Attempts) -> Result<()> {
+        let oss_key = self.full_key(key);
+        self.run_with_operator_attempts(attempts, |operator| {
+            let oss_key = oss_key.clone();
+            async move {
+                match operator.delete(&oss_key).await {
+                    Ok(()) => Ok(()),
+                    Err(err) if err.kind() == OpenDalErrorKind::NotFound => Ok(()),
+                    Err(err) => Err(err),
+                }
             }
         })
         .await
@@ -432,31 +491,64 @@ impl OssClient {
         F: Fn(Operator) -> Fut,
         Fut: std::future::Future<Output = opendal::Result<T>>,
     {
+        self.run_with_operator_attempts(Attempts::Retried, operation)
+            .await
+    }
+
+    async fn run_with_operator_attempts<T, F, Fut>(
+        &self,
+        attempts: Attempts,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: Fn(Operator) -> Fut,
+        Fut: std::future::Future<Output = opendal::Result<T>>,
+    {
         // Centralizes one-shot operator construction plus credential-refresh
         // retry semantics so individual OSS operations don't each have to
-        // reason about cached credentials and operator replacement.
-        let current = self.ensure_fresh_operator().await?;
-        let (value, refreshed) = run_with_refresh(
-            &current,
-            Some(self.credentials.as_ref()),
-            &self.operator_config,
-            operation,
-        )
-        .await
-        .map_err(anyhow::Error::from)?;
+        // reason about cached credentials and operator replacement. The
+        // refresh path sends a second request only after the store answered
+        // the first with permission denied, so it never leaves an earlier
+        // request of a single-attempt operation in flight.
+        let (config, cache) = self.operator_slot(attempts);
+        let current = self.ensure_fresh_operator(config, cache).await?;
+        let (value, refreshed) =
+            run_with_refresh(&current, Some(self.credentials.as_ref()), config, operation)
+                .await
+                .map_err(anyhow::Error::from)?;
         if let Some(refreshed) = refreshed {
-            *self.cached_operator.write().await = Some(refreshed);
+            *cache.write().await = Some(refreshed);
         }
         Ok(value)
     }
 
-    async fn ensure_fresh_operator(&self) -> Result<OperatorWithCredential> {
+    fn operator_slot(
+        &self,
+        attempts: Attempts,
+    ) -> (
+        &ObjectStoreOperatorConfig,
+        &RwLock<Option<OperatorWithCredential>>,
+    ) {
+        match attempts {
+            Attempts::Retried => (&self.operator_config, &self.cached_operator),
+            Attempts::Single => (
+                &self.single_attempt_config,
+                &self.cached_single_attempt_operator,
+            ),
+        }
+    }
+
+    async fn ensure_fresh_operator(
+        &self,
+        config: &ObjectStoreOperatorConfig,
+        cache: &RwLock<Option<OperatorWithCredential>>,
+    ) -> Result<OperatorWithCredential> {
         let credential = self.credentials.current().await?.ok_or_else(|| {
             anyhow::anyhow!("snapshot OSS client requires non-anonymous credentials")
         })?;
 
         {
-            let cached = self.cached_operator.read().await;
+            let cached = cache.read().await;
             if let Some(state) = cached.as_ref() {
                 if state.credential() == Some(&credential) {
                     return Ok(state.clone());
@@ -465,10 +557,10 @@ impl OssClient {
         }
 
         let entry = OperatorWithCredential::new(
-            build_object_store_operator(&self.operator_config, Some(&credential))?,
+            build_object_store_operator(config, Some(&credential))?,
             Some(credential),
         );
-        *self.cached_operator.write().await = Some(entry.clone());
+        *cache.write().await = Some(entry.clone());
         Ok(entry)
     }
 }
@@ -552,7 +644,7 @@ fn io_error_to_opendal(error: std::io::Error, message: &'static str) -> OpenDalE
 
 #[cfg(test)]
 mod tests {
-    use super::{upload_chunk_size, OssClient, MAX_MULTIPART_PARTS, MIN_CHUNK_SIZE};
+    use super::{upload_chunk_size, Attempts, OssClient, MAX_MULTIPART_PARTS, MIN_CHUNK_SIZE};
     use object_store_operator::{AddressingStyle, CredentialSource};
 
     #[test]
@@ -584,6 +676,28 @@ mod tests {
             overridden.operator_config.addressing_style,
             AddressingStyle::Virtual
         );
+    }
+
+    #[test]
+    fn single_attempt_operations_disable_retries_on_the_same_target() {
+        let client = OssClient::new(
+            "snapshots".to_string(),
+            "https://t3.storage.dev".to_string(),
+            "auto".to_string(),
+            "prefix".to_string(),
+            CredentialSource::Anonymous,
+            None,
+        )
+        .expect("build client");
+        let (retried, _) = client.operator_slot(Attempts::Retried);
+        let (single, _) = client.operator_slot(Attempts::Single);
+        assert_eq!(retried.max_retries, None);
+        assert_eq!(single.max_retries, Some(0));
+        assert_eq!(single.bucket, retried.bucket);
+        assert_eq!(single.endpoint, retried.endpoint);
+        assert_eq!(single.region, retried.region);
+        assert_eq!(single.addressing_style, retried.addressing_style);
+        assert_eq!(single.timeout, retried.timeout);
     }
 
     #[test]
