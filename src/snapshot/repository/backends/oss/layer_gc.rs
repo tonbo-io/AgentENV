@@ -895,11 +895,13 @@ impl LayerGc {
                 .cmp(&right.last_modified_unix_ms)
                 .then_with(|| left.digest.cmp(&right.digest))
         });
-        if report.delete_failures == 0 {
-            // Every issued DELETE has landed: nodes no longer need to wait.
+        if deleted.is_empty() && report.delete_failures == 0 {
+            // No DELETE was issued: nothing can still land.
             self.remove_intent(&intent_key).await;
         } else {
-            // A failed or timed-out DELETE may still land later: keep the
+            // A DELETE reported as successful does not prove that no earlier
+            // attempt of it (a client retry after a connection error) is
+            // still in flight, and a failed one may land later: keep the
             // intent until every landing bound has passed.
             self.hold_intent(&intent_key, intent_acked, shutdown).await;
         }

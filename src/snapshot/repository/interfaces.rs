@@ -206,7 +206,7 @@ pub trait SnapshotRuntimeResolver: Send + Sync {
 pub enum PersistedLayerCheck {
     /// In the background after the node restored its persisted sandboxes.
     Startup,
-    /// Before resuming a sandbox the startup check has not verified.
+    /// Before resuming any paused sandbox.
     Resume,
 }
 

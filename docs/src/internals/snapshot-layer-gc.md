@@ -14,13 +14,13 @@ Code: `src/snapshot/repository/backends/oss/{layer_refs,layer_store,layer_leases
 | --- | --- | --- | --- |
 | Restore | As without GC: managed rootfs, drive and memory lowers are HEADed inside the image-config cache fill on a cache miss. | As `off`, plus an in-memory hold of the restore's layers (no request, no wait, no failure). | Hold, then the gate (below) as one more branch of the restore's concurrent fetches. A missing layer fails with `ArtifactNotFound`; any other gate failure is a retryable backend error. |
 | Publication | As without GC. | As `off`, plus an in-memory hold of every layer the record names until the record write. | Hold and gate every layer the record names before the alias and record writes; failures are retryable backend errors raised before the record exists. |
-| Resume of a persisted paused sandbox | As without GC. | As without GC. | Gated only while the background startup check has not verified the sandbox; only its remote managed lowers are checked. A missing layer fails the resume (`SandboxOperationFailed(Resume)`) and leaves the sandbox paused. |
-| Startup | As without GC. | Nothing extra; the first refresh covers persisted paused sandboxes. | Restored paused sandboxes start unverified and are verified in a background task. Nothing blocks the API listener. |
+| Resume of a paused sandbox | As without GC. | As without GC. | Every resume gates the sandbox's remote managed lowers; layers verified earlier and held in a fresh lease cost no request. A missing layer fails the resume (`SandboxOperationFailed(Resume)`) and leaves the sandbox paused. |
+| Startup | As without GC. | Nothing extra; the first refresh covers persisted paused sandboxes. | Restored paused sandboxes are verified in a background task, which warms the gate for their resumes and logs missing layers. Nothing blocks the API listener. |
 | Shutdown | As without GC. | Sends a stop signal; waits for nothing. | Sends a stop signal; waits for nothing. A pass stops issuing deletes; an interrupted pass leaves its intent for any runner's stale-intent cleanup. |
 | Background | Nothing. | Lease refresher, the orchestrator's 60 s runtime refresh, report passes. | As `report`, with delete passes. |
 | Writes under `layer-gc/` | None. | Its lease (declaring `report`), its run report, removal of stale intents and week-old leases. | As `report` with a lease declaring `delete`, plus deletion intents. |
 
-The gate (rule N1) makes no request when every needed digest was verified by an earlier gate and the lease holding it was written successfully less than 12 hours ago (boot clock). Otherwise it makes the digests durable in the node's lease (at most one coalesced PUT), lists `layer-gc/intents/` once and reads each listed intent (16 concurrent), sleeps 120 s only when an intent names a needed digest, HEADs the unverified digests (16 concurrent, stopping at the first error) and marks them verified. Every request has a 15 s timeout. In a restore, nothing reads a managed layer before the resolve returns, and the resolve returns only after the gate and every fetch succeeded, so the gate runs alongside the vm_state, manifest, image-config and tools-drive fetches; materialization skips its own HEADs because the gate checks them. The tools drive is not gated on restore: restore downloads it and checks its digest, so it is never read lazily.
+The gate (rule N1) makes no request when every needed digest was verified by an earlier gate and the lease holding it was written successfully less than 12 hours ago (boot clock). Otherwise it makes the digests durable in the node's lease (at most one coalesced PUT), lists `layer-gc/intents/` once and reads each listed intent (16 concurrent), sleeps 120 s only when an intent names a needed digest, HEADs the unverified digests (16 concurrent, stopping at the first error) and marks them verified. Every request has a 15 s timeout. Lease writes are single-flight: a gate that finds its digests not yet durable takes the outcome of the next write that starts after it registered them, so during a store brownout concurrent restores and publications fail together after at most the write in flight and one more write, instead of queueing one write each. The whole gate has a 45 s deadline, extended by the 120 s intent wait only when an intent names a needed digest, so a gate fails after at most 45 s (165 s with an intent wait). A cancelled gate (deadline or dropped request) abandons the lease key of a write it left in flight, like a failed write. In a restore, nothing reads a managed layer before the resolve returns, and the resolve returns only after the gate and every fetch succeeded, so the gate runs alongside the vm_state, manifest, image-config and tools-drive fetches; materialization skips its own HEADs because the gate checks them. The tools drive is not gated on restore: restore downloads it and checks its digest, so it is never read lazily.
 
 ## What keeps a layer
 
@@ -49,7 +49,7 @@ A pass P deletes `managed-layers/{d}` only if all of these hold. `T0` is the `La
 | G5 | `T_end - T0 <= 30 min - 1 s`, so the catalog listing and the end of the final lease read are at most 30 minutes apart. | Object store |
 | G6 | Both lease reads found only live leases declaring `mode = "delete"`, and every catalog record parsed. Otherwise the pass degrades to a report pass: no intent (or its intent is removed) and no DELETE, outcome `degraded`. | — |
 
-After its DELETEs, P removes its intent at once when every issued DELETE succeeded; when one failed or timed out it keeps the intent until 120 s after the intent write was acknowledged (boot clock), then removes it. A pass that is interrupted keeps it; any runner removes intents at least 10 minutes old (object-store time).
+After its DELETEs, P removes its intent at once only when it issued none; otherwise it keeps the intent until 120 s after the intent write was acknowledged (boot clock), then removes it. A DELETE reported as successful does not prove that no earlier attempt of it (a client retry after a connection error) is still in flight, so success does not shorten the hold. A pass that is interrupted keeps it; any runner removes intents at least 10 minutes old (object-store time).
 
 Node rules, in `delete` mode only:
 
@@ -62,13 +62,13 @@ Assumptions:
 
 - **A1.** The store has strong read-after-write and list-after-write consistency (AWS S3 since December 2020, Alibaba Cloud OSS). A weaker S3-compatible store voids the argument.
 - **A2 (rollout precondition).** While any process runs `delete` on a bucket and prefix, every other process that reads its managed layers runs this release in `delete`, or in `report` with a live lease (which makes every delete pass degrade). `off` processes, older releases and other tools (`aenv-snapshot-image`) are invisible to the GC and must be excluded operationally; see Rollout.
-- **A3.** A DELETE lands, if at all, within 60 s after its 15 s client timeout. SigV4's 15-minute request validity bounds the worst case.
+- **A3.** A DELETE, including every retry attempt the client makes inside its 15 s timeout, lands, if at all, within 60 s after that timeout. SigV4's 15-minute request validity bounds the worst case.
 - **A4 (liveness).** A delete-mode process rewrites its lease at least every 24 h. Alerted on at 2 h and 6 h.
 - **A5.** `LastModified` has whole-second precision; every object-store comparison carries 1 s of slack.
 
 Suppose P deletes `d` at time `x`.
 
-1. **Gated readers.** Let R trust `d`, with `d` durable in R's lease from `t_L` (A4 keeps that key live). If `t_L` is before P's final listing began, that listing read R's lease after `t_L` and found `d` (whatever late write lands under the key, it still carries `d`), so P skipped `d`. Otherwise `t_L` is after P's intent was committed, and R's intent listing at `L > t_L` either saw P's intent, so R HEADed `d` at least 120 s after `I_lm`, by which time every DELETE of P had landed (issued within 45 s of `I_lm`, timed out within 15 s more, landed within 60 s more by A3); or did not see it, because P removed it after all its DELETEs succeeded (before R's HEAD) or no earlier than 120 s after the intent write (after every landing). Either way R's HEAD observes the deletion and R refuses `d`. If R trusted `d` because it was verified, apply the same argument to the N1 run that verified it.
+1. **Gated readers.** Let R trust `d`, with `d` durable in R's lease from `t_L` (A4 keeps that key live). If `t_L` is before P's final listing began, that listing read R's lease after `t_L` and found `d` (whatever late write lands under the key, it still carries `d`), so P skipped `d`. Otherwise `t_L` is after P's intent was committed, and R's intent listing at `L > t_L` either saw P's intent, so R HEADed `d` at least 120 s after `I_lm`, by which time every DELETE of P had landed (issued within 45 s of `I_lm`, timed out within 15 s more, landed within 60 s more by A3); or did not see it, because P issued no DELETE or removed it no earlier than 120 s after the intent write (after every landing). Either way R's HEAD observes the deletion and R refuses `d`. If R trusted `d` because it was verified, apply the same argument to the N1 run that verified it.
 2. **Records.** Let a committed record naming `d` exist at `x`. If it existed when P listed the catalog, P read `d` (G2). Otherwise it was written later by a publisher that, by A2 and G6, gates (a report-mode publisher has a live report lease, and P would have degraded). The publication made `d` durable at `t_P` before the record write `w` and held it until at least `w + 2 h`; P's final lease read ended at most 30 minutes after the catalog listing (G5), which is before `w + 2 h`. If `t_P` precedes P's final listing, P saw `d`; otherwise the publication's gate ran after it and, as in step 1, observed the deletion and failed before the record was written.
 3. **Formats and grace.** Unparsed records degrade the pass (G6); unknown fields in parsed records are covered by the raw scan; a committed record naming no digest aborts the pass. G1 is not needed for steps 1 and 2; it covers multipart uploads in progress (their `LastModified` is the initiation time) and writers outside the protocol.
 
@@ -123,9 +123,9 @@ Every pass logs `snapshot layer gc pass complete` (warn on abort) with mode, run
 
 Metrics on the node's `/metrics`:
 
-- `agentenv_snapshot_layer_lease_age_seconds`: boot-clock seconds since this process's last successful lease write; normally under one hour.
-- `agentenv_snapshot_layer_lease_writes_total{reason,outcome}`, `agentenv_snapshot_layer_lease_digests`
-- `agentenv_snapshot_layer_gate_seconds{path,outcome}` and `agentenv_snapshot_layer_gate_failures_total{path,reason}` for `path` in `restore`, `publish`, `startup`, `resume` (delete mode only)
+- `agentenv_snapshot_layer_lease_age_seconds`: boot-clock seconds since this process's last successful lease write, or since it started when it has none yet (so a process that never wrote its lease alerts too); normally under one hour.
+- `agentenv_snapshot_layer_lease_writes_total{reason,outcome}` (`reason` in `grow`, `shrink`, `liveness`, `cancelled`), `agentenv_snapshot_layer_lease_digests`
+- `agentenv_snapshot_layer_gate_seconds{path,outcome}` and `agentenv_snapshot_layer_gate_failures_total{path,reason}` (`reason` in `lease`, `timeout`, `check`, `missing`) for `path` in `restore`, `publish`, `startup`, `resume` (delete mode only)
 - `agentenv_snapshot_layer_intent_waits_total{path}`
 - `agentenv_snapshot_layer_gc_passes_total{mode,outcome}` with `outcome` in `ok`, `degraded`, `skipped`, `aborted`
 - `agentenv_snapshot_layer_gc_non_gating_leases`
@@ -141,6 +141,7 @@ Recommended alerts:
 | --- | --- |
 | `agentenv_snapshot_layer_lease_age_seconds > 7200` for 15 min | Warn |
 | `agentenv_snapshot_layer_lease_age_seconds > 21600` (6 h, well under the 24 h TTL) | Page |
+| `agentenv_snapshot_layer_lease_writes_total{outcome="error"}` increasing for 15 min with no `outcome="ok"` increase | Warn |
 | Restore gate p99 above the cold-restore budget, or gate failures for 15 min | Ticket |
 | Three consecutive `aborted` passes | Ticket |
 | `degraded` passes more than 48 h after enabling `delete` | Ticket |

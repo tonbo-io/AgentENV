@@ -64,6 +64,11 @@ pub(crate) const LEASE_TAIL: Duration = Duration::from_secs(2 * 60 * 60);
 pub(crate) const INTENT_WAIT: Duration = Duration::from_secs(120);
 /// D_req: timeout of every lease, intent, existence-check and GC request.
 pub(crate) const STORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Overall bound of one gate, not counting the [`INTENT_WAIT`] sleep. Lease
+/// writes are single-flight, so a gate waits for at most the write in
+/// flight and one more write (2 × 15 s) and then lists and reads intents
+/// and checks layers.
+pub(crate) const GATE_TIMEOUT: Duration = Duration::from_secs(45);
 
 const LEASE_STALE_ERROR_AGE: Duration = Duration::from_secs(60 * 60);
 /// How often one unreadable, unrecorded runtime image config is logged.
@@ -222,6 +227,11 @@ struct LeaseState {
     /// since.
     verified: HashSet<String>,
     last_success: Option<BootInstant>,
+    /// Number of lease writes started so far (single-flight ticket).
+    writes_started: u64,
+    /// Ticket and error of the last write if it failed; `None` after a
+    /// success or a cancelled write.
+    last_failure: Option<(u64, String)>,
     shrink_pending_since: Option<BootInstant>,
     /// When each unreadable, unrecorded runtime image config was last logged.
     unreadable_warned: HashMap<PathBuf, BootInstant>,
@@ -239,6 +249,8 @@ impl LeaseState {
             inflight: None,
             verified: HashSet::new(),
             last_success: None,
+            writes_started: 0,
+            last_failure: None,
             shrink_pending_since: None,
             unreadable_warned: HashMap::new(),
         }
@@ -288,6 +300,57 @@ impl LeaseState {
     fn start_tail(&mut self, digest: String, now: BootInstant) {
         self.tail.insert(digest, now);
     }
+
+    /// A write of `attempted` failed or was cancelled, so it may still land
+    /// later and replace the key's content with the attempted set. Abandon
+    /// the key: the next write goes to a new key. Whatever lands, the
+    /// abandoned key still holds every digest that both its last content and
+    /// the attempted set carry, until that last success is LEASE_TTL old;
+    /// `last_success` (and so the freshness bound) stays with it.
+    fn abandon_key(&mut self, attempted: &BTreeSet<String>) {
+        self.inflight = None;
+        self.durable = self
+            .durable
+            .take()
+            .map(|durable| durable.intersection(attempted).cloned().collect());
+        self.verified.retain(|digest| attempted.contains(digest));
+        self.generation += 1;
+    }
+}
+
+/// A lease write between its start and its outcome. Dropped before
+/// [`disarm`](Self::disarm) (the write's future was cancelled, for example
+/// by a gate deadline or a dropped request), it treats the write as failed:
+/// the PUT may still land.
+struct PendingWrite<'a> {
+    state: &'a Mutex<LeaseState>,
+    attempted: Option<BTreeSet<String>>,
+}
+
+impl PendingWrite<'_> {
+    fn disarm(mut self) -> BTreeSet<String> {
+        self.attempted.take().unwrap_or_default()
+    }
+}
+
+impl Drop for PendingWrite<'_> {
+    fn drop(&mut self) {
+        if let Some(attempted) = self.attempted.take() {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.abandon_key(&attempted);
+            // Not a store failure: waiters queued behind it write themselves.
+            state.last_failure = None;
+            metrics::counter!(
+                "agentenv_snapshot_layer_lease_writes_total",
+                "reason" => "cancelled",
+                "outcome" => "error",
+            )
+            .increment(1);
+        }
+    }
 }
 
 /// Lease registry of one node process in `report` or `delete` mode.
@@ -302,9 +365,13 @@ pub(crate) struct LayerLeases {
     /// managed lowers apart from local and foreign ones.
     managed_layers_repo_blob_url: String,
     state: Mutex<LeaseState>,
-    /// Serializes lease writes; callers queued behind a write re-check
-    /// whether it already covered them (coalescing).
+    /// Serializes lease writes. Writes are single-flight: a gate takes the
+    /// outcome of any write that started after it registered its digests
+    /// instead of issuing its own.
     writer: tokio::sync::Mutex<()>,
+    /// Boot-clock start, reported as the lease age until the first
+    /// successful write.
+    started: BootInstant,
     /// Wakes the refresher when the live set grew.
     refresh_notify: Notify,
 }
@@ -360,6 +427,7 @@ impl LayerLeases {
             managed_layers_repo_blob_url: managed_layers_repo_blob_url.to_string(),
             state: Mutex::new(LeaseState::new()),
             writer: tokio::sync::Mutex::new(()),
+            started: BootInstant::now(),
             refresh_notify: Notify::new(),
         }))
     }
@@ -484,20 +552,39 @@ impl LayerLeases {
         if unverified.is_empty() {
             return Ok((GateOutcome::Fast, BTreeSet::new()));
         }
-        self.ensure_durable(digests)
+        // Cancelling a lease write is safe (`PendingWrite`), so one deadline
+        // bounds the whole gate; only the intent wait extends it.
+        let mut deadline = tokio::time::Instant::now() + GATE_TIMEOUT;
+        let named = tokio::time::timeout_at(deadline, async {
+            self.ensure_durable(digests).await?;
+            self.intents_name_any(&unverified).await
+        })
+        .await
+        .map_err(|_| LayerCheckError::Timeout)?
+        .map_err(LayerCheckError::Protect)?;
+        if named {
+            metrics::counter!(
+                "agentenv_snapshot_layer_intent_waits_total",
+                "path" => path.as_str(),
+            )
+            .increment(1);
+            info!(
+                path = path.as_str(),
+                wait_secs = INTENT_WAIT.as_secs(),
+                "managed layers are named by a GC deletion intent; waiting out its deletion window before checking them"
+            );
+            tokio::time::sleep(INTENT_WAIT).await;
+            deadline += INTENT_WAIT;
+        }
+        let missing = tokio::time::timeout_at(deadline, check_present(&self.store, &unverified))
             .await
-            .map_err(LayerCheckError::Protect)?;
-        let waited = self
-            .wait_for_intents(&unverified, path)
-            .await
-            .map_err(LayerCheckError::Protect)?;
-        let missing = check_present(&self.store, &unverified).await?;
+            .map_err(|_| LayerCheckError::Timeout)??;
         let present = unverified
             .difference(&missing)
             .cloned()
             .collect::<BTreeSet<_>>();
         self.mark_verified(&present);
-        let outcome = if waited {
+        let outcome = if named {
             GateOutcome::IntentWait
         } else {
             GateOutcome::Cold
@@ -740,21 +827,42 @@ impl LayerLeases {
             .collect())
     }
 
+    /// Make `required` durable in a fresh lease. The caller registered the
+    /// digests in the live set first, so any write that starts after this
+    /// call carries them. Writes are single-flight: when a write that
+    /// started after this call failed, its error is returned rather than
+    /// queueing another write, so concurrent gates during a store brownout
+    /// fail together after at most the write in flight and one more.
     async fn ensure_durable(&self, required: &BTreeSet<String>) -> Result<()> {
-        if self
-            .lock_state()
-            .durable_and_fresh(required, BootInstant::now())
-        {
-            return Ok(());
-        }
+        let ticket = {
+            let state = self.lock_state();
+            if state.durable_and_fresh(required, BootInstant::now()) {
+                return Ok(());
+            }
+            state.writes_started
+        };
         let _writer = self.writer.lock().await;
-        if self
-            .lock_state()
-            .durable_and_fresh(required, BootInstant::now())
         {
-            return Ok(());
+            let state = self.lock_state();
+            if state.durable_and_fresh(required, BootInstant::now()) {
+                return Ok(());
+            }
+            // Every started write has finished while the writer is held.
+            if let Some((_, error)) = state
+                .last_failure
+                .as_ref()
+                .filter(|(started, _)| *started > ticket)
+            {
+                return Err(anyhow::anyhow!("managed-layer lease write failed: {error}"));
+            }
         }
-        self.write_locked(WriteReason::Grow).await
+        self.write_locked(WriteReason::Grow).await?;
+        anyhow::ensure!(
+            self.lock_state()
+                .durable_and_fresh(required, BootInstant::now()),
+            "managed-layer lease write did not carry every required digest"
+        );
+        Ok(())
     }
 
     /// Write the lease now and return its key. Used by the GC to obtain the
@@ -775,9 +883,11 @@ impl LayerLeases {
             let state = &mut *guard;
             let live = state.live_set(now);
             let age = state.last_success.map(|last| now.duration_since(last));
-            if let Some(age) = age {
-                metrics::gauge!("agentenv_snapshot_layer_lease_age_seconds").set(age.as_secs_f64());
-            }
+            // Until the first successful write, report the age since start,
+            // so a process that never wrote its lease still alerts.
+            let reported_age = age.unwrap_or_else(|| now.duration_since(self.started));
+            metrics::gauge!("agentenv_snapshot_layer_lease_age_seconds")
+                .set(reported_age.as_secs_f64());
             // Only a strict shrink that persists starts or keeps the debounce.
             if !state
                 .durable
@@ -847,16 +957,22 @@ impl LayerLeases {
     /// Write the current live set. The caller holds `self.writer`.
     async fn write_locked(&self, reason: WriteReason) -> Result<()> {
         let now = BootInstant::now();
-        let (key, digests, last_success) = {
+        let (key, digests, last_success, ticket) = {
             let mut guard = self.lock_state();
             let state = &mut *guard;
             let digests = state.live_set(now);
             state.inflight = Some(digests.clone());
+            state.writes_started += 1;
             (
                 OssSnapshotArtifactLayout::layer_lease_key(&self.owner, state.generation),
                 digests,
                 state.last_success,
+                state.writes_started,
             )
+        };
+        let pending = PendingWrite {
+            state: &self.state,
+            attempted: Some(digests.clone()),
         };
         let document = LeaseDocument {
             version: LEASE_DOCUMENT_VERSION,
@@ -865,13 +981,16 @@ impl LayerLeases {
             mode: self.mode.as_str().to_string(),
             digests: digests.iter().cloned().collect(),
         };
-        let body = serde_json::to_vec(&document).context("serialize managed-layer lease")?;
-        let result = with_timeout(
-            "managed-layer lease write",
-            self.store.put_object(&key, body.into()),
-        )
-        .await
-        .with_context(|| format!("write managed-layer lease '{key}'"));
+        let result = match serde_json::to_vec(&document).context("serialize managed-layer lease") {
+            Ok(body) => with_timeout(
+                "managed-layer lease write",
+                self.store.put_object(&key, body.into()),
+            )
+            .await
+            .with_context(|| format!("write managed-layer lease '{key}'")),
+            Err(error) => Err(error),
+        };
+        let digests = pending.disarm();
         let outcome = if result.is_ok() { "ok" } else { "error" };
         metrics::counter!(
             "agentenv_snapshot_layer_lease_writes_total",
@@ -884,6 +1003,7 @@ impl LayerLeases {
         state.inflight = None;
         match result {
             Ok(()) => {
+                state.last_failure = None;
                 state.verified.retain(|digest| digests.contains(digest));
                 metrics::gauge!("agentenv_snapshot_layer_lease_digests").set(digests.len() as f64);
                 metrics::gauge!("agentenv_snapshot_layer_lease_age_seconds").set(0.0);
@@ -899,19 +1019,9 @@ impl LayerLeases {
                 Ok(())
             }
             Err(error) => {
-                // A failed (for example timed-out) write may still land later
-                // and replace the key's content with the attempted set.
-                // Abandon the key: the next write goes to a new key. Whatever
-                // lands, the abandoned key still holds every digest that both
-                // its last content and the attempted set carry, until that
-                // last success is LEASE_TTL old; `last_success` (and so the
-                // freshness bound) stays with it.
-                state.durable = state
-                    .durable
-                    .take()
-                    .map(|durable| durable.intersection(&digests).cloned().collect());
-                state.verified.retain(|digest| digests.contains(digest));
-                state.generation += 1;
+                // A failed (for example timed-out) write may still land later.
+                state.abandon_key(&digests);
+                state.last_failure = Some((ticket, format!("{error:#}")));
                 drop(guard);
                 let age = last_success.map(|last| now.duration_since(last));
                 if age.is_none_or(|age| age >= LEASE_STALE_ERROR_AGE) {
@@ -935,12 +1045,11 @@ impl LayerLeases {
         }
     }
 
-    /// List GC intents and wait out the deletion window when one of them
-    /// names any of `digests`. Returns whether it waited. An intent counts
-    /// however old it is: a runner removes its intent after its deletes (or
-    /// after holding it for [`INTENT_WAIT`] when one failed), and any runner
+    /// List GC intents and report whether one of them names any of
+    /// `digests`. An intent counts however old it is: a runner removes its
+    /// intent [`INTENT_WAIT`] after it was acknowledged, and any runner
     /// removes intents left by crashed passes once they are 10 minutes old.
-    async fn wait_for_intents(&self, digests: &BTreeSet<String>, path: GatePath) -> Result<bool> {
+    async fn intents_name_any(&self, digests: &BTreeSet<String>) -> Result<bool> {
         let intents = with_timeout(
             "list managed-layer GC intents",
             self.store.list_objects(LAYER_GC_INTENTS_PREFIX),
@@ -969,21 +1078,7 @@ impl LayerLeases {
             .buffer_unordered(INTENT_READ_CONCURRENCY)
             .try_collect::<Vec<bool>>()
             .await?;
-        if !named.into_iter().any(|named| named) {
-            return Ok(false);
-        }
-        metrics::counter!(
-            "agentenv_snapshot_layer_intent_waits_total",
-            "path" => path.as_str(),
-        )
-        .increment(1);
-        info!(
-            path = path.as_str(),
-            wait_secs = INTENT_WAIT.as_secs(),
-            "managed layers are named by a GC deletion intent; waiting out its deletion window before checking them"
-        );
-        tokio::time::sleep(INTENT_WAIT).await;
-        Ok(true)
+        Ok(named.into_iter().any(|named| named))
     }
 
     #[cfg(test)]
@@ -1007,6 +1102,9 @@ impl LayerLeases {
 pub(crate) enum LayerCheckError {
     /// The lease could not be made durable or the intents could not be read.
     Protect(anyhow::Error),
+    /// The gate did not finish within [`GATE_TIMEOUT`] (plus the intent
+    /// wait).
+    Timeout,
     /// The existence check itself failed.
     Check {
         digest: String,
@@ -1020,6 +1118,7 @@ impl LayerCheckError {
     fn reason(&self) -> &'static str {
         match self {
             Self::Protect(_) => "lease",
+            Self::Timeout => "timeout",
             Self::Check { .. } => "check",
             Self::Missing { .. } => "missing",
         }
@@ -1030,6 +1129,11 @@ impl fmt::Display for LayerCheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Protect(error) => write!(f, "lease managed layers: {error:#}"),
+            Self::Timeout => write!(
+                f,
+                "managed-layer gate timed out after {}s",
+                GATE_TIMEOUT.as_secs()
+            ),
             Self::Check { digest, error } => {
                 write!(f, "check managed layer '{digest}': {error:#}")
             }
@@ -1345,6 +1449,95 @@ mod tests {
             .expect_err("check error");
         assert!(matches!(error, LayerCheckError::Check { .. }), "{error}");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_gates_share_a_failed_write_instead_of_writing_one_by_one() {
+        let store = Arc::new(FakeLayerStore::new());
+        put_layers(&store, &[1, 2, 3, 4, 5]);
+        let leases = gating(&store);
+        store.fail(OpKind::Put, LAYER_GC_LEASES_PREFIX_FOR_TESTS);
+        store.set_latency(
+            OpKind::Put,
+            LAYER_GC_LEASES_PREFIX_FOR_TESTS,
+            Duration::from_secs(10),
+        );
+        let started = Instant::now();
+        let gates = (1..=5)
+            .map(|index| {
+                let leases = Arc::clone(&leases);
+                tokio::spawn(async move {
+                    let held = digests(&[index]);
+                    let guard = leases.hold(held.clone());
+                    let outcome = leases.gate(&held, GatePath::Restore).await;
+                    (guard, outcome)
+                })
+            })
+            .collect::<Vec<_>>();
+        for gate in gates {
+            let (_guard, outcome) = gate.await.unwrap();
+            assert!(
+                matches!(outcome, Err(LayerCheckError::Protect(_))),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(
+            count(&store, OpKind::Put),
+            2,
+            "the write in flight plus one shared write"
+        );
+        assert!(started.elapsed() <= Duration::from_secs(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_lease_write_abandons_its_key() {
+        let store = Arc::new(FakeLayerStore::new());
+        put_layers(&store, &[1]);
+        let leases = gating(&store);
+        let first_key = leases.lease_key();
+        let mut pause = store.pause(OpKind::Put, LAYER_GC_LEASES_PREFIX_FOR_TESTS);
+        let held = digests(&[1]);
+        let _guard = leases.hold(held.clone());
+        let gate = tokio::spawn({
+            let leases = Arc::clone(&leases);
+            let held = held.clone();
+            async move { leases.gate(&held, GatePath::Restore).await }
+        });
+        pause.reached().await;
+        gate.abort();
+        assert!(gate.await.unwrap_err().is_cancelled());
+        assert_ne!(
+            leases.lease_key(),
+            first_key,
+            "a cancelled PUT may still land, so its key is abandoned"
+        );
+        pause.release();
+        assert_eq!(
+            leases.gate(&held, GatePath::Restore).await.unwrap(),
+            GateOutcome::Cold
+        );
+        assert_eq!(lease_body(&store, &leases), held);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_gate_is_bounded_by_its_deadline() {
+        let store = Arc::new(FakeLayerStore::new());
+        put_layers(&store, &[1]);
+        intent_naming(&store, "other-pass", &digests(&[9]));
+        let leases = gating(&store);
+        for kind in [OpKind::Put, OpKind::List, OpKind::Get, OpKind::Stat] {
+            store.set_latency(kind, "", Duration::from_secs(14));
+        }
+        let held = digests(&[1]);
+        let _guard = leases.hold(held.clone());
+        let started = Instant::now();
+        let error = leases
+            .gate(&held, GatePath::Restore)
+            .await
+            .expect_err("deadline");
+        assert!(matches!(error, LayerCheckError::Timeout), "{error}");
+        assert!(started.elapsed() >= GATE_TIMEOUT);
+        assert!(started.elapsed() < GATE_TIMEOUT + Duration::from_secs(1));
     }
 
     #[tokio::test(start_paused = true)]

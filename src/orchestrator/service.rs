@@ -124,12 +124,6 @@ pub struct Orchestrator<
     /// modes). `None` otherwise, and then none of the layer-retention work
     /// below runs.
     layer_retention: Option<Arc<dyn SnapshotLayerRetention>>,
-    /// Gating retention only: paused sandboxes restored from local
-    /// persistence whose repository layers have not been verified since this
-    /// process started. A background task verifies them after startup; a
-    /// resume of one still listed verifies it first and fails cleanly while
-    /// a layer is missing. Entries are only ever removed.
-    unverified_paused_layers: std::sync::Mutex<HashSet<SandboxId>>,
     access_tokens: SandboxAccessTokenGenerator,
 }
 
@@ -272,27 +266,17 @@ where
             shutdown_outcome: OnceCell::new(),
             image_refs,
             layer_retention,
-            unverified_paused_layers: std::sync::Mutex::new(HashSet::new()),
             access_tokens,
         });
 
-        // Layer retention never delays serving. With gating retention every
-        // restored paused sandbox starts unverified and is verified in the
-        // background; a resume that gets there first verifies its own
+        // Layer retention never delays serving. With gating retention the
+        // restored paused sandboxes are verified in the background, which
+        // warms the gate for their resumes; every resume still gates its own
         // sandbox. Until this process's lease is written the previous
         // process's lease still covers them for its TTL.
         if let Some(retention) = orchestrator.layer_retention.clone() {
             if retention.is_gating() && !restored_paused.is_empty() {
-                orchestrator
-                    .unverified_paused_layers
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .extend(restored_paused.iter().map(|(sandbox_id, _)| *sandbox_id));
-                Self::spawn_verify_restored_paused_layers(
-                    Arc::downgrade(&orchestrator),
-                    retention,
-                    restored_paused.clone(),
-                );
+                Self::spawn_verify_restored_paused_layers(retention, restored_paused.clone());
             }
             Self::start_layer_retention_task(
                 Arc::clone(&orchestrator),
@@ -401,11 +385,9 @@ where
 
     /// Startup half of rule N1 for persisted paused sandboxes (gating
     /// retention): verify every restored paused sandbox's repository layers
-    /// in one batch, off the serving path, and clear the verified ones from
-    /// `unverified_paused_layers`. Sandboxes with a missing layer, or all of
-    /// them when the check fails, stay listed and verify again on resume.
+    /// in one batch, off the serving path. This only warms the gate and logs
+    /// sandboxes whose layers are missing; each resume gates again.
     fn spawn_verify_restored_paused_layers(
-        orchestrator: std::sync::Weak<Self>,
         retention: Arc<dyn SnapshotLayerRetention>,
         restored_paused: Vec<(SandboxId, Arc<dyn PausedSandboxState>)>,
     ) {
@@ -438,30 +420,23 @@ where
                     return;
                 }
             };
-            let Some(orchestrator) = orchestrator.upgrade() else {
-                return;
-            };
-            let mut unverified = orchestrator
-                .unverified_paused_layers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
             for (sandbox_id, paths) in &configs {
                 if paths.iter().any(|path| missing.contains(path)) {
                     warn!(
                         sandbox_id = %sandbox_id,
                         "persisted paused sandbox reads a missing repository layer; its resume fails until the layer is present"
                     );
-                } else {
-                    unverified.remove(sandbox_id);
                 }
             }
         });
     }
 
-    /// Resume half of rule N1 (gating retention): before a persisted paused
-    /// sandbox that is still unverified resumes, verify its layers and refuse
-    /// to resume while one is missing.
-    async fn check_persisted_paused_layers(
+    /// Resume half of rule N1 (gating retention): before any paused sandbox
+    /// resumes, gate its repository layers and refuse to resume while one is
+    /// missing. Layers verified earlier and held in a fresh lease need no
+    /// request; after 12 hours without a successful lease write the gate
+    /// checks again and fails closed when it cannot.
+    async fn gate_paused_layers(
         &self,
         sandbox_id: SandboxId,
         paused_state: Option<&Arc<dyn PausedSandboxState>>,
@@ -473,12 +448,7 @@ where
         else {
             return Ok(());
         };
-        let unverified = self
-            .unverified_paused_layers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(&sandbox_id);
-        let Some(paused_state) = paused_state.filter(|_| unverified) else {
+        let Some(paused_state) = paused_state else {
             return Ok(());
         };
         let failed = |source: anyhow::Error| OrchestratorError::SandboxOperationFailed {
@@ -505,10 +475,6 @@ where
                     .join(", ")
             )));
         }
-        self.unverified_paused_layers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&sandbox_id);
         Ok(())
     }
 
@@ -1741,7 +1707,7 @@ where
                 node_mode,
             });
         }
-        self.check_persisted_paused_layers(sandbox_id, metadata.paused_state.as_ref())
+        self.gate_paused_layers(sandbox_id, metadata.paused_state.as_ref())
             .await?;
 
         match self

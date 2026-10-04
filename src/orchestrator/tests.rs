@@ -121,7 +121,6 @@ fn make_orchestrator_without_background_with_factory_and_persister<
         shutdown_outcome: tokio::sync::OnceCell::new(),
         image_refs: test_runtime_image_refs(),
         layer_retention: None,
-        unverified_paused_layers: StdMutex::new(std::collections::HashSet::new()),
         access_tokens: SandboxAccessTokenGenerator::new("orchestrator-test-seed").unwrap(),
     })
 }
@@ -1460,18 +1459,6 @@ async fn orchestrator_with_persisted_paused_sandbox(
     .await
 }
 
-fn unverified_paused(
-    orchestrator: &Orchestrator<InMemoryMetadataStore, MockBackendFactory, RecordingPersister>,
-) -> Vec<SandboxId> {
-    orchestrator
-        .unverified_paused_layers
-        .lock()
-        .unwrap()
-        .iter()
-        .copied()
-        .collect()
-}
-
 /// Wait (in real time) for background layer-retention work.
 async fn eventually(mut condition: impl FnMut() -> bool) {
     for _ in 0..200 {
@@ -1508,7 +1495,7 @@ async fn gating_retention_verifies_paused_layers_in_the_background_and_sees_runn
     )
     .await?;
 
-    eventually(|| unverified_paused(&orchestrator).is_empty()).await;
+    eventually(|| retention.verify_calls() == 1).await;
     assert!(retention.calls().contains(&LayerRetentionCall::Verify(
         crate::snapshot::repository::PersistedLayerCheck::Startup,
         paused_configs(&paused_dir)
@@ -1565,7 +1552,6 @@ async fn a_blocked_startup_verification_never_delays_serving_and_resume_verifies
         Some(Arc::clone(&retention)),
     )
     .await?;
-    assert_eq!(unverified_paused(&orchestrator), vec![paused_id]);
 
     let _ = orchestrator
         .resume_sandbox(paused_id, NewTimeout::None)
@@ -1574,7 +1560,6 @@ async fn a_blocked_startup_verification_never_delays_serving_and_resume_verifies
         crate::snapshot::repository::PersistedLayerCheck::Resume,
         paused_configs(&paused_dir)
     )));
-    assert!(unverified_paused(&orchestrator).is_empty());
     Ok(())
 }
 
@@ -1594,11 +1579,6 @@ async fn persisted_paused_sandbox_with_a_missing_layer_fails_resume_cleanly_unti
     )
     .await?;
     eventually(|| retention.verify_calls() == 1).await;
-    assert_eq!(
-        unverified_paused(&orchestrator),
-        vec![paused_id],
-        "a missing layer keeps the sandbox unverified"
-    );
 
     let error = orchestrator
         .resume_sandbox(paused_id, NewTimeout::None)
@@ -1628,26 +1608,17 @@ async fn persisted_paused_sandbox_with_a_missing_layer_fails_resume_cleanly_unti
         "a refused resume leaves the sandbox paused"
     );
 
-    // Once the layer is present again the check passes and is not repeated.
+    // Once the layer is present again the check passes.
     retention.set_missing(Vec::new());
     let _ = orchestrator
         .resume_sandbox(paused_id, NewTimeout::None)
         .await;
     assert_eq!(retention.verify_calls(), 3);
-    let _ = orchestrator
-        .resume_sandbox(paused_id, NewTimeout::None)
-        .await;
-    assert_eq!(
-        retention.verify_calls(),
-        3,
-        "verified layers are not re-checked"
-    );
     Ok(())
 }
 
 #[tokio::test]
-async fn persisted_paused_sandbox_verified_at_startup_resumes_without_a_second_check() -> Result<()>
-{
+async fn persisted_paused_sandbox_verified_at_startup_is_gated_again_on_resume() -> Result<()> {
     setup();
     let paused_id = SandboxId::new();
     let paused_dir = PathBuf::from("/persisted/verified");
@@ -1659,11 +1630,17 @@ async fn persisted_paused_sandbox_verified_at_startup_resumes_without_a_second_c
         Some(Arc::clone(&retention)),
     )
     .await?;
-    eventually(|| unverified_paused(&orchestrator).is_empty()).await;
+    eventually(|| retention.verify_calls() == 1).await;
     let _ = orchestrator
         .resume_sandbox(paused_id, NewTimeout::None)
         .await;
-    assert_eq!(retention.verify_calls(), 1, "startup verified the layers");
+    // The gate's fast path makes this free while the lease is fresh; after
+    // 12 hours without a successful lease write it fails closed.
+    assert_eq!(
+        retention.verify_calls(),
+        2,
+        "every resume gates, even after startup verified the layers"
+    );
     Ok(())
 }
 
@@ -1680,7 +1657,6 @@ async fn report_mode_retention_and_no_retention_never_gate_startup_or_resume() -
         Some(Arc::clone(&report)),
     )
     .await?;
-    assert!(unverified_paused(&orchestrator).is_empty());
     let _ = orchestrator
         .resume_sandbox(paused_id, NewTimeout::None)
         .await;
@@ -1700,7 +1676,6 @@ async fn report_mode_retention_and_no_retention_never_gate_startup_or_resume() -
     )
     .await?;
     assert!(orchestrator.layer_retention.is_none());
-    assert!(unverified_paused(&orchestrator).is_empty());
     orchestrator.refresh_layer_retention().await;
     Ok(())
 }
