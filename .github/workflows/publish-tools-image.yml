@@ -12,7 +12,7 @@ on:
 jobs:
   validate:
     name: Validate publication
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ubuntu-24.04
     outputs:
       envd_repository: ${{ steps.envd_source.outputs.repository }}
       envd_ref: ${{ steps.envd_source.outputs.ref }}
@@ -64,10 +64,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: depot-ubuntu-24.04-8
+          - os: ubuntu-24.04
             platform: linux/amd64
             arch: amd64
-          - os: depot-ubuntu-24.04-arm-8
+          - os: ubuntu-24.04-arm
             platform: linux/arm64
             arch: arm64
     steps:
@@ -101,7 +101,7 @@ jobs:
   publish-manifest:
     name: Publish multi-platform manifest
     needs: publish-images
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ubuntu-24.04
     permissions:
       packages: write
     steps:

@@ -34,8 +34,7 @@ permissions:
 
 jobs:
   agentenv-tests:
-    # VM host exception: Depot Actions runners do not guarantee KVM/ublk.
-    # Retire this exception when their runner contract provides both devices.
+    # GitHub-hosted 22.04 provides both KVM and ublk.
     # Ubuntu 24.04's Linux 6.17 kernel can crash in ublk ADD_DEV.
     runs-on: ubuntu-22.04
     steps:
@@ -65,7 +64,7 @@ jobs:
 
   e2e-tests:
     name: e2e-tests (${{ matrix.e2e_name }})
-    # Use the same KVM/ublk host exception as agentenv-tests above.
+    # GitHub-hosted 22.04, as agentenv-tests above.
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false

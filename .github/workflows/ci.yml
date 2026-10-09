@@ -39,7 +39,7 @@ on:
 
 jobs:
   guest-init:
-    runs-on: depot-ubuntu-22.04-8
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -57,7 +57,7 @@ jobs:
         run: make -C tools-image build TOOLS_VERSION=0.0.0-ci ARCH=amd64 OUTPUT_DIR="${{ runner.temp }}/agentenv-tools" BUILDX_CACHE_ARGS="--cache-from type=gha,scope=tools-image-amd64 --cache-to type=gha,scope=tools-image-amd64,mode=max,ignore-error=true"
 
   fmt:
-    runs-on: depot-ubuntu-22.04-8
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-ci-setup
@@ -68,7 +68,7 @@ jobs:
         run: make fmt
 
   clippy:
-    runs-on: depot-ubuntu-22.04-8
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-ci-setup
@@ -78,9 +78,9 @@ jobs:
         run: make clippy
 
   unit-tests:
-    # ublk_drv loads on Depot's Ubuntu 24.04 image (kernel 6.12); the 22.04
-    # image does not ship it.
-    runs-on: depot-ubuntu-24.04-8
+    # GitHub's Ubuntu 24.04 kernel (6.17) can crash in ublk ADD_DEV; its 22.04
+    # image ships ublk_drv, as the integration tests rely on.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-ci-setup
